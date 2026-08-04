@@ -188,18 +188,29 @@ const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
    Sent as text/plain so the browser skips the CORS preflight that Apps Script
    can't answer; both backends parse the JSON body regardless. Returns a text
    digest for prompts, or "" when unavailable. */
+/* Returns { digest, error } — the caller shows `error` so a misconfigured Drive
+   function explains itself instead of silently degrading. */
 async function driveReadDigest(projectId, linkedIds) {
-  if (!DRIVE_READ_URL) return "";
+  if (!DRIVE_READ_URL) return { digest: "", error: "" };
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN }),
     });
-    const data = await res.json();
-    if (!res.ok || data.error) return "";
-    return String(data.digest || "").slice(0, 4000);
-  } catch { return ""; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const hint = res.status === 502 || res.status === 500
+        ? "the Drive function is erroring — check its Logs and the GOOGLE_* secrets"
+        : res.status === 401 ? "unauthorized — turn Verify JWT off, or check the token"
+        : data.message || data.error || res.statusText;
+      return { digest: "", error: `Drive read failed (${res.status}): ${hint}` };
+    }
+    if (data.error) return { digest: "", error: `Drive read: ${data.error}` };
+    return { digest: String(data.digest || "").slice(0, 4000), error: "" };
+  } catch (e) {
+    return { digest: "", error: `Drive unreachable: ${e.message || e}` };
+  }
 }
 /* Write a text file into the project's Drive folder (needs the folder shared
    with the service account as Editor). Returns true on success. */
@@ -971,7 +982,8 @@ function AddExistingProject({ onClose }) {
   const learnFromDrive = async () => {
     const ids = linked.map((x) => x.trim().toUpperCase()).filter(Boolean);
     setLearnBusy(true);
-    const digest = await driveReadDigest(clean, ids);
+    const { digest, error: driveErr } = await driveReadDigest(clean, ids);
+    if (driveErr) toast(driveErr, "amber");
     try { const txt = await claude(driveLearnPrompt(clean || "(new project)", ids, knownStatus, memory, digest), { json: false }); setLearning(txt); if (digest) toast("Learned from live Drive contents", "green"); }
     catch { setLearning(fallbackLearn(clean || "(new project)", ids, knownStatus)); toast("AI offline — template learning loaded, edit freely", "amber"); }
     setLearnBusy(false);
@@ -1130,7 +1142,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
   const analyseDrive = async () => {
     setIntelBusy(true);
-    const digest = await driveReadDigest(p.projectId, p.linkedIds);
+    const { digest, error: driveErr } = await driveReadDigest(p.projectId, p.linkedIds);
+    if (driveErr) toast(driveErr, "amber");
     try {
       const txt = await claude(driveIntelPrompt(p, users, memory, digest), { json: false });
       setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString(), live: !!digest } });
