@@ -1,50 +1,67 @@
 import { createClient } from "@supabase/supabase-js";
 
 /* ─── SUPABASE CLIENT ─────────────────────────────────────────────────────────
-   Created only when both env vars are present AND well-formed. A malformed URL
-   makes createClient() throw; we catch it so a bad env var can never blank the
-   whole app — it falls back to demo mode and logs a clear reason instead.       */
-const url = (import.meta.env.VITE_SUPABASE_URL || "").trim();
-const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
+   Robust init: auto-repair the most common env-var mistakes (surrounding
+   quotes, whitespace, trailing slash, the dashboard URL instead of the API URL,
+   a missing protocol). If the client still can't start, we DON'T silently drop
+   to demo — App.jsx shows an on-screen diagnostic naming the problem.          */
+
+function stripWrap(v) {
+  return String(v || "").trim().replace(/^["']+|["']+$/g, "").trim();
+}
+function sanitizeUrl(raw) {
+  let u = stripWrap(raw);
+  if (!u) return "";
+  // Someone pasted the dashboard link → derive the API URL from the ref.
+  const dash = u.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dash) return `https://${dash[1]}.supabase.co`;
+  if (!/^https?:\/\//i.test(u)) u = "https://" + u; // add missing protocol
+  u = u.replace(/\/+$/, ""); // strip trailing slash(es)
+  return u;
+}
+
+const rawUrl = import.meta.env.VITE_SUPABASE_URL;
+const rawKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const url = sanitizeUrl(rawUrl);
+const anonKey = stripWrap(rawKey);
+
+// The user intended to use Supabase if either var is present at all.
+export const supabaseConfigured = Boolean(stripWrap(rawUrl) || stripWrap(rawKey));
+export const supabaseUrl = url;
 
 let client = null;
+let initError = "";
 if (url && anonKey) {
   try {
     client = createClient(url, anonKey, {
       auth: { persistSession: true, autoRefreshToken: true },
     });
   } catch (e) {
+    initError = e?.message || String(e);
     // eslint-disable-next-line no-console
-    console.error(
-      "[Supabase] Could not initialise — check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY " +
-        "(the URL must look like https://<ref>.supabase.co, no quotes or trailing slash). " +
-        "Falling back to demo mode.",
-      e
-    );
-    client = null;
+    console.error("[Supabase] Could not initialise:", initError, "(URL used:", url + ")");
   }
+} else if (supabaseConfigured) {
+  const missing = [];
+  if (!url) missing.push("VITE_SUPABASE_URL");
+  if (!anonKey) missing.push("VITE_SUPABASE_ANON_KEY");
+  initError = `Missing or empty: ${missing.join(" and ")}`;
 }
 
 export const supabase = client;
 export const supabaseEnabled = Boolean(client);
+export const supabaseInitError = initError;
 
-/* Key-value store backed by the `app_kv` Postgres table (see supabase/schema.sql).
-   Matches the window.storage contract App.jsx uses: get → { value } | null. */
+/* Key-value store backed by the `app_kv` Postgres table (see supabase/schema.sql). */
 export function supabaseStorage(sb) {
   return {
     get: async (key) => {
-      const { data, error } = await sb
-        .from("app_kv")
-        .select("value")
-        .eq("key", key)
-        .maybeSingle();
+      const { data, error } = await sb.from("app_kv").select("value").eq("key", key).maybeSingle();
       if (error) throw error;
       return data ? { value: data.value } : null;
     },
     set: async (key, value) => {
-      const { error } = await sb
-        .from("app_kv")
-        .upsert({ key, value, updated_at: new Date().toISOString() });
+      const { error } = await sb.from("app_kv").upsert({ key, value, updated_at: new Date().toISOString() });
       if (error) throw error;
     },
     delete: async (key) => {

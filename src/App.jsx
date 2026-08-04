@@ -30,7 +30,7 @@ import {
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.svg";
-import { supabaseEnabled } from "./lib/supabase.js";
+import { supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
@@ -2167,6 +2167,33 @@ function Login({ dark, onToggleTheme }) {
   );
 }
 
+/* Shown when Supabase env vars are present but the client couldn't start —
+   turns the silent "no login / demo" confusion into a named, fixable problem. */
+function SupabaseConfigError({ dark, onToggleTheme }) {
+  return (
+    <Shell dark={dark}>
+      <div className="fade card" style={{ width: "100%", maxWidth: 480, padding: 28, position: "relative" }}>
+        <button onClick={onToggleTheme} style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
+        <img src={elecbitsLogo} alt="Elecbits" style={{ height: 26, marginBottom: 12, display: "block" }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <AlertTriangle size={18} style={{ color: "var(--amber)" }} />
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Supabase isn't configured correctly</div>
+        </div>
+        <div style={{ fontSize: 13, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 14 }}>Your Supabase environment variables are set, but the client couldn't start — so the login screen is off. Fix the value in Vercel and redeploy.</div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 }}>Problem</div>
+        <pre style={{ margin: "0 0 8px", padding: 10, background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, fontSize: 12, whiteSpace: "pre-wrap", color: "var(--red)" }}>{supabaseInitError || "Supabase client failed to initialise."}</pre>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 }}>URL the app used</div>
+        <pre style={{ margin: "0 0 14px", padding: 10, background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, fontSize: 12, whiteSpace: "pre-wrap", fontFamily: MONO, color: "var(--txt)" }}>{supabaseUrl || "(empty)"}</pre>
+        <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.7 }}>
+          In Vercel → Environment Variables, <b style={{ color: "var(--txt)" }}>VITE_SUPABASE_URL</b> must be exactly<br />
+          <span style={{ fontFamily: MONO, color: "var(--acc)" }}>https://&lt;ref&gt;.supabase.co</span><br />
+          — no quotes, no spaces, no trailing slash, and <b style={{ color: "var(--txt)" }}>not</b> the dashboard link. Get it from Supabase → Settings → API → Project URL. Then redeploy.
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [dark, setDark] = useState(false);
@@ -2247,6 +2274,7 @@ export default function App() {
   const visNav = NAV.filter((n) => !n.admin || isAdmin);
   const [t1, t2] = TITLES[view] || ["", ""];
 
+  if (supabaseConfigured && !supabaseEnabled) return <SupabaseConfigError dark={dark} onToggleTheme={() => setDark(!dark)} />;
   if (supabaseEnabled && !authChecked) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Checking your session…</div></Shell>;
   if (supabaseEnabled && !session) return <Login dark={dark} onToggleTheme={() => setDark(!dark)} />;
   if (supabaseEnabled && !profiles) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Loading your workspace…</div></Shell>;
@@ -2295,6 +2323,7 @@ export default function App() {
                 </select>
               </>)}
               {supabaseEnabled && <Btn small kind="ghost" onClick={async () => { await signOut(); }}>Sign out</Btn>}
+              {!supabaseEnabled && <span title="No Supabase detected in this build — running on local demo data. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel and redeploy with a fresh build."><Pill color="var(--amber)"><Database size={10} /> Demo — no Supabase</Pill></span>}
               <button onClick={() => setDark(!dark)} style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
             </div>
           </header>
