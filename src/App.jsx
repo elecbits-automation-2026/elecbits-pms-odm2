@@ -257,6 +257,21 @@ const fallbackScrum = (raw, date, users, projects) => {
   if (!tasks.length) tasks.push({ projectId: pid, title: raw.slice(0, 90), assignee: "", startTime: "", endTime: "", steps: [raw.slice(0, 160)], conditions: [] });
   return { summary: "Offline basic parse — AI was unreachable, review before pushing.", tasks };
 };
+/* Drive intelligence — read the PM + PCB folders and say what's going on. */
+const driveIntelPrompt = (p, users, memory) => `You are the Elecbits ODM project-intelligence analyst. Read the project's Google Drive knowledge and report what is actually going on and how things are moving.
+${memCtx(memory)}
+PROJECT: ${p.projectId} — ${p.name || "(unnamed)"} | status ${p.status} | deadline ${p.deadline || "?"}
+PM FOLDER: /ODM/PM/${p.projectId}/ (Checklist.xlsx + Reports/ + Client-Comms/)
+PCB / LINKED ID FOLDERS: ${(p.linkedIds || []).map((x) => `/ODM/PCB/${x}/`).join(", ") || "none linked"}
+TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
+KNOWN STATUS (human-written): """${(p.knownStatus || "not provided").slice(0, 1500)}"""
+MANUAL INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 1500) || "none"}
+Write plain text (no markdown symbols), under 220 words, with these labelled lines: WHERE IT STANDS, HOW IT IS MOVING, RISKS / BLOCKERS, NEXT MOVES. Be concrete and reference the folders and IDs above.`;
+const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""}, status ${p.status}, deadline ${p.deadline || "?"}. ${p.knownStatus ? "Known status: " + p.knownStatus.slice(0, 300) : "No written status yet."}\n\nHOW IT IS MOVING\nDrive read unavailable (AI offline). Reference: /ODM/PM/${p.projectId}/ and PCB folders ${(p.linkedIds || []).join(", ") || "—"}.\n\nRISKS / BLOCKERS\nAdd manual intelligence below so the OS can reason about this project.\n\nNEXT MOVES\nOrganise a scrum note to create the first tasks, then re-run the analysis.`;
+/* Organise a manual-intelligence note into a crisp status line. */
+const intelOrgPrompt = (p, raw, memory) => `Organise this manual intelligence note about Elecbits ODM project ${p.projectId} into one or two crisp status sentences (plain text, no markdown). Keep facts, drop filler.
+${memCtx(memory)}
+NOTE: """${String(raw).slice(0, 1200)}"""`;
 
 /* ═══ GLOBAL STYLES + UI ATOMS ═══════════════════════════════════════════ */
 const CSS = `
@@ -769,7 +784,7 @@ function ProjectsModule() {
   const { projects, setProjects, users, me, sheetSync, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
-  const [wizard, setWizard] = useState(false);
+  const [addExisting, setAddExisting] = useState(false);
   const [openId, setOpenId] = useState(null);
   const setStatus = (id, status) => { setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p))); sheetSync("Project Data and IDs (Google Sheet)", `Status → ${status}`); };
   const openProject = projects.find((p) => p.id === openId);
@@ -779,12 +794,12 @@ function ProjectsModule() {
       <div className="card" style={{ padding: 18, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 15 }}>Projects</div>
-          <div style={{ fontSize: 12.5, color: "var(--txt2)", marginTop: 3 }}>Chat-guided creation with hard gates — Project ID, Customer LLD and Designer LLD are mandatory. No execution here: project + status only.</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt2)", marginTop: 3 }}>Add an in-flight project by ID — PM, linked IDs, team, timeline and its known status. The OS reads its PM + PCB Drive folders and tells you how it's moving.</div>
         </div>
-        {isAdmin ? <Btn icon={Plus} onClick={() => setWizard(true)}>Create Project</Btn> : <Pill color="var(--txt2)"><Shield size={11} /> Creation is admin-only</Pill>}
+        {isAdmin ? <Btn icon={Plus} onClick={() => setAddExisting(true)}>Add existing project</Btn> : <Pill color="var(--txt2)"><Shield size={11} /> Adding is admin-only</Pill>}
       </div>
       {projects.length === 0 ? (
-        <div className="card"><Empty icon={FolderPlus} title="No projects yet" sub="Create the first project — the wizard walks through client, ID, team and both LLDs, and won't let anything through without them." /></div>
+        <div className="card"><Empty icon={FolderPlus} title="No projects yet" sub="Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it." /></div>
       ) : projects.map((p) => {
         const dl = daysLeft(p.deadline);
         const pm = p.team?.find((t) => t.slot.startsWith("PM"));
@@ -811,9 +826,11 @@ function ProjectsModule() {
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <Pill color={dl < 0 ? "var(--red)" : dl <= 7 ? "var(--amber)" : "var(--txt2)"}><Calendar size={11} /> {fmtDate(p.deadline)} · {dl < 0 ? `${-dl}d over` : `${dl}d left`}</Pill>
                 </div>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <Pill color="var(--green)"><FileText size={10} /> C-LLD · {p.lldCustomer?.mode}</Pill>
-                  <Pill color="var(--green)"><FileText size={10} /> D-LLD · {p.lldDesigner?.mode}</Pill>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  {p.origin === "existing" && <Pill color="var(--purple)"><FolderPlus size={10} /> existing</Pill>}
+                  {(p.linkedIds || []).length > 0 && <Pill color="var(--blue)"><FileText size={10} /> {p.linkedIds.length} linked ID{p.linkedIds.length > 1 ? "s" : ""}</Pill>}
+                  {p.lldCustomer && <Pill color="var(--green)"><FileText size={10} /> C-LLD · {p.lldCustomer.mode}</Pill>}
+                  {p.lldDesigner && <Pill color="var(--green)"><FileText size={10} /> D-LLD · {p.lldDesigner.mode}</Pill>}
                 </div>
                 <div style={{ display: "flex" }}>{(p.team || []).map((t, i) => <span key={i} style={{ marginLeft: i ? -7 : 0 }}><AvatarDot user={users.find((u) => u.id === t.userId)} size={24} /></span>)}</div>
               </div>
@@ -821,8 +838,103 @@ function ProjectsModule() {
           </div>
         );
       })}
-      {wizard && <ProjectWizard onClose={() => setWizard(false)} />}
+      {addExisting && <AddExistingProject onClose={() => setAddExisting(false)} />}
     </div>
+  );
+}
+
+/* ═══ ADD EXISTING PROJECT ═══════════════════════════════════════════════
+   Register an in-flight project: Project ID, PM, linked (GW/PCB) IDs, team,
+   timeline, and a known-status paragraph. No LLD gates — this is an existing
+   project the OS starts tracking (Drive intelligence lives in the detail view). */
+function AddExistingProject({ onClose }) {
+  const { projects, setProjects, users, me, toast, sheetSync } = useCtx();
+  const [projectId, setProjectId] = useState("");
+  const [name, setName] = useState("");
+  const [pmId, setPmId] = useState("");
+  const [linked, setLinked] = useState([""]);
+  const [rows, setRows] = useState(TEAM_SLOTS.filter((s) => !s.startsWith("PM")).map((s) => ({ slot: s, userId: "" })));
+  const [startDate, setStartDate] = useState(todayStr());
+  const [deadline, setDeadline] = useState("");
+  const [status, setStatus] = useState("In Progress");
+  const [knownStatus, setKnownStatus] = useState("");
+  const clean = projectId.trim().toUpperCase();
+  const dupe = clean && projects.some((p) => normId(p.projectId) === normId(clean));
+  const badChars = clean && !/^[A-Z0-9][A-Z0-9-]*$/.test(clean);
+  const valid = clean && !dupe && !badChars && name.trim() && pmId && deadline;
+  const setLink = (i, v) => setLinked((l) => l.map((x, j) => (j === i ? v : x)));
+  const setRow = (i, v) => setRows((r) => r.map((x, j) => (j === i ? { ...x, userId: v } : x)));
+  const submit = () => {
+    if (!valid) return;
+    const team = [{ slot: "PM (Project Manager)", userId: pmId }, ...rows.filter((r) => r.userId)];
+    const p = {
+      id: uid(), projectId: clean, idMode: "manual", origin: "existing", name: name.trim(),
+      clientName: "", clientId: "", industry: "", orgSize: "", contact: {},
+      linkedIds: linked.map((x) => x.trim().toUpperCase()).filter(Boolean),
+      team, startDate, deadline, status, knownStatus: knownStatus.trim(),
+      lldCustomer: null, lldDesigner: null, intelligence: [],
+      createdAt: new Date().toISOString(), createdBy: me,
+    };
+    setProjects((x) => [p, ...x]);
+    sheetSync("Project Data and IDs (Google Sheet)", `${clean} registered (existing)`);
+    sheetSync(`Drive /ODM/PM/${clean}/`, `Linked to ${p.linkedIds.length} PCB folder(s)`);
+    toast(`Project ${clean} added`, "green");
+    onClose();
+  };
+  return (
+    <Modal title="Add existing project" sub="Register an in-flight project so the OS can track it and read its Drive folders" onClose={onClose} width={720}
+      footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn icon={FolderPlus} disabled={!valid} onClick={submit}>Add project</Btn></>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Project ID" req>
+            <input className="inp" style={{ fontFamily: MONO }} value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="e.g. ESP32-124" />
+            {dupe && <span style={{ color: "var(--red)", fontSize: 11, marginTop: 4 }}>Already exists — IDs must be unique.</span>}
+            {badChars && <span style={{ color: "var(--red)", fontSize: 11, marginTop: 4 }}>Letters, numbers and dashes only.</span>}
+          </Field>
+          <Field label="Project name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ESP32 Gateway v2" /></Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="PM (Project Manager)" req>
+            <select className="inp" value={pmId} onChange={(e) => setPmId(e.target.value)}>
+              <option value="">— choose PM —</option>
+              {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
+            </select>
+          </Field>
+          <Field label="Status"><select className="inp" value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}</select></Field>
+        </div>
+        <Field label="Linked IDs (GW / PCB — add multiple)">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {linked.map((v, i) => (
+              <div key={i} style={{ display: "flex", gap: 6 }}>
+                <input className="inp" style={{ fontFamily: MONO, flex: 1 }} value={v} onChange={(e) => setLink(i, e.target.value)} placeholder={`e.g. ESP32-124-PCB-R1`} />
+                {linked.length > 1 && <button onClick={() => setLinked((l) => l.filter((_, j) => j !== i))} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--txt3)", cursor: "pointer", padding: "0 10px" }}><X size={13} /></button>}
+              </div>
+            ))}
+            <button onClick={() => setLinked((l) => [...l, ""])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", fontSize: 12.5, cursor: "pointer", display: "flex", gap: 5, alignItems: "center" }}><Plus size={13} /> add linked ID</button>
+          </div>
+        </Field>
+        <Field label="Team allocated (optional — PM is set above)">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {rows.map((r, i) => (
+              <div key={r.slot} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, width: 130, color: "var(--txt2)", fontWeight: 600 }}>{r.slot}</span>
+                <select className="inp" style={{ flex: 1, padding: "6px 8px" }} value={r.userId} onChange={(e) => setRow(i, e.target.value)}>
+                  <option value="">—</option>
+                  {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Start date"><input type="date" className="inp" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
+          <Field label="Deadline" req><input type="date" className="inp" value={deadline} min={startDate} onChange={(e) => setDeadline(e.target.value)} /></Field>
+        </div>
+        <Field label="Known status — what's going on right now (paragraph)">
+          <textarea className="inp" rows={4} value={knownStatus} onChange={(e) => setKnownStatus(e.target.value)} placeholder="Where the project stands, what's done, what's pending, blockers, client situation… The OS uses this plus the Drive folders to reason about the project." />
+        </Field>
+      </div>
+    </Modal>
   );
 }
 
@@ -830,8 +942,19 @@ function ProjectsModule() {
    Clickable from the projects list. Progress and to-dos are derived from the
    Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
-  const { tasks, users, notes, me, now } = useCtx();
+  const { tasks, users, notes, me, now, setProjects, memory, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const isPM = isAdmin || my?.role === "pm" || my?.role === "dept_head";
   const [showLLD, setShowLLD] = useState(false);
+  const [editTeam, setEditTeam] = useState(false);
+  const [teamDraft, setTeamDraft] = useState(p.team || []);
+  const [editStatus, setEditStatus] = useState(false);
+  const [statusDraft, setStatusDraft] = useState(p.knownStatus || "");
+  const [intel, setIntel] = useState(p.driveAnalysis?.text || "");
+  const [intelBusy, setIntelBusy] = useState(false);
+  const [noteVal, setNoteVal] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const upd = (patch) => setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, ...patch } : x)));
   const nowMs = now || Date.now();
   const pm = p.team?.find((t) => t.slot.startsWith("PM"));
   const projTasks = tasks.filter((t) => t.projectId === p.projectId);
@@ -849,19 +972,39 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const rank = (t) => (t.status === "blocked" ? 0 : overdue(t) ? 1 : t.status === "in-progress" ? 2 : 3);
   const todos = [...openTasks].sort((a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
   const sanctioned = p.status !== "Planning";
-  const startMs = new Date(p.createdAt).getTime();
+  const timelineStart = p.startDate || (p.createdAt || "").slice(0, 10);
+  const startMs = new Date((p.startDate || p.createdAt) + (p.startDate ? "T00:00:00" : "")).getTime();
   const endMs = new Date(p.deadline + "T23:59:59").getTime();
   const elapsedPct = endMs > startMs ? Math.min(100, Math.max(0, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 100;
-  const gates = [
-    ["Project ID", !!p.projectId], ["Customer LLD", !!p.lldCustomer], ["Designer LLD", !!p.lldDesigner],
-    ["PM assigned", !!pm], ["Deadline set", !!p.deadline],
-  ];
+  const gates = p.origin === "existing"
+    ? [["Project ID", !!p.projectId], ["PM assigned", !!pm], ["Timeline set", !!(p.startDate && p.deadline)], ["Known status", !!p.knownStatus], ["Linked IDs", (p.linkedIds || []).length > 0]]
+    : [["Project ID", !!p.projectId], ["Customer LLD", !!p.lldCustomer], ["Designer LLD", !!p.lldDesigner], ["PM assigned", !!pm], ["Deadline set", !!p.deadline]];
   const todoMeta = (t) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
     : overdue(t) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
     : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
     : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
   const Section = ({ children, style }) => <div className="card" style={{ padding: 16, ...style }}>{children}</div>;
-  const CardLabel = ({ children }) => <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>{children}</div>;
+  const CardLabel = ({ children, right }) => <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 12 }}><span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{children}</span>{right}</div>;
+
+  const analyseDrive = async () => {
+    setIntelBusy(true);
+    try { const txt = await claude(driveIntelPrompt(p, users, memory), { json: false }); setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString() } }); }
+    catch { setIntel(fallbackIntel(p)); toast("AI offline — showing what we have", "amber"); }
+    setIntelBusy(false);
+  };
+  const addIntel = async () => {
+    const raw = noteVal.trim(); if (!raw) return;
+    setNoteBusy(true);
+    let organised = raw;
+    try { organised = await claude(intelOrgPrompt(p, raw, memory), { json: false }); } catch { }
+    const entry = { id: uid(), at: new Date().toISOString(), by: me, text: organised, raw };
+    upd({ intelligence: [entry, ...(p.intelligence || [])] });
+    setNoteVal(""); setNoteBusy(false);
+    toast("Intelligence added", "green");
+  };
+  const slotUser = (slot) => teamDraft.find((t) => t.slot === slot)?.userId || "";
+  const setSlot = (slot, userId) => setTeamDraft((td) => { const rest = td.filter((t) => t.slot !== slot); return userId ? [...rest, { slot, userId }] : rest; });
+  const saveTeam = () => { upd({ team: teamDraft.filter((t) => t.userId) }); setEditTeam(false); toast("Team updated", "green"); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -938,6 +1081,49 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             )}
           </Section>
 
+          {(p.knownStatus || isPM) && (
+            <Section>
+              <CardLabel right={isPM && <button onClick={() => { if (!editStatus) setStatusDraft(p.knownStatus || ""); setEditStatus(!editStatus); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editStatus ? "Cancel" : "Edit"}</button>}>Known status</CardLabel>
+              {editStatus ? (
+                <div>
+                  <textarea className="inp" rows={4} value={statusDraft} onChange={(e) => setStatusDraft(e.target.value)} placeholder="Where the project stands right now…" />
+                  <div style={{ marginTop: 8 }}><Btn small kind="green" icon={CheckCircle2} onClick={() => { upd({ knownStatus: statusDraft.trim() }); setEditStatus(false); toast("Status updated", "green"); }}>Save status</Btn></div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12.5, color: p.knownStatus ? "var(--txt)" : "var(--txt2)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{p.knownStatus || "No known status written yet — add it, or drop a manual-intelligence note below."}</div>
+              )}
+            </Section>
+          )}
+
+          <Section>
+            <CardLabel right={<Pill color="var(--purple)"><Database size={11} /> PM + PCB folders</Pill>}>Drive intelligence</CardLabel>
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 4 }}>/ODM/PM/{p.projectId}/ → Checklist.xlsx · Reports/ · Client-Comms/</div>
+            {(p.linkedIds || []).length > 0 && <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 10 }}>{p.linkedIds.map((x) => `/ODM/PCB/${x}/`).join("   ")}</div>}
+            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10, lineHeight: 1.5 }}>The OS reads these folders and tells you what's going on. Live Drive read is the integration seam; the analysis uses the folder map, the known status and the intelligence log below.</div>
+            <Btn small icon={intelBusy ? Loader2 : Sparkles} disabled={intelBusy} onClick={analyseDrive}>{intelBusy ? "Analysing…" : intel ? "Re-analyse how it's moving" : "Analyse how things are moving"}</Btn>
+            {intel && <div style={{ marginTop: 12, padding: 12, background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 10, fontSize: 12.5, whiteSpace: "pre-wrap", lineHeight: 1.6, color: "var(--txt)" }}>{intel}{p.driveAnalysis?.at && <div style={{ fontSize: 10, color: "var(--txt3)", marginTop: 8 }}>analysed {fmtDate(p.driveAnalysis.at.slice(0, 10))}</div>}</div>}
+            <div style={{ marginTop: 14, borderTop: "1px dashed var(--bdr2)", paddingTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>Manual intelligence</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <textarea className="inp" rows={2} style={{ flex: 1, resize: "vertical" }} value={noteVal} onChange={(e) => setNoteVal(e.target.value)} placeholder="Add what you know — the AI organises it into the project's status memory…" />
+                <Btn small title="Add intelligence" icon={noteBusy ? Loader2 : Send} disabled={noteBusy || !noteVal.trim()} onClick={addIntel} style={{ alignSelf: "flex-start", width: 40, padding: 0 }}> </Btn>
+              </div>
+              {(p.intelligence || []).length > 0 && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {(p.intelligence || []).map((e) => {
+                    const u = users.find((x) => x.id === e.by);
+                    return (
+                      <div key={e.id} style={{ padding: "9px 11px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 9 }}>
+                        <div style={{ fontSize: 12.5, color: "var(--txt)", lineHeight: 1.5 }}>{e.text}</div>
+                        <div style={{ fontSize: 10, color: "var(--txt3)", marginTop: 4 }}>{u?.name || "—"} · {fmtDate((e.at || "").slice(0, 10))}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Section>
+
           <Section style={{ background: "var(--s2)" }}>
             <CardLabel>Project internal sheet</CardLabel>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "9px 16px", fontSize: 12.5 }}>
@@ -949,8 +1135,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               <KV k="Org size" v={p.orgSize || "—"} />
               <KV k="Contact" v={p.contact?.name ? `${p.contact.name}${p.contact.designation ? " · " + p.contact.designation : ""}` : "—"} />
               <KV k="Created" v={fmtDate((p.createdAt || "").slice(0, 10))} />
+              {p.startDate && <KV k="Start" v={fmtDate(p.startDate)} />}
               <KV k="Drive" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>/ODM/PM/{p.projectId}/</span>} />
-              <KV k="Checklist" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>Checklist.xlsx</span>} />
+              {(p.linkedIds || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><KV k="Linked IDs (GW / PCB)" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{p.linkedIds.join(", ")}</span>} /></div>}
             </div>
           </Section>
         </div>
@@ -971,8 +1158,27 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           </Section>
 
           <Section>
-            <CardLabel>Team roster</CardLabel>
-            {(p.team || []).length === 0 ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>No team assigned.</div> : (
+            <CardLabel right={isPM && <button onClick={() => { setTeamDraft(p.team || []); setEditTeam(!editTeam); }} style={{ background: "none", border: "none", color: editTeam ? "var(--txt2)" : "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editTeam ? "Cancel" : "Edit team"}</button>}>Team roster</CardLabel>
+            {editTeam ? (
+              <div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {TEAM_SLOTS.map((slot) => (
+                    <div key={slot} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, width: 118, color: "var(--txt2)", fontWeight: 600 }}>{slot}{slot.startsWith("PM") && <span style={{ color: "var(--red)" }}> *</span>}</span>
+                      <select className="inp" style={{ flex: 1, padding: "6px 8px" }} value={slotUser(slot)} onChange={(e) => setSlot(slot, e.target.value)}>
+                        <option value="">— unassigned —</option>
+                        {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                {!teamDraft.some((t) => t.slot.startsWith("PM") && t.userId) && <div style={{ color: "var(--amber)", fontSize: 11, marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}><AlertTriangle size={12} /> A PM must be assigned.</div>}
+                <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                  <Btn small kind="green" icon={CheckCircle2} disabled={!teamDraft.some((t) => t.slot.startsWith("PM") && t.userId)} onClick={saveTeam}>Save team</Btn>
+                  <Btn small kind="ghost" onClick={() => setEditTeam(false)}>Cancel</Btn>
+                </div>
+              </div>
+            ) : (p.team || []).length === 0 ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>No team assigned.</div> : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {(p.team || []).map((t, i) => {
                   const u = users.find((x) => x.id === t.userId);
@@ -994,7 +1200,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           <Section>
             <CardLabel>Stage-wise timeline</CardLabel>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 11 }}>
-              <span style={{ color: "var(--txt2)", fontWeight: 600 }}>{fmtDate((p.createdAt || "").slice(0, 10))}</span>
+              <span style={{ color: "var(--txt2)", fontWeight: 600 }}>{fmtDate(timelineStart)}</span>
               <span style={{ fontWeight: 800, color: dl < 0 ? "var(--red)" : dl <= 14 ? "var(--amber)" : "var(--green)" }}>{dl < 0 ? `OVERDUE ${-dl}d` : `${dl}d left`}</span>
               <span style={{ color: "var(--txt2)", fontWeight: 600 }}>{fmtDate(p.deadline)}</span>
             </div>
@@ -1006,6 +1212,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </div>
           </Section>
 
+          {(p.lldCustomer || p.lldDesigner) && (
           <Section>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: showLLD ? 12 : 0 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>LLDs</span>
@@ -1024,6 +1231,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </div>
             )}
           </Section>
+          )}
         </div>
       </div>
     </div>
