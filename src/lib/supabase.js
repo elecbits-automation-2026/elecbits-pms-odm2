@@ -1,17 +1,32 @@
 import { createClient } from "@supabase/supabase-js";
 
 /* ─── SUPABASE CLIENT ─────────────────────────────────────────────────────────
-   Created only when both env vars are present. When absent, `supabase` is null
-   and the app falls back to localStorage — so it still runs with zero config.
-   Set these in `.env` (see .env.example) to turn on real cloud persistence.   */
-const url = import.meta.env.VITE_SUPABASE_URL;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+   Created only when both env vars are present AND well-formed. A malformed URL
+   makes createClient() throw; we catch it so a bad env var can never blank the
+   whole app — it falls back to demo mode and logs a clear reason instead.       */
+const url = (import.meta.env.VITE_SUPABASE_URL || "").trim();
+const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
 
-export const supabaseEnabled = Boolean(url && anonKey);
+let client = null;
+if (url && anonKey) {
+  try {
+    client = createClient(url, anonKey, {
+      auth: { persistSession: true, autoRefreshToken: true },
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(
+      "[Supabase] Could not initialise — check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY " +
+        "(the URL must look like https://<ref>.supabase.co, no quotes or trailing slash). " +
+        "Falling back to demo mode.",
+      e
+    );
+    client = null;
+  }
+}
 
-export const supabase = supabaseEnabled
-  ? createClient(url, anonKey, { auth: { persistSession: false } })
-  : null;
+export const supabase = client;
+export const supabaseEnabled = Boolean(client);
 
 /* Key-value store backed by the `app_kv` Postgres table (see supabase/schema.sql).
    Matches the window.storage contract App.jsx uses: get → { value } | null. */

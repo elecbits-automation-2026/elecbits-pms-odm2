@@ -1,8 +1,32 @@
-import { StrictMode } from "react";
+import { StrictMode, Component } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
 import "./index.css";
 import { supabase, supabaseEnabled, supabaseStorage } from "./lib/supabase.js";
+
+/* ─── ERROR BOUNDARY ─────────────────────────────────────────────────────────
+   Any render-time crash shows a readable message instead of a blank page, so a
+   bad config surfaces its cause rather than a white/black void.                */
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("App crashed:", err, info); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#f8fafc", color: "#1e293b", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" }}>
+        <div style={{ maxWidth: 540 }}>
+          <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 8 }}>Something went wrong loading the app</div>
+          <div style={{ fontSize: 13.5, color: "#64748b", marginBottom: 14, lineHeight: 1.6 }}>
+            This is almost always a bad environment variable — most often <code>VITE_SUPABASE_URL</code> (it must be exactly
+            <code> https://&lt;ref&gt;.supabase.co</code>, with no quotes, spaces, or trailing slash). Fix it in Vercel and redeploy.
+          </div>
+          <pre style={{ fontSize: 12, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 12, whiteSpace: "pre-wrap", color: "#dc2626", margin: 0 }}>{String(this.state.err?.message || this.state.err)}</pre>
+        </div>
+      </div>
+    );
+  }
+}
 
 /* ─── STORAGE SEAM ───────────────────────────────────────────────────────────
    App.jsx persists through `window.storage` (get/set/delete → { value }).
@@ -63,6 +87,8 @@ if (typeof window !== "undefined" && !window.storage) {
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>
 );

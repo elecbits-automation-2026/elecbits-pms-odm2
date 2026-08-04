@@ -1961,7 +1961,7 @@ function Login({ dark, onToggleTheme }) {
 
 export default function App() {
   const [booted, setBooted] = useState(false);
-  const [dark, setDark] = useState(true);
+  const [dark, setDark] = useState(false);
   const [me, setMe] = useState("u-admin");
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(!supabaseEnabled);
