@@ -181,6 +181,9 @@ Deno.serve(async (req) => {
     }
     return json({ ok: true, digest: lines.join("\n").slice(0, 6000) });
   } catch (e) {
-    return json({ error: String(e) }, 502);
+    // Log it too, so the reason is visible in the function's Logs tab and not
+    // only in the response body.
+    console.error("drive-read failed:", String(e));
+    return json({ error: String(e) }, 500);
   }
 });

@@ -200,11 +200,14 @@ async function driveReadDigest(projectId, linkedIds) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const hint = res.status === 502 || res.status === 500
-        ? "the Drive function is erroring — check its Logs and the GOOGLE_* secrets"
-        : res.status === 401 ? "unauthorized — turn Verify JWT off, or check the token"
-        : data.message || data.error || res.statusText;
-      return { digest: "", error: `Drive read failed (${res.status}): ${hint}` };
+      // Prefer the server's own message — the function returns the real Google
+      // error (bad key, folder not shared, API disabled) in the body.
+      const serverMsg = data.error || data.message || data.msg;
+      const hint = serverMsg
+        || (res.status === 401 ? "unauthorized — turn Verify JWT off, or check the token"
+          : res.status === 404 ? "function not found — check VITE_DRIVE_READ_URL"
+          : `${res.statusText || "error"} — check the function's Logs`);
+      return { digest: "", error: `Drive read failed (${res.status}): ${String(hint).slice(0, 220)}` };
     }
     if (data.error) return { digest: "", error: `Drive read: ${data.error}` };
     return { digest: String(data.digest || "").slice(0, 4000), error: "" };
