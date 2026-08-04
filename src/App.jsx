@@ -27,12 +27,12 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
-import { supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
+import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
@@ -111,7 +111,7 @@ const LLD_QUESTIONS = [
 /* ─── SEED DATA ─────────────────────────────────────────────────────────── */
 /* Real Elecbits team (from the org roster). IDs are the real profile UUIDs so
    they line up with Supabase once connected. "Admin" is a demo-only account. */
-const ROLE_TITLE = { jr_pm: "Jr. Project Manager", sr_pm: "Sr. Project Manager", jr_fw: "Jr. Firmware Engineer", sr_fw: "Sr. Firmware Engineer", jr_hw: "Jr. Hardware Engineer", sr_hw: "Sr. Hardware Engineer", sc: "Supply Chain", ind_design: "Industrial Designer", sol_arch: "Solution Architect", admin: "Super Admin" };
+const ROLE_TITLE = { jr_pm: "Jr. Project Manager", sr_pm: "Sr. Project Manager", jr_fw: "Jr. Firmware Engineer", sr_fw: "Sr. Firmware Engineer", jr_hw: "Jr. Hardware Engineer", sr_hw: "Sr. Hardware Engineer", sc: "Supply Chain", ind_design: "Industrial Designer", sol_arch: "Solution Architect", admin: "Super Admin", tester: "Tester / QA", devops: "DevOps Engineer", soldering: "Soldering & Testing" };
 const _PALETTE = ["#2563eb", "#7c3aed", "#ea580c", "#0891b2", "#16a34a", "#d97706", "#db2777", "#0d9488", "#9333ea", "#dc2626", "#4f46e5", "#0284c7", "#059669", "#b45309", "#c026d3", "#e11d48", "#1e3a8a", "#65a30d", "#4338ca", "#be123c"];
 const _TEAM = [
   ["u-admin", "Admin", "admin@elecbits.in", "superadmin", "admin", "Super Admin"],
@@ -1888,23 +1888,45 @@ function CompleteFlow({ t, onClose }) {
 /* ═══ RESOURCES — team view · resource planning · efficiency ═════════════
    Carried from the Elecbits PMS Resources module, driven by this tool's data:
    the roster, each project's team + timeline, and the task system.          */
-const DEPT_OF = { jr_hw: "Hardware", sr_hw: "Hardware", jr_fw: "Firmware", sr_fw: "Firmware", jr_pm: "Project Management", sr_pm: "Project Management", sc: "Supply Chain", ind_design: "Industrial Design", sol_arch: "Solution Architecture", admin: "Management" };
-const CAP_OF = { sr_pm: 6, sr_hw: 6, sr_fw: 6, sol_arch: 6, ind_design: 6, admin: 6, jr_pm: 3, jr_hw: 3, jr_fw: 3, sc: 3 };
+const DEPT_OF = { jr_hw: "Hardware", sr_hw: "Hardware", jr_fw: "Firmware", sr_fw: "Firmware", jr_pm: "Project Management", sr_pm: "Project Management", sc: "Supply Chain", ind_design: "Industrial Design", sol_arch: "Solution Architecture", admin: "Management", tester: "Testing", devops: "DevOps", soldering: "Soldering & Testing" };
+const CAP_OF = { sr_pm: 6, sr_hw: 6, sr_fw: 6, sol_arch: 6, ind_design: 6, admin: 6, jr_pm: 3, jr_hw: 3, jr_fw: 3, sc: 3, tester: 3, devops: 6, soldering: 3 };
+/* Role catalogue for Add/Edit Resource — mirrors the Elecbits PMS resource roles. */
+const RESOURCE_ROLES = [
+  { key: "sr_hw", label: "Sr. Hardware", tier: "Senior", dept: "Hardware", cap: 6, skills: ["PCB Designing", "Schematic Design", "Altium Designer", "KiCad", "Hardware Debugging", "Signal Integrity", "EMI/EMC"] },
+  { key: "sr_fw", label: "Sr. Firmware", tier: "Senior", dept: "Firmware", cap: 6, skills: ["Embedded C/C++", "RTOS", "ESP-IDF", "OTA / Bootloaders", "BLE/Wi-Fi Stacks", "Driver Development"] },
+  { key: "sr_pm", label: "Senior PM", tier: "Senior", dept: "Project Management", cap: 6, skills: ["Project Planning", "Risk Management", "Client Communication", "Gantt & Milestones"] },
+  { key: "jr_hw", label: "Jr. Hardware", tier: "Junior", dept: "Hardware", cap: 3, skills: ["PCB Designing", "Schematic Design", "Altium Designer", "KiCad", "Hardware Debugging", "Component Selection"] },
+  { key: "jr_fw", label: "Jr. Firmware", tier: "Junior", dept: "Firmware", cap: 3, skills: ["Embedded C", "Arduino/ESP32", "Peripheral Drivers", "Debugging", "Unit Testing"] },
+  { key: "tester", label: "Tester", tier: "Junior", dept: "Testing", cap: 3, skills: ["Test Planning", "Functional Testing", "Test Reports", "Compliance Pre-checks"] },
+  { key: "ind_design", label: "Industrial Design", tier: "Junior", dept: "Industrial Design", cap: 6, skills: ["Enclosure Design", "3D Printing", "CAD (Fusion/SolidWorks)", "DFM"] },
+  { key: "jr_pm", label: "Junior PM", tier: "Junior", dept: "Project Management", cap: 3, skills: ["Task Tracking", "Standups & Scrum", "Client Updates", "Documentation"] },
+  { key: "soldering", label: "Soldering & Testing", tier: "Junior", dept: "Soldering & Testing", cap: 3, skills: ["SMD Soldering", "Rework", "Board Bring-up", "Continuity Testing"] },
+  { key: "sol_arch", label: "Solution Architects", tier: "Shared", dept: "Solution Architecture", cap: 6, skills: ["System Architecture", "Tech Evaluation", "Cost Optimisation"] },
+  { key: "devops", label: "DevOps", tier: "Shared", dept: "DevOps", cap: 6, skills: ["CI/CD", "Cloud Infra", "Monitoring"] },
+  { key: "sc", label: "Supply Chain", tier: "Shared", dept: "Supply Chain", cap: 3, skills: ["Sourcing", "BoM Costing", "Vendor Management", "Logistics"] },
+];
+const rrInfo = (key) => RESOURCE_ROLES.find((r) => r.key === key);
+const DEPT_LIST = ["Hardware", "Firmware", "Industrial Design", "Testing", "Project Management", "Supply Chain", "DevOps", "Solution Architecture", "Soldering & Testing"];
+const LOGIN_TYPES = [["superadmin", "Super Admin"], ["pm", "Project Manager"], ["engineer", "Developer"]];
+const PROJECT_TYPES = [["engineering", "Engineering Services"], ["elecbits_product", "Elecbits Product"], ["modifier", "Modifier"]];
 const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });
 
 function ResourcesModule() {
-  const { users, projects, tasks } = useCtx();
+  const { users, projects, tasks, me } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   const [tab, setTab] = useState("team");
   const [roleF, setRoleF] = useState("all");
   const [deptF, setDeptF] = useState("all");
   const [avFrom, setAvFrom] = useState(todayStr());
   const [avTo, setAvTo] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() + 2); return d.toISOString().slice(0, 10); });
   const [person, setPerson] = useState(null);
+  const [resModal, setResModal] = useState(null); // {mode:"add"} | {mode:"edit", user}
   const today = todayStr();
 
   const members = users.filter((u) => u.id !== "u-admin");
-  const deptOf = (u) => DEPT_OF[u.resourceRole] || "—";
-  const capOf = (u) => CAP_OF[u.resourceRole] || 3;
+  const deptOf = (u) => u.dept || DEPT_OF[u.resourceRole] || "—";
+  const capOf = (u) => u.maxProjects || CAP_OF[u.resourceRole] || 3;
   const assignedProjs = (uid) => projects.filter((p) => (p.team || []).some((t) => t.userId === uid));
   const activeProjs = (uid) => assignedProjs(uid).filter((p) => p.status !== "Completed" && projWindow(p).end >= today);
   const roles = UNIQ_RR(members);
@@ -1946,6 +1968,7 @@ function ResourcesModule() {
           </button>
         ))}
         <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)", padding: "8px 0" }}><b style={{ color: "var(--txt)" }}>{filtered.length}</b> resource{filtered.length !== 1 ? "s" : ""}</span>
+        {isAdmin && <Btn small icon={Plus} onClick={() => setResModal({ mode: "add" })} style={{ margin: "8px 0 8px 10px" }}>Add Resource</Btn>}
       </div>
 
       {(tab === "team" || tab === "planning") && (
@@ -1964,7 +1987,7 @@ function ResourcesModule() {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr style={{ borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
-                <th style={th}>Name</th><th style={th}>Role</th><th style={th}>Dept</th><th style={th}>Projects</th><th style={th}>Open tasks</th><th style={{ ...th, textAlign: "center" }}>Cap</th><th style={th}>Status</th>
+                <th style={th}>Name</th><th style={th}>Role</th><th style={th}>Dept</th><th style={th}>Projects</th><th style={th}>Open tasks</th><th style={{ ...th, textAlign: "center" }}>Cap</th><th style={th}>Status</th>{isAdmin && <th style={{ ...th, width: 70 }}>Actions</th>}
               </tr></thead>
               <tbody>
                 {filtered.map((u) => {
@@ -1980,6 +2003,7 @@ function ResourcesModule() {
                       <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 600, color: open ? "var(--blue)" : "var(--txt3)" }}>{open}</td>
                       <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: act >= cap ? "var(--red)" : "var(--green)" }}>{act}/{cap}</td>
                       <td style={td}><Pill color={sc}>{sl}</Pill></td>
+                      {isAdmin && <td style={td}><button title="Edit resource" onClick={() => setResModal({ mode: "edit", user: u })} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--acc)", cursor: "pointer", padding: "6px 9px", display: "inline-flex" }}><Pencil size={13} /></button></td>}
                     </tr>
                   );
                 })}
@@ -2092,10 +2116,109 @@ function ResourcesModule() {
           ))}
         </Modal>
       )}
+      {resModal && <ResourceModal mode={resModal.mode} user={resModal.user} onClose={() => setResModal(null)} />}
     </div>
   );
 }
 const UNIQ_RR = (users) => [...new Set(users.map((u) => u.resourceRole).filter(Boolean))];
+
+/* Add / Edit Resource — mirrors the Elecbits PMS "Add New Resource" modal:
+   name, email, department, grouped role/function, login type, role-based
+   skills, project type, live preview; edit mode adds a confirmed Remove. */
+function ResourceModal({ mode, user, onClose }) {
+  const { users, addUser, updateUser, removeUser } = useCtx();
+  const editing = mode === "edit";
+  const [name, setName] = useState(user?.name || "");
+  const [email, setEmail] = useState(user?.email || "");
+  const [dept, setDept] = useState(user ? (user.dept || rrInfo(user.resourceRole)?.dept || "") : "");
+  const [rr, setRr] = useState(user?.resourceRole || "jr_hw");
+  const [login, setLogin] = useState(user?.role === "dept_head" ? "superadmin" : (user?.role || "engineer"));
+  const [skills, setSkills] = useState(user?.skills?.length ? user.skills : (rrInfo(user?.resourceRole || "jr_hw")?.skills || []));
+  const [ptype, setPtype] = useState((user?.projectTags || ["engineering"])[0]);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const info = rrInfo(rr);
+  const roleOptions = dept ? RESOURCE_ROLES.filter((r) => r.dept === dept) : RESOURCE_ROLES;
+  const pickDept = (d) => {
+    setDept(d);
+    const opts = d ? RESOURCE_ROLES.filter((r) => r.dept === d) : RESOURCE_ROLES;
+    if (d && !opts.some((o) => o.key === rr)) { setRr(opts[0].key); setSkills(opts[0].skills); }
+  };
+  const pickRr = (k) => { setRr(k); setSkills(rrInfo(k)?.skills || []); };
+  const toggleSkill = (s) => setSkills((x) => (x.includes(s) ? x.filter((y) => y !== s) : [...x, s]));
+  const loginLabel = LOGIN_TYPES.find(([k]) => k === login)?.[1] || login;
+  const save = () => {
+    if (!name.trim()) return;
+    const u = {
+      id: user?.id || uid(), name: name.trim(), email: email.trim(),
+      role: login, title: info?.label ? (ROLE_TITLE[rr] || info.label) : "Team",
+      resourceRole: rr, dept: dept || info?.dept || "", skills, projectTags: [ptype],
+      maxProjects: info?.cap || 3, color: user?.color || _PALETTE[users.length % _PALETTE.length],
+    };
+    if (editing) updateUser(u); else addUser(u);
+    onClose();
+  };
+  return (
+    <Modal title={editing ? `Edit ${user?.name}` : "Add New Resource"} onClose={onClose} width={560}
+      footer={<>
+        {editing && (confirmDel ? (
+          <div style={{ marginRight: "auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, color: "var(--red)", fontWeight: 600 }}>Remove {user?.name}? Unassigns them from all projects.</span>
+            <Btn small kind="danger" icon={Trash2} onClick={() => { removeUser(user.id, user.name); onClose(); }}>Yes, remove</Btn>
+            <Btn small kind="ghost" onClick={() => setConfirmDel(false)}>Keep</Btn>
+          </div>
+        ) : (
+          <Btn small kind="ghost" icon={Trash2} style={{ marginRight: "auto", color: "var(--red)", borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }} onClick={() => setConfirmDel(true)}>Remove</Btn>
+        ))}
+        <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn kind="green" icon={CheckCircle2} disabled={!name.trim()} onClick={save}>{editing ? "Save changes" : "Add Resource"}</Btn>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Field label="Full name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Raj Patel" /></Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="raj@elecbits.in" /></Field>
+          <Field label="Department">
+            <select className="inp" value={dept} onChange={(e) => pickDept(e.target.value)}>
+              <option value="">— Select Department —</option>
+              {DEPT_LIST.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Role / Function">
+            <select className="inp" value={rr} onChange={(e) => pickRr(e.target.value)}>
+              {["Senior", "Junior", "Shared"].map((tier) => {
+                const opts = roleOptions.filter((r) => r.tier === tier);
+                return opts.length ? <optgroup key={tier} label={tier}>{opts.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}</optgroup> : null;
+              })}
+            </select>
+          </Field>
+          <Field label="Login type">
+            <select className="inp" value={login} onChange={(e) => setLogin(e.target.value)}>
+              {LOGIN_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Skills — based on selected role">
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(info?.skills || []).map((s) => <button key={s} style={chipS(skills.includes(s))} onClick={() => toggleSkill(s)}>{s}</button>)}
+          </div>
+        </Field>
+        <Field label="Project type">
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            {PROJECT_TYPES.map(([k, l]) => <button key={k} style={chipS(ptype === k)} onClick={() => setPtype(k)}>{ptype === k ? "● " : "○ "}{l}</button>)}
+          </div>
+        </Field>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", background: "var(--s2)", borderRadius: 10, border: "1px solid var(--bdr)" }}>
+          <AvatarDot user={{ name: name || "?", color: user?.color || "var(--acc)" }} size={34} />
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>{name.trim() || "New Resource"}</div>
+            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 2 }}>{info?.label || "—"} · {loginLabel}{!editing && <span style={{ fontFamily: MONO }}> · pw: Elecbits@2026 (via setup script)</span>}</div>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 /* ═══ MODULE 4 — PERFORMANCE & TRAINING ══════════════════════════════════
    Side-to-side tab menu (KPI · Work update sheet · Training) in the
@@ -2608,7 +2731,8 @@ export default function App() {
   const [syncLog, setSyncLog] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [now, setNow] = useState(Date.now());
-  const users = supabaseEnabled ? (profiles || []) : SEED_USERS;
+  const [customRoster, setCustomRoster] = useState(null);
+  const users = supabaseEnabled ? (profiles || []) : (customRoster || SEED_USERS);
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
 
@@ -2624,14 +2748,14 @@ export default function App() {
   /* boot from persistent storage */
   useEffect(() => { (async () => {
     try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
-    try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); } } catch (e) { }
+    try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); } } catch (e) { }
     setBooted(true);
   })(); }, []);
   /* debounced save */
   useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
     try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
-    try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog })); } catch (e) { }
-  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog]);
+    try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster })); } catch (e) { }
+  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster]);
   /* auth session (Supabase configured only) */
   useEffect(() => {
     if (!supabaseEnabled) return;
@@ -2661,11 +2785,38 @@ export default function App() {
   const resetAll = useCallback(async () => {
     try { await window.storage.delete("pms-v1-a"); } catch (e) { }
     try { await window.storage.delete("pms-v1-b"); } catch (e) { }
-    setProjects(SEED_PROJECTS); setClients(SEED_CLIENTS); setNotes([]); setTasks([]); setKpiLog([]); setWorkUpdates([]); setTrainings([]); setMemory(SEED_MEMORY); setSyncLog([]);
+    setProjects(SEED_PROJECTS); setClients(SEED_CLIENTS); setNotes([]); setTasks([]); setKpiLog([]); setWorkUpdates([]); setTrainings([]); setMemory(SEED_MEMORY); setSyncLog([]); setCustomRoster(null);
     toast("Everything reset to seed data", "amber");
   }, [toast]);
 
-  const ctx = { users, me, setMe, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, toast, sheetSync, now, resetAll };
+  /* ── roster mutators (Resources → Add/Edit/Remove). Local state always;
+     best-effort Supabase profiles write when connected. ── */
+  const applyRoster = useCallback((fn) => { if (supabaseEnabled) setProfiles((ps) => fn(ps || [])); else setCustomRoster((r) => fn(r || SEED_USERS)); }, []);
+  const dbProfileUpsert = async (u) => {
+    if (!supabaseEnabled) return null;
+    const { error } = await supabase.from("profiles").upsert({ id: u.id, email: u.email || null, name: u.name, role: u.role, title: u.title, color: u.color });
+    return error;
+  };
+  const addUser = useCallback(async (u) => {
+    applyRoster((rs) => [...rs, u]);
+    const err = await dbProfileUpsert(u);
+    if (err) toast("Added to the roster — a real login account still needs sign-up or the setup script", "amber");
+    else toast(`${u.name} added to the team`, "green");
+  }, [applyRoster, toast]);
+  const updateUser = useCallback(async (u) => {
+    applyRoster((rs) => rs.map((x) => (x.id === u.id ? { ...x, ...u } : x)));
+    const err = await dbProfileUpsert(u);
+    if (err) toast(`Updated in the app — DB write failed: ${err.message}`, "amber");
+    else toast(`${u.name} updated`, "green");
+  }, [applyRoster, toast]);
+  const removeUser = useCallback(async (id, nameLabel) => {
+    applyRoster((rs) => rs.filter((x) => x.id !== id));
+    setProjects((ps) => ps.map((p) => ({ ...p, team: (p.team || []).filter((t) => t.userId !== id) })));
+    if (supabaseEnabled) { try { await supabase.from("profiles").delete().eq("id", id); } catch (e) { } }
+    toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
+  }, [applyRoster, toast]);
+
+  const ctx = { users, me, setMe, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser };
   const visNav = NAV.filter((n) => !n.admin || isAdmin);
   const [t1, t2] = TITLES[view] || ["", ""];
 
