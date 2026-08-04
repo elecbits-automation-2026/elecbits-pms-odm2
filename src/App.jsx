@@ -30,6 +30,8 @@ import {
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.svg";
+import { supabaseEnabled } from "./lib/supabase.js";
+import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -1908,10 +1910,62 @@ const TITLES = {
   memory: ["System Memory", "Templates, instructions, conversations, Drive sitemaps — injected into every AI call"],
 };
 
+/* Pre-app shell (loading / login) — carries the theme + CSS before the app mounts */
+const Shell = ({ dark, children }) => (
+  <div className="eb-root" style={{ ...(dark ? DARK : LIGHT), display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 16 }}>
+    <style>{CSS}</style>
+    {children}
+  </div>
+);
+
+/* ═══ LOGIN / SIGN-UP (Supabase Auth) ════════════════════════════════════ */
+function Login({ dark, onToggleTheme }) {
+  const [mode, setMode] = useState("signin");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    if (!email.trim() || !pw) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      if (mode === "signin") await signIn(email.trim(), pw);
+      else { await signUp(email.trim(), pw, name.trim()); setMsg("Account created. If email confirmation is enabled, confirm via the link we sent, then sign in."); setMode("signin"); setPw(""); }
+    } catch (e) { setErr(e.message || "Authentication failed"); }
+    setBusy(false);
+  };
+  return (
+    <Shell dark={dark}>
+      <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
+        <button onClick={onToggleTheme} title="Toggle theme" style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
+        <img src={elecbitsLogo} alt="Elecbits" style={{ height: 30, marginBottom: 8, display: "block" }} />
+        <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 22 }}>ODM · Project Management — {mode === "signin" ? "sign in to continue" : "create your account"}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          {mode === "signup" && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
+          <Field label="Work email" req><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
+          <Field label="Password" req><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
+          {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600 }}>{err}</div>}
+          {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>{msg}</div>}
+          <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || !email.trim() || !pw} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}</Btn>
+        </div>
+        <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
+          {mode === "signin" ? "New to the workspace? " : "Already have an account? "}
+          <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>{mode === "signin" ? "Create one" : "Sign in"}</button>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
 export default function App() {
   const [booted, setBooted] = useState(false);
   const [dark, setDark] = useState(true);
   const [me, setMe] = useState("u-admin");
+  const [session, setSession] = useState(null);
+  const [authChecked, setAuthChecked] = useState(!supabaseEnabled);
+  const [profiles, setProfiles] = useState(null);
   const [view, setView] = useState("projects");
   const [projects, setProjects] = useState(SEED_PROJECTS);
   const [clients, setClients] = useState(SEED_CLIENTS);
@@ -1924,7 +1978,7 @@ export default function App() {
   const [syncLog, setSyncLog] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [now, setNow] = useState(Date.now());
-  const users = SEED_USERS;
+  const users = supabaseEnabled ? (profiles || []) : SEED_USERS;
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
 
@@ -1948,6 +2002,27 @@ export default function App() {
     try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
     try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog })); } catch (e) { }
   }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog]);
+  /* auth session (Supabase configured only) */
+  useEffect(() => {
+    if (!supabaseEnabled) return;
+    let sub;
+    (async () => {
+      try { setSession(await getSession()); } catch (e) { }
+      setAuthChecked(true);
+      sub = onAuthChange((s) => setSession(s));
+    })();
+    return () => sub?.unsubscribe?.();
+  }, []);
+  /* load the roster + resolve my identity once signed in */
+  useEffect(() => {
+    if (!supabaseEnabled) return;
+    if (!session) { setProfiles(null); return; }
+    fetchProfiles().then((ps) => {
+      setProfiles(ps);
+      const mine = ps.find((u) => u.id === session.user?.id);
+      if (mine) setMe(mine.id);
+    }).catch(() => setProfiles([]));
+  }, [session]);
   /* ticking clock only where countdowns live */
   useEffect(() => { if (view !== "scrum" && view !== "tasks") return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, [view]);
   /* role gating */
@@ -1964,6 +2039,9 @@ export default function App() {
   const visNav = NAV.filter((n) => !n.admin || isAdmin);
   const [t1, t2] = TITLES[view] || ["", ""];
 
+  if (supabaseEnabled && !authChecked) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Checking your session…</div></Shell>;
+  if (supabaseEnabled && !session) return <Login dark={dark} onToggleTheme={() => setDark(!dark)} />;
+  if (supabaseEnabled && !profiles) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Loading your workspace…</div></Shell>;
   if (!booted) return (
     <div className="eb-root" style={{ ...(dark ? DARK : LIGHT), display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
       <style>{CSS}</style>
@@ -2002,10 +2080,13 @@ export default function App() {
               {visNav.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
             </select>
             <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-              <span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>Viewing as</span>
-              <select className="inp" style={{ width: 168 }} value={me} onChange={(e) => setMe(e.target.value)}>
-                {users.map((u) => <option key={u.id} value={u.id}>{u.name} · {u.role === "superadmin" ? "Admin" : u.role === "dept_head" ? "Dept Head" : u.role.toUpperCase()}</option>)}
-              </select>
+              {(!supabaseEnabled || isAdmin) && users.length > 0 && (<>
+                <span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>{supabaseEnabled ? "View as" : "Viewing as"}</span>
+                <select className="inp" style={{ width: 168 }} value={me} onChange={(e) => setMe(e.target.value)}>
+                  {users.map((u) => <option key={u.id} value={u.id}>{u.name} · {u.role === "superadmin" ? "Admin" : u.role === "dept_head" ? "Dept Head" : u.role.toUpperCase()}</option>)}
+                </select>
+              </>)}
+              {supabaseEnabled && <Btn small kind="ghost" onClick={async () => { await signOut(); }}>Sign out</Btn>}
               <button onClick={() => setDark(!dark)} style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
             </div>
           </header>

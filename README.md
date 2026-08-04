@@ -93,7 +93,7 @@ vars to switch each one on.
 
 | Integration | Code | Off (default) | On |
 | --- | --- | --- | --- |
-| **Supabase DB** | `src/lib/supabase.js`, `main.jsx`, `supabase/schema.sql` | localStorage | cloud persistence via the `app_kv` table |
+| **Supabase — auth + DB** | `src/lib/supabase.js`, `src/lib/auth.js`, `main.jsx`, `supabase/schema.sql` | no login, seed users, localStorage | **email/password login**, roster from `profiles`, full Postgres schema + **pgvector** |
 | **Anthropic (AI)** | `supabase/functions/claude/` | offline parsers | live Claude, key held server-side |
 | **Google Drive/Sheets** | `supabase/functions/drive-sync/` | local Sync Log | writes each event to a Google Sheet + `drive_sync_log` |
 
@@ -104,14 +104,29 @@ one Supabase project hosts the database *and* the two key-holding functions.
 
 ## Turn on the live services
 
-### 1. Supabase database
+### 1. Supabase database + login
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. **SQL editor** → paste and run [`supabase/schema.sql`](supabase/schema.sql).
+   This creates **every table** (profiles, clients, projects, team_assignments,
+   scrum_notes, tasks, kpi_log, work_updates, trainings, memory, app_kv,
+   drive_sync_log), enables **pgvector** (the `memory.embedding` column +
+   `match_memory()` for semantic recall), and installs a trigger that
+   **auto-creates a profile on sign-up** — the *first* user to register becomes
+   the **superadmin**, everyone after is an engineer (promote others in the
+   `profiles` table).
 3. **Settings → API** → copy the Project URL and the `anon` public key into
    `.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 
-The app now persists to Postgres (shared team state) instead of localStorage.
+Now the app **requires login** (email/password via Supabase Auth), loads its
+roster from `profiles`, and persists to Postgres. Admins keep a "View as"
+switcher to inspect any role; everyone else sees only their own view. With the
+env vars unset, the app stays in zero-config demo mode (no login, seed users,
+localStorage).
+
+> **Email confirmation:** Supabase enables it by default. For a quick internal
+> rollout, turn it off under **Authentication → Providers → Email** so new
+> sign-ups can log in immediately.
 
 ### 2. Anthropic — live Claude in all four AI windows
 
