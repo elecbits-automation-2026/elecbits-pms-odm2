@@ -2,109 +2,100 @@
 
 This turns the four AI windows — Daily-Scrum **Organise**, Create-Project
 **Designer LLD**, Complete-Now **verification**, Work-update **KPI scoring** —
-from their offline fallbacks into **real Claude**. No code change; it's a key +
-one function deploy.
+from their offline fallbacks into **real Claude**. No code change; just keys.
 
 > Right now those windows run heuristic offline parsers because the browser has
-> no API key. The secure fix is a tiny **proxy** (already coded at
-> `supabase/functions/claude/`) that holds the key server-side. You should have
-> Supabase attached first (see `SUPABASE_SETUP.md`) — the proxy lives there.
+> no API key. Below are **three ways** to fix that — two need **no terminal /
+> no CLI** at all. Pick one.
 
 ---
 
-## 1. Get an Anthropic API key
+## First: get an Anthropic API key (needed for every path)
 
 1. Sign in at [console.anthropic.com](https://console.anthropic.com).
-2. **Settings → API Keys → Create Key**. Copy it (`sk-ant-...`) — you won't see
-   it again.
-3. Make sure the workspace has some credit (**Billing**).
-
-## 2. Install + link the Supabase CLI (once)
-
-```bash
-npm i -g supabase          # or: brew install supabase/tap/supabase
-supabase login             # opens the browser
-supabase link --project-ref <your-project-ref>   # the ref from your Supabase URL
-```
-
-## 3. Deploy the proxy + store the key as a secret
-
-```bash
-# from the repo root
-supabase functions deploy claude
-
-supabase secrets set ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
-# optional — pin a model (default is claude-sonnet-4-5):
-supabase secrets set CLAUDE_MODEL=claude-sonnet-4-5
-```
-
-The function URL is:
-
-```
-https://<your-project-ref>.functions.supabase.co/claude
-```
-
-Quick check that it's live (should return JSON from Claude):
-
-```bash
-curl -s -X POST https://<ref>.functions.supabase.co/claude \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"say hi in 3 words"}]}'
-```
-
-## 4. Point the app at the proxy — in BOTH places
-
-**Vercel** (live site) → Settings → Environment Variables:
-
-| Name | Value |
-| --- | --- |
-| `VITE_CLAUDE_PROXY_URL` | `https://<ref>.functions.supabase.co/claude` |
-
-Then **Redeploy**.
-
-**Local `.env`:**
-
-```bash
-VITE_CLAUDE_PROXY_URL=https://<ref>.functions.supabase.co/claude
-```
-
-```bash
-npm run dev
-```
-
-## 5. Verify inside the app
-
-Go to **Daily Scrum**, paste a note, hit **Organise with AI**. If the pill reads
-“AI organised” (not “Offline parse”), Claude is live. The Designer-LLD generator,
-the Complete-Now verification questions, and the Work-update KPI score now all
-use real Claude too.
+2. **Settings → API Keys → Create Key**. Copy it (`sk-ant-...`).
+3. Add some credit under **Billing** (calls cost money).
 
 ---
 
-## The key never touches the browser
+## Path A — no CLI, no Supabase, ~2 minutes ✅ easiest
 
-`VITE_CLAUDE_PROXY_URL` is just a URL — safe to expose. The actual
-`ANTHROPIC_API_KEY` lives only as a Supabase secret on the server side. That's
-why the proxy is the recommended path.
+Put the key straight into the app via Vercel. Works immediately, no proxy.
 
-### Local-only shortcut (not for production)
+1. **Vercel → your project → Settings → Environment Variables → Add:**
 
-For a fast local test without deploying a function, you can skip steps 2–4 and
-put the key straight in `.env`:
+   | Name | Value |
+   | --- | --- |
+   | `VITE_ANTHROPIC_API_KEY` | `sk-ant-...` |
+
+2. **Deployments → ⋯ → Redeploy.**
+3. Open the app → Daily Scrum → **Organise with AI**. If the pill says
+   “AI organised” (not “Offline parse”), Claude is live — in all four windows.
+
+**Trade-off:** the key ships inside the browser bundle, so anyone who inspects
+the site can read it. Fine for a private/internal tool — just rotate the key if
+it leaks, and move to Path B before anything public. **No Supabase needed for
+this.**
+
+---
+
+## Path B — no CLI, secure (deploy the proxy from the Supabase dashboard)
+
+Same safety as the CLI route (key stays server-side) but done entirely in the
+browser. Requires a Supabase project.
+
+1. Supabase project → **Edge Functions** (left sidebar) → **Create a function**
+   → choose the in-browser **editor**.
+2. Name it **`claude`**.
+3. Open [`supabase/functions/claude/index.ts`](supabase/functions/claude/index.ts)
+   from this repo, copy the whole file, and paste it into the editor
+   (replace the sample code). Click **Deploy**.
+4. In that function's **Settings**, turn **Verify JWT** *off* — the app calls it
+   without a login token. (Default is on.)
+5. Add the secret: **Project Settings → Edge Functions → Add new secret**
+   (or the function’s **Secrets** tab):
+   `ANTHROPIC_API_KEY` = `sk-ant-...`  *(optional: `CLAUDE_MODEL` = `claude-sonnet-4-5`)*.
+6. Copy the function URL shown in the dashboard — it looks like
+   `https://<your-ref>.functions.supabase.co/claude`.
+7. **Vercel → Settings → Environment Variables → Add:**
+   `VITE_CLAUDE_PROXY_URL` = that URL. Then **Redeploy**.
+8. Verify the same way (Daily Scrum → Organise with AI).
+
+---
+
+## Path C — the CLI route (only if you prefer a terminal)
 
 ```bash
-VITE_ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
+npm i -g supabase && supabase login
+supabase link --project-ref <your-ref>
+supabase functions deploy claude
+supabase secrets set ANTHROPIC_API_KEY=sk-ant-xxxx
 ```
+Then set `VITE_CLAUDE_PROXY_URL=https://<ref>.functions.supabase.co/claude` in
+Vercel and redeploy. (The `config.toml` in this repo already turns off JWT
+verification for the function, so with the CLI you skip step B-4.)
 
-This calls Anthropic directly from the browser and **exposes the key in the
-bundle** — never ship it. Remove it and use the proxy for anything real.
+---
+
+## Which should I pick?
+
+| | CLI needed | Supabase needed | Key hidden | Speed |
+| --- | :---: | :---: | :---: | :---: |
+| **Path A** (direct key) | ✗ | ✗ | ✗ | fastest |
+| **Path B** (dashboard proxy) | ✗ | ✓ | ✓ | medium |
+| **Path C** (CLI proxy) | ✓ | ✓ | ✓ | medium |
+
+Start with **Path A** to see it working today; switch to **Path B** when you
+want the key off the browser. Both are 100% dashboard — no terminal.
+
+---
 
 ### Troubleshooting
 
-- **Still shows “Offline parse”:** `VITE_CLAUDE_PROXY_URL` isn't in the build —
-  check it's set for the right Vercel environment and that you redeployed.
-- **Function returns `ANTHROPIC_API_KEY not set`:** run the `supabase secrets
-  set` step, then `supabase functions deploy claude` again.
-- **401 / auth error from the function:** the CLI didn't pick up the secret, or
-  the key is wrong/'`service`'-scoped — recreate the key in the console.
+- **Still “Offline parse”:** the env var isn’t in the build — confirm it’s set
+  for the right Vercel environment and that you **redeployed** after adding it.
+- **Path B returns `ANTHROPIC_API_KEY not set`:** add the secret in the
+  dashboard, then re-deploy the function (Deploy again).
+- **Path B returns 401 “Invalid JWT”:** you didn’t turn off **Verify JWT** for
+  the function (step B-4).
 - **`credit balance is too low`:** add credit in the Anthropic console → Billing.
