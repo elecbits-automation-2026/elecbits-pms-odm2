@@ -33,10 +33,37 @@ const b64url = (data: ArrayBuffer | string) => {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 };
 
+/* Tolerant PEM → CryptoKey.
+   The secret arrives from a dashboard paste, so it can carry surrounding JSON
+   quotes, literal \n escapes, real newlines, or stray whitespace. Anything
+   left in the base64 body makes the DER invalid and crypto.subtle throws
+   "incorrect length for PRIVATE" — so strip to base64 characters only. */
 async function importPrivateKey(pem: string): Promise<CryptoKey> {
-  const body = pem.replace(/-----BEGIN PRIVATE KEY-----/, "").replace(/-----END PRIVATE KEY-----/, "").replace(/\s+/g, "");
-  const der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
-  return crypto.subtle.importKey("pkcs8", der.buffer, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  let s = String(pem).trim();
+  s = s.replace(/^["']+|["']+$/g, "");   // surrounding quotes from a JSON paste
+  s = s.replace(/\\n/g, "\n");            // literal backslash-n escapes
+  if (!/BEGIN [A-Z ]*PRIVATE KEY/.test(s)) {
+    throw new Error("GOOGLE_PRIVATE_KEY does not look like a PEM key — paste the whole private_key value, including the BEGIN/END lines");
+  }
+  if (/BEGIN RSA PRIVATE KEY/.test(s)) {
+    throw new Error("GOOGLE_PRIVATE_KEY is PKCS#1 (BEGIN RSA PRIVATE KEY); Google's JSON key is PKCS#8 — re-copy the private_key field from the downloaded JSON");
+  }
+  const body = s
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "")
+    .replace(/-----END [A-Z ]*PRIVATE KEY-----/, "")
+    .replace(/[^A-Za-z0-9+/=]/g, "");     // drop newlines, spaces, quotes, anything else
+  if (body.length < 100) throw new Error("GOOGLE_PRIVATE_KEY looks truncated — re-paste the full key");
+  let der: Uint8Array;
+  try {
+    der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
+  } catch {
+    throw new Error("GOOGLE_PRIVATE_KEY is not valid base64 — re-paste it exactly as it appears in the JSON key file");
+  }
+  try {
+    return await crypto.subtle.importKey("pkcs8", der.buffer, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  } catch (e) {
+    throw new Error(`GOOGLE_PRIVATE_KEY could not be parsed (${e}). Copy the private_key value from the JSON key file verbatim — no surrounding quotes, keep the \\n sequences.`);
+  }
 }
 
 // Full drive scope: the same service account both reads project folders and

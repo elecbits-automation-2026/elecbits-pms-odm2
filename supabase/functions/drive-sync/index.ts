@@ -43,11 +43,16 @@ const b64url = (data: ArrayBuffer | string) => {
 };
 
 // ── PEM (PKCS8) → CryptoKey for RS256 signing ──
+/* Tolerant PEM → CryptoKey — see drive-read for the rationale: a dashboard
+   paste can carry quotes, \n escapes or stray whitespace, and anything left in
+   the base64 body makes the DER invalid. */
 async function importPrivateKey(pem: string): Promise<CryptoKey> {
-  const body = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/, "")
-    .replace(/-----END PRIVATE KEY-----/, "")
-    .replace(/\s+/g, "");
+  let s = String(pem).trim().replace(/^["']+|["']+$/g, "").replace(/\\n/g, "\n");
+  const body = s
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "")
+    .replace(/-----END [A-Z ]*PRIVATE KEY-----/, "")
+    .replace(/[^A-Za-z0-9+/=]/g, "");
+  if (body.length < 100) throw new Error("GOOGLE_PRIVATE_KEY looks truncated or missing");
   const der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
   return crypto.subtle.importKey(
     "pkcs8",
