@@ -2126,8 +2126,10 @@ const Shell = ({ dark, children }) => (
   </div>
 );
 
-/* ═══ LOGIN / SIGN-UP (Supabase Auth) ════════════════════════════════════ */
-function Login({ dark, onToggleTheme }) {
+/* ═══ LOGIN / SIGN-UP ═════════════════════════════════════════════════════
+   Real Supabase email/password auth when Supabase is connected; a working demo
+   login (any credentials, or pick a role) when it isn't. Always the front door. */
+function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
   const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
@@ -2136,6 +2138,7 @@ function Login({ dark, onToggleTheme }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const submit = async () => {
+    if (demo) { onDemoLogin("u-admin"); return; }
     if (!email.trim() || !pw) return;
     setBusy(true); setErr(""); setMsg("");
     try {
@@ -2149,19 +2152,35 @@ function Login({ dark, onToggleTheme }) {
       <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
         <button onClick={onToggleTheme} title="Toggle theme" style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         <img src={elecbitsLogo} alt="Elecbits" style={{ height: 30, marginBottom: 8, display: "block" }} />
-        <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 22 }}>ODM · Project Management — {mode === "signin" ? "sign in to continue" : "create your account"}</div>
+        <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 22 }}>ODM · Project Management — {mode === "signin" || demo ? "sign in to continue" : "create your account"}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-          {mode === "signup" && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
-          <Field label="Work email" req><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
-          <Field label="Password" req><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
+          {mode === "signup" && !demo && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
+          <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
+          <Field label="Password"><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
           {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600 }}>{err}</div>}
           {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>{msg}</div>}
-          <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || !email.trim() || !pw} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}</Btn>
+          <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : mode === "signin" || demo ? "Sign in" : "Create account"}</Btn>
         </div>
-        <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
-          {mode === "signin" ? "New to the workspace? " : "Already have an account? "}
-          <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>{mode === "signin" ? "Create one" : "Sign in"}</button>
-        </div>
+        {demo ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
+              <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or jump in as</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {SEED_USERS.map((u) => (
+                <button key={u.id} onClick={() => onDemoLogin(u.id)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
+                  <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
+                </button>
+              ))}
+            </div>
+            <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>Demo mode — no Supabase connected yet. Any credentials work. Connect Supabase for real accounts &amp; cloud data.</div>
+          </>
+        ) : (
+          <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
+            {mode === "signin" ? "New to the workspace? " : "Already have an account? "}
+            <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>{mode === "signin" ? "Create one" : "Sign in"}</button>
+          </div>
+        )}
       </div>
     </Shell>
   );
@@ -2201,6 +2220,9 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(!supabaseEnabled);
   const [profiles, setProfiles] = useState(null);
+  const [demoUser, setDemoUser] = useState(() => { try { return localStorage.getItem("pms-demo-user") || ""; } catch { return ""; } });
+  const demoLogin = useCallback((id) => { setDemoUser(id); setMe(id); try { localStorage.setItem("pms-demo-user", id); } catch { } }, []);
+  const demoLogout = useCallback(() => { setDemoUser(""); try { localStorage.removeItem("pms-demo-user"); } catch { } }, []);
   const [view, setView] = useState("projects");
   const [projects, setProjects] = useState(SEED_PROJECTS);
   const [clients, setClients] = useState(SEED_CLIENTS);
@@ -2278,6 +2300,7 @@ export default function App() {
   if (supabaseEnabled && !authChecked) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Checking your session…</div></Shell>;
   if (supabaseEnabled && !session) return <Login dark={dark} onToggleTheme={() => setDark(!dark)} />;
   if (supabaseEnabled && !profiles) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Loading your workspace…</div></Shell>;
+  if (!supabaseEnabled && !demoUser) return <Login dark={dark} demo onDemoLogin={demoLogin} onToggleTheme={() => setDark(!dark)} />;
   if (!booted) return (
     <div className="eb-root" style={{ ...(dark ? DARK : LIGHT), display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
       <style>{CSS}</style>
@@ -2323,7 +2346,8 @@ export default function App() {
                 </select>
               </>)}
               {supabaseEnabled && <Btn small kind="ghost" onClick={async () => { await signOut(); }}>Sign out</Btn>}
-              {!supabaseEnabled && <span title="No Supabase detected in this build — running on local demo data. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel and redeploy with a fresh build."><Pill color="var(--amber)"><Database size={10} /> Demo — no Supabase</Pill></span>}
+              {!supabaseEnabled && <Btn small kind="ghost" onClick={demoLogout}>Sign out</Btn>}
+              {!supabaseEnabled && <span title="No Supabase detected in this build — running on local demo data. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel and redeploy with a fresh build."><Pill color="var(--amber)"><Database size={10} /> Demo</Pill></span>}
               <button onClick={() => setDark(!dark)} style={{ width: 34, height: 34, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
             </div>
           </header>
