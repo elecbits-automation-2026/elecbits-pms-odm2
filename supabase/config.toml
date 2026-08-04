@@ -10,3 +10,6 @@ verify_jwt = false
 
 [functions.drive-sync]
 verify_jwt = false
+
+[functions.drive-read]
+verify_jwt = false

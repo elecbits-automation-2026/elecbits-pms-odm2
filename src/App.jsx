@@ -175,29 +175,52 @@ const KPI_T = { queries: 3, decisions: 5, onTime: 70, escalations: 1 };
    the app still runs end-to-end. For live Claude in a real deployment set
    VITE_CLAUDE_PROXY_URL to your own backend proxy (recommended — keeps the key
    server-side), or, for local dev only, VITE_ANTHROPIC_API_KEY.               */
-const AI_ENDPOINT = import.meta.env.VITE_CLAUDE_PROXY_URL || "https://api.anthropic.com/v1/messages";
 const AI_MODEL = import.meta.env.VITE_CLAUDE_MODEL || "claude-sonnet-4-5";
-/* Google Drive / Sheets sync endpoint (Supabase Edge Function). Empty → the
-   Sync Log stays local-only; set VITE_DRIVE_SYNC_URL to write to Drive/Sheets. */
+/* Google Drive endpoints (Supabase Edge Functions). Empty → the Sync Log stays
+   local-only and Drive analysis reasons over the folder map instead of real
+   contents. Set VITE_DRIVE_SYNC_URL (writes) and VITE_DRIVE_READ_URL (reads). */
 const DRIVE_SYNC_URL = import.meta.env.VITE_DRIVE_SYNC_URL || "";
+const DRIVE_READ_URL = import.meta.env.VITE_DRIVE_READ_URL || "";
+/* Fetch the real contents of the project's Drive folders via the drive-read
+   Edge Function. Returns a text digest for prompts, or "" when unavailable. */
+async function driveReadDigest(projectId, linkedIds) {
+  if (!DRIVE_READ_URL) return "";
+  try {
+    const res = await fetch(DRIVE_READ_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId, linkedIds: linkedIds || [] }) });
+    const data = await res.json();
+    if (!res.ok || data.error) return "";
+    return String(data.digest || "").slice(0, 4000);
+  } catch { return ""; }
+}
+/* Tries the proxy first (key stays server-side), then the direct browser key —
+   so a configured-but-undeployed proxy no longer silently kills live AI. */
 async function claude(prompt, { json = true } = {}) {
-  const headers = { "Content-Type": "application/json" };
-  if (import.meta.env.VITE_ANTHROPIC_API_KEY) {
-    headers["x-api-key"] = import.meta.env.VITE_ANTHROPIC_API_KEY;
-    headers["anthropic-version"] = "2023-06-01";
-    headers["anthropic-dangerous-direct-browser-access"] = "true";
+  const attempts = [];
+  if (import.meta.env.VITE_CLAUDE_PROXY_URL) attempts.push({ url: import.meta.env.VITE_CLAUDE_PROXY_URL, direct: false });
+  if (import.meta.env.VITE_ANTHROPIC_API_KEY || attempts.length === 0) attempts.push({ url: "https://api.anthropic.com/v1/messages", direct: true });
+  let lastErr;
+  for (const a of attempts) {
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (a.direct && import.meta.env.VITE_ANTHROPIC_API_KEY) {
+        headers["x-api-key"] = import.meta.env.VITE_ANTHROPIC_API_KEY;
+        headers["anthropic-version"] = "2023-06-01";
+        headers["anthropic-dangerous-direct-browser-access"] = "true";
+      }
+      const res = await fetch(a.url, {
+        method: "POST", headers,
+        body: JSON.stringify({ model: AI_MODEL, max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message || "API error");
+      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (!json) return text;
+      const clean = text.replace(/```json|```/gi, "").trim();
+      const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
+      return JSON.parse(s >= 0 ? clean.slice(s, e + 1) : clean);
+    } catch (e) { lastErr = e; }
   }
-  const res = await fetch(AI_ENDPOINT, {
-    method: "POST", headers,
-    body: JSON.stringify({ model: AI_MODEL, max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message || "API error");
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-  if (!json) return text;
-  const clean = text.replace(/```json|```/gi, "").trim();
-  const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
-  return JSON.parse(s >= 0 ? clean.slice(s, e + 1) : clean);
+  throw lastErr || new Error("AI unreachable");
 }
 const memCtx = (memory) => {
   if (!memory || !memory.length) return "";
@@ -286,25 +309,27 @@ const fallbackScrum = (raw, date, users, projects) => {
   return { summary: "Offline basic parse — AI was unreachable, review before pushing.", tasks };
 };
 /* Drive intelligence — read the PM + PCB folders and say what's going on. */
-const driveIntelPrompt = (p, users, memory) => `You are the Elecbits ODM project-intelligence analyst. Read the project's Google Drive knowledge and report what is actually going on and how things are moving.
+const driveIntelPrompt = (p, users, memory, driveData) => `You are the Elecbits ODM project-intelligence analyst. Read the project's Google Drive knowledge and report what is actually going on and how things are moving.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || "(unnamed)"} | status ${p.status} | deadline ${p.deadline || "?"}
 PM FOLDER: /ODM/PM/${p.projectId}/ (Checklist.xlsx + Reports/ + Client-Comms/)
 PCB / LINKED ID FOLDERS: ${(p.linkedIds || []).map((x) => `/ODM/PCB/${x}/`).join(", ") || "none linked"}
+${driveData ? `LIVE DRIVE CONTENTS (real files just read from Google Drive):\n"""${driveData}"""` : "LIVE DRIVE READ: not connected — reason from the folder map, known status and intelligence log."}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
 KNOWN STATUS (human-written): """${(p.knownStatus || "not provided").slice(0, 1500)}"""
 MANUAL INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 1500) || "none"}
-Write plain text (no markdown symbols), under 220 words, with these labelled lines: WHERE IT STANDS, HOW IT IS MOVING, RISKS / BLOCKERS, NEXT MOVES. Be concrete and reference the folders and IDs above.`;
+Write plain text (no markdown symbols), under 220 words, with these labelled lines: WHERE IT STANDS, HOW IT IS MOVING, RISKS / BLOCKERS, NEXT MOVES. Be concrete and reference the folders, files and IDs above.`;
 const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""}, status ${p.status}, deadline ${p.deadline || "?"}. ${p.knownStatus ? "Known status: " + p.knownStatus.slice(0, 300) : "No written status yet."}\n\nHOW IT IS MOVING\nDrive read unavailable (AI offline). Reference: /ODM/PM/${p.projectId}/ and PCB folders ${(p.linkedIds || []).join(", ") || "—"}.\n\nRISKS / BLOCKERS\nAdd manual intelligence below so the OS can reason about this project.\n\nNEXT MOVES\nOrganise a scrum note to create the first tasks, then re-run the analysis.`;
 /* Organise a manual-intelligence note into a crisp status line. */
 const intelOrgPrompt = (p, raw, memory) => `Organise this manual intelligence note about Elecbits ODM project ${p.projectId} into one or two crisp status sentences (plain text, no markdown). Keep facts, drop filler.
 ${memCtx(memory)}
 NOTE: """${String(raw).slice(0, 1200)}"""`;
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
-const driveLearnPrompt = (pid, linkedIds, knownStatus, memory) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folder structure and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
+const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
 ${memCtx(memory)}
 PM FOLDER: /ODM/PM/${pid}/ → Checklist.xlsx (tabs: Gantt, PM Milestones, HW Design, HW Testing, FW Logic, FW Testing, Overall Testing), Reports/, Client-Comms/, LLD/
 LINKED GW/PCB FOLDERS: ${(linkedIds || []).map((x) => `/ODM/PCB/${x}/ → Gerber/, BoM/, Schematics/, Test-Reports/`).join("; ") || "none linked"}
+${driveData ? `LIVE DRIVE CONTENTS (real files just read from Google Drive):\n"""${driveData}"""` : ""}
 KNOWN STATUS (human-written): """${(knownStatus || "not provided").slice(0, 1500)}"""
 Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, ARTEFACT CONVENTIONS (file names + where closures must store evidence), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
 const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at /ODM/PM/${pid}/ (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under /ODM/PCB/<id>/ (Gerber, BoM, Schematics, Test-Reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
@@ -917,7 +942,8 @@ function AddExistingProject({ onClose }) {
   const learnFromDrive = async () => {
     const ids = linked.map((x) => x.trim().toUpperCase()).filter(Boolean);
     setLearnBusy(true);
-    try { const txt = await claude(driveLearnPrompt(clean || "(new project)", ids, knownStatus, memory), { json: false }); setLearning(txt); }
+    const digest = await driveReadDigest(clean, ids);
+    try { const txt = await claude(driveLearnPrompt(clean || "(new project)", ids, knownStatus, memory, digest), { json: false }); setLearning(txt); if (digest) toast("Learned from live Drive contents", "green"); }
     catch { setLearning(fallbackLearn(clean || "(new project)", ids, knownStatus)); toast("AI offline — template learning loaded, edit freely", "amber"); }
     setLearnBusy(false);
   };
@@ -1071,7 +1097,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
 
   const analyseDrive = async () => {
     setIntelBusy(true);
-    try { const txt = await claude(driveIntelPrompt(p, users, memory), { json: false }); setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString() } }); }
+    const digest = await driveReadDigest(p.projectId, p.linkedIds);
+    try { const txt = await claude(driveIntelPrompt(p, users, memory, digest), { json: false }); setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString(), live: !!digest } }); if (digest) toast("Analysed with live Drive contents", "green"); }
     catch { setIntel(fallbackIntel(p)); toast("AI offline — showing what we have", "amber"); }
     setIntelBusy(false);
   };
