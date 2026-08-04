@@ -1,0 +1,21 @@
+{
+  "name": "elecbits-pms-odm2",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Elecbits ODM Project Management System — chat-guided project creation, AI-organised daily scrum, AI-gated task closure, PM KPIs and a work-update vault.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.454.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
