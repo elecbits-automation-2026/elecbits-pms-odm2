@@ -300,6 +300,26 @@ const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""
 const intelOrgPrompt = (p, raw, memory) => `Organise this manual intelligence note about Elecbits ODM project ${p.projectId} into one or two crisp status sentences (plain text, no markdown). Keep facts, drop filler.
 ${memCtx(memory)}
 NOTE: """${String(raw).slice(0, 1200)}"""`;
+/* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
+const driveLearnPrompt = (pid, linkedIds, knownStatus, memory) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folder structure and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
+${memCtx(memory)}
+PM FOLDER: /ODM/PM/${pid}/ → Checklist.xlsx (tabs: Gantt, PM Milestones, HW Design, HW Testing, FW Logic, FW Testing, Overall Testing), Reports/, Client-Comms/, LLD/
+LINKED GW/PCB FOLDERS: ${(linkedIds || []).map((x) => `/ODM/PCB/${x}/ → Gerber/, BoM/, Schematics/, Test-Reports/`).join("; ") || "none linked"}
+KNOWN STATUS (human-written): """${(knownStatus || "not provided").slice(0, 1500)}"""
+Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, ARTEFACT CONVENTIONS (file names + where closures must store evidence), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
+const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at /ODM/PM/${pid}/ (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under /ODM/PCB/<id>/ (Gerber, BoM, Schematics, Test-Reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
+/* Project chat — the PM's copilot on deep project details. */
+const projChatPrompt = (p, projTasks, users, history, q, memory) => `You are the Elecbits ODM project copilot for ${p.projectId}. Answer the question using the project data below — be specific and direct, plain text (no markdown), under 180 words. If something isn't in the data, say so and point to where it would live in the Drive folders.
+${memCtx(memory)}
+PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
+TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
+LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | PM folder /ODM/PM/${p.projectId}/
+KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
+INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
+DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
+TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
+RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
+QUESTION: """${String(q).slice(0, 600)}"""`;
 
 /* ═══ GLOBAL STYLES + UI ATOMS ═══════════════════════════════════════════ */
 const CSS = `
@@ -876,7 +896,9 @@ function ProjectsModule() {
    timeline, and a known-status paragraph. No LLD gates — this is an existing
    project the OS starts tracking (Drive intelligence lives in the detail view). */
 function AddExistingProject({ onClose }) {
-  const { projects, setProjects, users, me, toast, sheetSync } = useCtx();
+  const { projects, setProjects, users, me, toast, sheetSync, memory, setMemory } = useCtx();
+  const [learning, setLearning] = useState("");
+  const [learnBusy, setLearnBusy] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [name, setName] = useState("");
   const [pmId, setPmId] = useState("");
@@ -892,6 +914,13 @@ function AddExistingProject({ onClose }) {
   const valid = clean && !dupe && !badChars && name.trim() && pmId && deadline;
   const setLink = (i, v) => setLinked((l) => l.map((x, j) => (j === i ? v : x)));
   const setRow = (i, v) => setRows((r) => r.map((x, j) => (j === i ? { ...x, userId: v } : x)));
+  const learnFromDrive = async () => {
+    const ids = linked.map((x) => x.trim().toUpperCase()).filter(Boolean);
+    setLearnBusy(true);
+    try { const txt = await claude(driveLearnPrompt(clean || "(new project)", ids, knownStatus, memory), { json: false }); setLearning(txt); }
+    catch { setLearning(fallbackLearn(clean || "(new project)", ids, knownStatus)); toast("AI offline — template learning loaded, edit freely", "amber"); }
+    setLearnBusy(false);
+  };
   const submit = () => {
     if (!valid) return;
     const team = [{ slot: "PM (Project Manager)", userId: pmId }, ...rows.filter((r) => r.userId)];
@@ -900,13 +929,20 @@ function AddExistingProject({ onClose }) {
       clientName: "", clientId: "", industry: "", orgSize: "", contact: {},
       linkedIds: linked.map((x) => x.trim().toUpperCase()).filter(Boolean),
       team, startDate, deadline, status, knownStatus: knownStatus.trim(),
-      lldCustomer: null, lldDesigner: null, intelligence: [],
+      lldCustomer: null, lldDesigner: null, intelligence: [], chat: [],
+      driveLearning: learning.trim() || null,
       createdAt: new Date().toISOString(), createdBy: me,
     };
     setProjects((x) => [p, ...x]);
+    // The learning becomes a System Memory note — injected into every AI call,
+    // so scrum parsing / task allocation / closure checks on this project use it.
+    if (learning.trim()) {
+      setMemory((m) => [{ id: uid(), type: "note", title: `Drive learning — ${clean}`, content: learning.trim(), createdAt: new Date().toISOString() }, ...m]);
+      sheetSync("System Memory", `Drive learning for ${clean} stored`);
+    }
     sheetSync("Project Data and IDs (Google Sheet)", `${clean} registered (existing)`);
     sheetSync(`Drive /ODM/PM/${clean}/`, `Linked to ${p.linkedIds.length} PCB folder(s)`);
-    toast(`Project ${clean} added`, "green");
+    toast(`Project ${clean} added${learning.trim() ? " — Drive learning saved to memory" : ""}`, "green");
     onClose();
   };
   return (
@@ -961,6 +997,19 @@ function AddExistingProject({ onClose }) {
         <Field label="Known status — what's going on right now (paragraph)">
           <textarea className="inp" rows={4} value={knownStatus} onChange={(e) => setKnownStatus(e.target.value)} placeholder="Where the project stands, what's done, what's pending, blockers, client situation… The OS uses this plus the Drive folders to reason about the project." />
         </Field>
+        <div style={{ border: "1px dashed var(--bdr2)", borderRadius: 11, padding: 13, background: "var(--s2)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+            <Btn small icon={learnBusy ? Loader2 : Database} disabled={learnBusy || !clean} onClick={learnFromDrive}>{learnBusy ? "Learning from Drive…" : learning ? "Re-learn from Drive" : "Learn from Drive"}</Btn>
+            <span style={{ fontSize: 11.5, color: "var(--txt2)", flex: 1, minWidth: 200 }}>Reads the /ODM/PM/{clean || "<ID>"}/ and linked GW/PCB folders and distils a knowledge note. Saved to System Memory on creation — used for this project's task allocation.</span>
+          </div>
+          {learnBusy && <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", color: "var(--txt2)", fontSize: 12 }}><Loader2 className="spin" size={13} /> Reading folder structure, checklist tabs and status — distilling allocation hints…</div>}
+          {learning && !learnBusy && (
+            <div className="fade" style={{ marginTop: 10 }}>
+              <textarea className="inp" rows={7} style={{ fontSize: 12, lineHeight: 1.55, background: "var(--s1)" }} value={learning} onChange={(e) => setLearning(e.target.value)} />
+              <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 5 }}>Editable — this exact text becomes the memory note "Drive learning — {clean}".</div>
+            </div>
+          )}
+        </div>
       </div>
     </Modal>
   );
@@ -984,6 +1033,10 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [intelBusy, setIntelBusy] = useState(false);
   const [noteVal, setNoteVal] = useState("");
   const [noteBusy, setNoteBusy] = useState(false);
+  const [chatVal, setChatVal] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const chatRef = useRef(null);
+  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [(p.chat || []).length, chatBusy]);
   const upd = (patch) => setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, ...patch } : x)));
   const nowMs = now || Date.now();
   const pm = p.team?.find((t) => t.slot.startsWith("PM"));
@@ -1035,6 +1088,21 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const slotUser = (slot) => teamDraft.find((t) => t.slot === slot)?.userId || "";
   const setSlot = (slot, userId) => setTeamDraft((td) => { const rest = td.filter((t) => t.slot !== slot); return userId ? [...rest, { slot, userId }] : rest; });
   const saveTeam = () => { upd({ team: teamDraft.filter((t) => t.userId) }); setEditTeam(false); toast("Team updated", "green"); };
+  const sendChat = async () => {
+    const q = chatVal.trim(); if (!q || chatBusy) return;
+    const hist = p.chat || [];
+    const mine = { id: uid(), who: "me", text: q, by: me, at: new Date().toISOString() };
+    upd({ chat: [...hist, mine] });
+    setChatVal(""); setChatBusy(true);
+    let reply;
+    try { reply = await claude(projChatPrompt(p, projTasks, users, hist, q, memory), { json: false }); }
+    catch {
+      const open = projTasks.filter((t) => t.status !== "done");
+      reply = `AI is unreachable, so here's the data directly: ${p.projectId} is ${p.status}, deadline ${fmtDate(p.deadline)}, ${done.length}/${projTasks.length} tasks done.${open.length ? ` Open: ${open.slice(0, 5).map((t) => t.title).join("; ")}${open.length > 5 ? "…" : ""}.` : ""} Known status: ${p.knownStatus ? p.knownStatus.slice(0, 200) : "not written yet"}.`;
+    }
+    upd({ chat: [...hist, mine, { id: uid(), who: "ai", text: reply, at: new Date().toISOString() }] });
+    setChatBusy(false);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1169,6 +1237,33 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   })}
                 </div>
               )}
+            </div>
+          </Section>
+
+          <Section>
+            <CardLabel right={<Pill color="var(--acc)"><Bot size={11} /> knows tasks · status · Drive · memory</Pill>}>Project chat — ask the AI</CardLabel>
+            <div ref={chatRef} style={{ maxHeight: 330, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, marginBottom: 11, paddingRight: 4 }}>
+              {(p.chat || []).length === 0 && !chatBusy && (
+                <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.7, padding: "6px 2px" }}>
+                  Ask anything about this project — the copilot answers from its tasks, team, known status, Drive folders and system memory. Try:
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+                    {["What's blocking us right now?", "Who is overloaded this week?", "What should I chase before the deadline?"].map((q) => (
+                      <button key={q} onClick={() => setChatVal(q)} style={chipS(false)}>{q}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(p.chat || []).map((m) => (
+                <div key={m.id} style={{ display: "flex", justifyContent: m.who === "me" ? "flex-end" : "flex-start", gap: 7 }}>
+                  {m.who === "ai" && <span style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--s2)", border: "1px solid var(--bdr)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}><Bot size={12} style={{ color: "var(--acc)" }} /></span>}
+                  <div style={{ maxWidth: "84%", padding: "8px 12px", borderRadius: m.who === "me" ? "12px 12px 4px 12px" : "12px 12px 12px 4px", background: m.who === "me" ? "var(--acc)" : "var(--s2)", color: m.who === "me" ? "#fff" : "var(--txt)", fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                </div>
+              ))}
+              {chatBusy && <div style={{ display: "flex", gap: 7 }}><span style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--s2)", border: "1px solid var(--bdr)", display: "flex", alignItems: "center", justifyContent: "center" }}><Bot size={12} style={{ color: "var(--acc)" }} /></span><div style={{ padding: "6px 12px", borderRadius: 12, background: "var(--s2)" }}><TypingDots /></div></div>}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="inp" style={{ flex: 1 }} placeholder="Ask about deep details — deadlines, load, risks, next moves…" value={chatVal} onChange={(e) => setChatVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendChat()} />
+              <Btn title="Send" icon={chatBusy ? Loader2 : Send} disabled={chatBusy || !chatVal.trim()} onClick={sendChat} style={{ width: 44, padding: 0 }}> </Btn>
             </div>
           </Section>
 
@@ -1790,6 +1885,218 @@ function CompleteFlow({ t, onClose }) {
   );
 }
 
+/* ═══ RESOURCES — team view · resource planning · efficiency ═════════════
+   Carried from the Elecbits PMS Resources module, driven by this tool's data:
+   the roster, each project's team + timeline, and the task system.          */
+const DEPT_OF = { jr_hw: "Hardware", sr_hw: "Hardware", jr_fw: "Firmware", sr_fw: "Firmware", jr_pm: "Project Management", sr_pm: "Project Management", sc: "Supply Chain", ind_design: "Industrial Design", sol_arch: "Solution Architecture", admin: "Management" };
+const CAP_OF = { sr_pm: 6, sr_hw: 6, sr_fw: 6, sol_arch: 6, ind_design: 6, admin: 6, jr_pm: 3, jr_hw: 3, jr_fw: 3, sc: 3 };
+const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });
+
+function ResourcesModule() {
+  const { users, projects, tasks } = useCtx();
+  const [tab, setTab] = useState("team");
+  const [roleF, setRoleF] = useState("all");
+  const [deptF, setDeptF] = useState("all");
+  const [avFrom, setAvFrom] = useState(todayStr());
+  const [avTo, setAvTo] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() + 2); return d.toISOString().slice(0, 10); });
+  const [person, setPerson] = useState(null);
+  const today = todayStr();
+
+  const members = users.filter((u) => u.id !== "u-admin");
+  const deptOf = (u) => DEPT_OF[u.resourceRole] || "—";
+  const capOf = (u) => CAP_OF[u.resourceRole] || 3;
+  const assignedProjs = (uid) => projects.filter((p) => (p.team || []).some((t) => t.userId === uid));
+  const activeProjs = (uid) => assignedProjs(uid).filter((p) => p.status !== "Completed" && projWindow(p).end >= today);
+  const roles = UNIQ_RR(members);
+  const depts = [...new Set(members.map(deptOf).filter((d) => d !== "—"))];
+  const filtered = members.filter((u) => (roleF === "all" || u.resourceRole === roleF) && (deptF === "all" || deptOf(u) === deptF));
+
+  const statusOf = (u) => { const a = activeProjs(u.id).length, cap = capOf(u); return a >= cap ? ["At Capacity", "var(--red)"] : a ? ["Deployed", "var(--amber)"] : ["Available", "var(--green)"]; };
+
+  const TABS = [["team", "Team View", Users], ["planning", "Resource Planning", Calendar], ["efficiency", "Efficiency", Gauge]];
+  const th = { textAlign: "left", padding: "11px 14px", fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", whiteSpace: "nowrap" };
+  const td = { padding: "12px 14px", fontSize: 12.5, verticalAlign: "middle" };
+  const NameCell = ({ u }) => (
+    <button onClick={() => setPerson(u)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt)", display: "flex", alignItems: "center", gap: 9, padding: 0, fontSize: 13, fontWeight: 600 }}>
+      <AvatarDot user={u} size={30} /> {u.name}
+    </button>
+  );
+  const ProjCell = ({ uid, rangeFrom, rangeTo }) => {
+    let list = assignedProjs(uid);
+    if (rangeFrom) list = list.filter((p) => { const w = projWindow(p); return w.start <= rangeTo && w.end >= rangeFrom; });
+    if (!list.length) return <span style={{ color: "var(--txt3)" }}>{rangeFrom ? "None in range" : "None"}</span>;
+    const act = activeProjs(uid);
+    return list.map((p) => {
+      const w = projWindow(p); const on = act.some((x) => x.id === p.id);
+      return (
+        <div key={p.id} style={{ marginBottom: 5, opacity: on ? 1 : 0.55 }}>
+          <div style={{ fontWeight: 600 }}>{p.name}{!on && <span style={{ fontSize: 10.5, color: "var(--txt3)", marginLeft: 6, fontWeight: 500 }}>(ended)</span>}</div>
+          <div style={{ fontSize: 10.5, color: "var(--txt2)", fontFamily: MONO, marginTop: 1 }}>{fmtDate(w.start)} – {fmtDate(p.deadline)}</div>
+        </div>
+      );
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="card" style={{ padding: "0 16px", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
+        {TABS.map(([k, l, Ic]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "13px 15px", background: "none", border: "none", borderBottom: `2px solid ${tab === k ? "var(--acc)" : "transparent"}`, color: tab === k ? "var(--acc)" : "var(--txt2)", fontWeight: tab === k ? 700 : 600, fontSize: 13, cursor: "pointer", transition: "all .15s" }}>
+            <Ic size={15} /> {l}
+          </button>
+        ))}
+        <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)", padding: "8px 0" }}><b style={{ color: "var(--txt)" }}>{filtered.length}</b> resource{filtered.length !== 1 ? "s" : ""}</span>
+      </div>
+
+      {(tab === "team" || tab === "planning") && (
+        <div className="card" style={{ padding: 14, display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+          <Field label="Role"><select className="inp" style={{ width: 190 }} value={roleF} onChange={(e) => setRoleF(e.target.value)}><option value="all">All Roles</option>{roles.map((r) => <option key={r} value={r}>{ROLE_TITLE[r] || r}</option>)}</select></Field>
+          <Field label="Department"><select className="inp" style={{ width: 190 }} value={deptF} onChange={(e) => setDeptF(e.target.value)}><option value="all">All Departments</option>{depts.map((d) => <option key={d} value={d}>{d}</option>)}</select></Field>
+          {tab === "planning" && (<>
+            <Field label="Available from"><input type="date" className="inp" style={{ width: 155 }} value={avFrom} onChange={(e) => setAvFrom(e.target.value)} /></Field>
+            <Field label="Available to"><input type="date" className="inp" style={{ width: 155 }} value={avTo} onChange={(e) => setAvTo(e.target.value)} /></Field>
+          </>)}
+        </div>
+      )}
+
+      {tab === "team" && (
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr style={{ borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+                <th style={th}>Name</th><th style={th}>Role</th><th style={th}>Dept</th><th style={th}>Projects</th><th style={th}>Open tasks</th><th style={{ ...th, textAlign: "center" }}>Cap</th><th style={th}>Status</th>
+              </tr></thead>
+              <tbody>
+                {filtered.map((u) => {
+                  const act = activeProjs(u.id).length; const cap = capOf(u);
+                  const open = tasks.filter((t) => t.assigneeId === u.id && t.status !== "done").length;
+                  const [sl, sc] = statusOf(u);
+                  return (
+                    <tr key={u.id} className="rowHover" style={{ borderBottom: "1px solid var(--bdr)" }}>
+                      <td style={td}><NameCell u={u} /></td>
+                      <td style={td}><Pill color="var(--acc)">{u.title}</Pill></td>
+                      <td style={{ ...td, color: "var(--txt2)", fontWeight: 500 }}>{deptOf(u)}</td>
+                      <td style={td}><ProjCell uid={u.id} /></td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 600, color: open ? "var(--blue)" : "var(--txt3)" }}>{open}</td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: act >= cap ? "var(--red)" : "var(--green)" }}>{act}/{cap}</td>
+                      <td style={td}><Pill color={sc}>{sl}</Pill></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "planning" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="card" style={{ padding: "11px 15px", fontSize: 12.5, color: "var(--txt2)" }}>
+            Showing availability in the period <b style={{ color: "var(--acc)" }}>{fmtDate(avFrom)}</b> → <b style={{ color: "var(--acc)" }}>{fmtDate(avTo)}</b>.
+          </div>
+          <div className="card" style={{ overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+                  <th style={th}>Resource</th><th style={th}>Role</th><th style={th}>Availability in period</th><th style={th}>Deployed projects</th><th style={th}>Status</th>
+                </tr></thead>
+                <tbody>
+                  {filtered.map((u) => {
+                    const inRange = assignedProjs(u.id).filter((p) => { const w = projWindow(p); return p.status !== "Completed" && w.start <= avTo && w.end >= avFrom; });
+                    const busy = inRange.length >= capOf(u);
+                    const label = busy ? "At capacity in this period" : inRange.length ? "Partially available — check deployments" : `Fully free ${fmtDate(avFrom)} → ${fmtDate(avTo)}`;
+                    return (
+                      <tr key={u.id} className="rowHover" style={{ borderBottom: "1px solid var(--bdr)" }}>
+                        <td style={td}><NameCell u={u} /></td>
+                        <td style={td}><Pill color="var(--acc)">{u.title}</Pill></td>
+                        <td style={{ ...td, fontWeight: 600, color: busy ? "var(--red)" : inRange.length ? "var(--amber)" : "var(--green)" }}>{label}</td>
+                        <td style={td}><ProjCell uid={u.id} rangeFrom={avFrom} rangeTo={avTo} /></td>
+                        <td style={td}><Pill color={busy ? "var(--red)" : inRange.length ? "var(--amber)" : "var(--green)"}>{busy ? "At Capacity" : inRange.length ? "Partially Deployed" : "Available"}</Pill></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "efficiency" && (
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr style={{ borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+                <th style={th}>Name</th><th style={th}>Role</th><th style={{ ...th, textAlign: "center" }}>Projects</th><th style={{ ...th, textAlign: "center" }}>Tasks</th><th style={{ ...th, textAlign: "center" }}>Done</th><th style={{ ...th, textAlign: "center" }}>AI-verified</th><th style={{ ...th, textAlign: "center" }}>Blocked</th><th style={{ ...th, width: 150 }}>Completion</th>
+              </tr></thead>
+              <tbody>
+                {members.map((u) => {
+                  const mine = tasks.filter((t) => t.assigneeId === u.id);
+                  const done = mine.filter((t) => t.status === "done");
+                  const blocked = mine.filter((t) => t.status === "blocked").length;
+                  const ai = done.filter((t) => t.aiVerification).length;
+                  const pct = mine.length ? Math.round((done.length / mine.length) * 100) : 0;
+                  return (
+                    <tr key={u.id} className="rowHover" style={{ borderBottom: "1px solid var(--bdr)" }}>
+                      <td style={td}><NameCell u={u} /></td>
+                      <td style={td}><Pill color="var(--acc)">{u.title}</Pill></td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 600 }}>{assignedProjs(u.id).length}</td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 600 }}>{mine.length}</td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: "var(--green)" }}>{done.length}</td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: ai ? "var(--purple)" : "var(--txt3)" }}>{ai}</td>
+                      <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: blocked ? "var(--red)" : "var(--txt3)" }}>{blocked}</td>
+                      <td style={td}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Progress pct={pct} color={pct >= 70 ? "var(--green)" : pct >= 40 ? "var(--amber)" : "var(--acc)"} /><span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)", width: 34, textAlign: "right" }}>{pct}%</span></div></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {person && (
+        <Modal title={person.name} sub={`${person.title}${person.email ? " · " + person.email : ""}`} onClose={() => setPerson(null)} width={520}>
+          <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16, padding: "14px 16px", background: "var(--s2)", borderRadius: 11, border: "1px solid var(--bdr)" }}>
+            <AvatarDot user={person} size={48} />
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 15 }}>{person.name}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 5 }}>
+                <Pill color="var(--acc)">{person.title}</Pill>
+                <Pill color="var(--txt2)">{deptOf(person)}</Pill>
+                <Pill color={statusOf(person)[1]}>{statusOf(person)[0]}</Pill>
+              </div>
+            </div>
+          </div>
+          <SectionTitle icon={FolderPlus}>Deployed projects</SectionTitle>
+          {assignedProjs(person.id).length === 0 ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>Not on any project yet.</div> : assignedProjs(person.id).map((p) => {
+            const w = projWindow(p); const slot = (p.team || []).find((t) => t.userId === person.id)?.slot;
+            const on = p.status !== "Completed" && w.end >= today;
+            return (
+              <div key={p.id} style={{ padding: "11px 13px", borderRadius: 10, marginBottom: 8, border: `1px solid ${on ? "color-mix(in srgb, var(--acc) 35%, transparent)" : "var(--bdr)"}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+                  <div><div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div><div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 2 }}>{slot}</div></div>
+                  {on && <Pill color="var(--acc)">Active</Pill>}
+                </div>
+                <div style={{ fontSize: 12, marginTop: 7, color: "var(--txt2)" }}><span style={{ color: "var(--txt3)" }}>Period: </span>{fmtDate(w.start)} → {fmtDate(p.deadline)}</div>
+              </div>
+            );
+          })}
+          <SectionTitle icon={ListChecks}>Open tasks</SectionTitle>
+          {tasks.filter((t) => t.assigneeId === person.id && t.status !== "done").length === 0 ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>No open tasks.</div> : tasks.filter((t) => t.assigneeId === person.id && t.status !== "done").map((t) => (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 9, marginBottom: 6, border: "1px solid var(--bdr)", fontSize: 12.5 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: STATUS_DOT[t.status], flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</span>
+              {t.projectId && <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill>}
+            </div>
+          ))}
+        </Modal>
+      )}
+    </div>
+  );
+}
+const UNIQ_RR = (users) => [...new Set(users.map((u) => u.resourceRole).filter(Boolean))];
+
 /* ═══ MODULE 4 — PERFORMANCE & TRAINING ══════════════════════════════════
    Side-to-side tab menu (KPI · Work update sheet · Training) in the
    Eb Sales OS style, daily calendar tracking on both KPI and work updates,
@@ -2155,6 +2462,7 @@ const NAV = [
   { id: "projects", label: "Create a Project", icon: FolderPlus, admin: true },
   { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
   { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
+  { id: "resources", label: "Resources", icon: Users },
   { id: "perf", label: "Performance & Training", icon: Gauge },
   { id: "memory", label: "System Memory", icon: Database, admin: true },
 ];
@@ -2162,6 +2470,7 @@ const TITLES = {
   projects: ["Create a Project", "Chat-guided creation · hard gates on Project ID + both LLDs · list & status only"],
   scrum: ["Daily Scrum", "Write it as it comes — AI turns it into assigned, time-boxed, if/else-aware tasks"],
   tasks: ["My Projects & Tasks", "Start → work window → AI-gated closure · branch stuck work back to scrum"],
+  resources: ["Resources", "Team roster, availability, deployment & efficiency"],
   perf: ["Performance & Training", "PM KPIs with red alerts · daily work updates scored against the KPI · trainings"],
   memory: ["System Memory", "Templates, instructions, conversations, Drive sitemaps — injected into every AI call"],
 };
@@ -2419,6 +2728,7 @@ export default function App() {
             {view === "projects" && <ProjectsModule />}
             {view === "scrum" && <ScrumModule />}
             {view === "tasks" && <TasksModule />}
+            {view === "resources" && <ResourcesModule />}
             {view === "perf" && <PerfModule />}
             {view === "memory" && <MemoryModule />}
           </div>
