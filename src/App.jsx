@@ -2129,10 +2129,11 @@ const Shell = ({ dark, children }) => (
 /* ═══ LOGIN / SIGN-UP ═════════════════════════════════════════════════════
    Real Supabase email/password auth when Supabase is connected; a working demo
    login (any credentials, or pick a role) when it isn't. Always the front door. */
+const SAMPLE_LOGIN = { email: "admin@elecbits.in", pw: "elecbits123" };
 function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
   const [mode, setMode] = useState("signin");
-  const [email, setEmail] = useState("");
-  const [pw, setPw] = useState("");
+  const [email, setEmail] = useState(demo ? SAMPLE_LOGIN.email : "");
+  const [pw, setPw] = useState(demo ? SAMPLE_LOGIN.pw : "");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -2151,8 +2152,20 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
     <Shell dark={dark}>
       <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
         <button onClick={onToggleTheme} title="Toggle theme" style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
-        <img src={elecbitsLogo} alt="Elecbits" style={{ height: 30, marginBottom: 8, display: "block" }} />
-        <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 22 }}>ODM · Project Management — {mode === "signin" || demo ? "sign in to continue" : "create your account"}</div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 20 }}>
+          <img src={elecbitsLogo} alt="Elecbits" style={{ height: 38, marginBottom: 10 }} />
+          <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{mode === "signin" || demo ? "Sign in to continue" : "Create your account"}</div>
+        </div>
+        {demo && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--soft)", border: "1px solid var(--bdr)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+            <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
+            <div style={{ fontSize: 11.5, lineHeight: 1.5, flex: 1 }}>
+              <b>Sample login</b> — <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.email}</span> · <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.pw}</span><br />
+              <span style={{ color: "var(--txt2)" }}>Prefilled below — just press Sign in. Any credentials work in demo.</span>
+            </div>
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
           {mode === "signup" && !demo && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
           <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
