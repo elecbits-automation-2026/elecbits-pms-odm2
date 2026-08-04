@@ -29,6 +29,7 @@ import {
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight
 } from "lucide-react";
+import elecbitsLogo from "./assets/elecbits-logo.svg";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -146,6 +147,9 @@ const KPI_T = { queries: 3, decisions: 5, onTime: 70, escalations: 1 };
    server-side), or, for local dev only, VITE_ANTHROPIC_API_KEY.               */
 const AI_ENDPOINT = import.meta.env.VITE_CLAUDE_PROXY_URL || "https://api.anthropic.com/v1/messages";
 const AI_MODEL = import.meta.env.VITE_CLAUDE_MODEL || "claude-sonnet-4-5";
+/* Google Drive / Sheets sync endpoint (Supabase Edge Function). Empty → the
+   Sync Log stays local-only; set VITE_DRIVE_SYNC_URL to write to Drive/Sheets. */
+const DRIVE_SYNC_URL = import.meta.env.VITE_DRIVE_SYNC_URL || "";
 async function claude(prompt, { json = true } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (import.meta.env.VITE_ANTHROPIC_API_KEY) {
@@ -1344,9 +1348,11 @@ function PerfModule() {
     const pmProjects = projects.filter((p) => (p.team || []).some((x) => x.userId === pmId && x.slot.startsWith("PM"))).map((p) => p.projectId);
     const inScope = (t) => pmProjects.includes(t.projectId) || t.createdBy === pmId;
     const dayTasks = tasks.filter((t) => t.date === dt && inScope(t));
-    const queries = kpiLog.filter((k) => k.pmId === pmId && k.date === dt && k.type === "query").length;
-    const decisions = kpiLog.filter((k) => k.pmId === pmId && k.date === dt && k.type === "decision").length + tasks.filter((t) => t.createdBy === pmId && t.date === dt).length;
+    // KPIs are DERIVED from the tasks assigned for that day — never self-incremented.
+    const isClientTask = (t) => /client|customer|communicat|\bquery\b|\bcall\b|email|quote|proposal|demo/i.test([t.title, ...(t.steps || [])].join(" "));
+    const queries = dayTasks.filter(isClientTask).length;                       // customer/client tasks assigned today
     const done = dayTasks.filter((t) => t.status === "done");
+    const decisions = dayTasks.filter((t) => t.createdBy === pmId || t.status === "done").length; // tasks the PM planned + tasks closed today
     const onTime = done.filter((t) => !t.endTime || (t.completedAt && new Date(t.completedAt) <= hmToDate(t.date, t.endTime))).length;
     const onTimePct = dayTasks.length ? Math.round((onTime / dayTasks.length) * 100) : null;
     const aiChecks = done.filter((t) => t.aiVerification).length;
@@ -1358,8 +1364,6 @@ function PerfModule() {
     if (escalations > KPI_T.escalations) alerts.push(`${escalations} escalations to Shreya (max ${KPI_T.escalations})`);
     return { queries, decisions, onTimePct, aiChecks, escalations, dayTaskCount: dayTasks.length, alerts };
   };
-  const log = (pmId, type) => { setKpiLog((k) => [...k, { id: uid(), pmId, date, type, at: new Date().toISOString() }]); toast(type === "query" ? "Customer query logged" : "Decision logged", "green"); };
-
   const TABS = [["kpi", "KPI tracking", Gauge], ["worklog", "Work update sheet", NotebookPen], ["training", "Training", GraduationCap]];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1375,7 +1379,7 @@ function PerfModule() {
         </div>
       </div>
 
-      {ptab === "kpi" && <KpiTab shownPMs={shownPMs} date={date} setDate={setDate} metricsFor={metricsFor} log={log} me={me} isAdmin={isAdmin} tasks={tasks} />}
+      {ptab === "kpi" && <KpiTab shownPMs={shownPMs} date={date} setDate={setDate} metricsFor={metricsFor} me={me} isAdmin={isAdmin} tasks={tasks} />}
       {ptab === "worklog" && <WorklogTab date={date} setDate={setDate} viewUserId={viewUserId} setViewUserId={setViewUserId} isMgr={isMgr} />}
       {ptab === "training" && (
         <div className="card" style={{ padding: 16 }}>
@@ -1388,7 +1392,7 @@ function PerfModule() {
   );
 }
 
-function KpiTab({ shownPMs, date, setDate, metricsFor, log, me, isAdmin, tasks }) {
+function KpiTab({ shownPMs, date, setDate, metricsFor, me, isAdmin, tasks }) {
   const { users } = useCtx();
   const last7 = wuDays(7);
   return (
@@ -1399,13 +1403,12 @@ function KpiTab({ shownPMs, date, setDate, metricsFor, log, me, isAdmin, tasks }
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         {shownPMs.map((pm) => {
           const m = metricsFor(pm.id, date);
-          const canLog = pm.id === me || isAdmin;
           const tiles = [
-            ["Customer queries", m.queries, `min ${KPI_T.queries}/day`, m.queries >= KPI_T.queries, "query"],
-            ["Decisions taken", m.decisions, `min ${KPI_T.decisions}/day`, m.decisions >= KPI_T.decisions, "decision"],
-            ["Team on-time", m.onTimePct === null ? "—" : m.onTimePct + "%", `target ≥ ${KPI_T.onTime}%`, m.onTimePct === null || m.onTimePct >= KPI_T.onTime, null],
-            ["AI-checked closes", m.aiChecks, "every close through the gate", true, null],
-            ["Escalations → Shreya", m.escalations, `max ${KPI_T.escalations} (fewer = better)`, m.escalations <= KPI_T.escalations, null],
+            ["Customer queries", m.queries, `from today's client tasks · min ${KPI_T.queries}`, m.queries >= KPI_T.queries],
+            ["Decisions taken", m.decisions, `tasks planned + closed today · min ${KPI_T.decisions}`, m.decisions >= KPI_T.decisions],
+            ["Team on-time", m.onTimePct === null ? "—" : m.onTimePct + "%", `target ≥ ${KPI_T.onTime}%`, m.onTimePct === null || m.onTimePct >= KPI_T.onTime],
+            ["AI-checked closes", m.aiChecks, "every close through the gate", true],
+            ["Escalations → Shreya", m.escalations, `max ${KPI_T.escalations} (fewer = better)`, m.escalations <= KPI_T.escalations],
           ];
           return (
             <div key={pm.id} style={{ border: "1px solid var(--bdr)", borderRadius: 12, overflow: "hidden" }}>
@@ -1423,14 +1426,11 @@ function KpiTab({ shownPMs, date, setDate, metricsFor, log, me, isAdmin, tasks }
                   </div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 9 }}>
-                  {tiles.map(([label, val, sub, ok, logType]) => (
+                  {tiles.map(([label, val, sub, ok]) => (
                     <div key={label} style={{ background: "var(--s2)", border: `1px solid ${ok ? "var(--bdr)" : "var(--red)"}`, borderRadius: 10, padding: "10px 12px" }}>
                       <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)" }}>{label}</div>
                       <div style={{ fontSize: 21, fontWeight: 800, fontFamily: MONO, color: ok ? "var(--txt)" : "var(--red)", margin: "3px 0 1px" }}>{val}</div>
-                      <div style={{ fontSize: 10.5, color: "var(--txt3)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                        <span>{sub}</span>
-                        {logType && canLog && <button onClick={() => log(pm.id, logType)} style={{ border: "1px solid var(--bdr2)", background: "var(--s1)", color: "var(--acc)", borderRadius: 6, fontSize: 10.5, fontWeight: 700, cursor: "pointer", padding: "2px 7px" }}>+1</button>}
-                      </div>
+                      <div style={{ fontSize: 10.5, color: "var(--txt3)" }}>{sub}</div>
                     </div>
                   ))}
                 </div>
@@ -1721,7 +1721,13 @@ export default function App() {
   const isAdmin = my?.role === "superadmin";
 
   const toast = useCallback((msg, kind = "blue") => { const id = uid(); setToasts((t) => [...t, { id, msg, kind }]); setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3400); }, []);
-  const sheetSync = useCallback((target, detail) => setSyncLog((x) => [{ id: uid(), at: new Date().toISOString(), target, detail }, ...x].slice(0, 60)), []);
+  const sheetSync = useCallback((target, detail) => {
+    setSyncLog((x) => [{ id: uid(), at: new Date().toISOString(), target, detail }, ...x].slice(0, 60));
+    // Real Google Drive / Sheets write via the Supabase Edge Function, when configured.
+    if (DRIVE_SYNC_URL) {
+      fetch(DRIVE_SYNC_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target, detail, at: new Date().toISOString() }) }).catch(() => {});
+    }
+  }, []);
 
   /* boot from persistent storage */
   useEffect(() => { (async () => {
@@ -1761,9 +1767,9 @@ export default function App() {
       <div className="eb-root" style={{ ...(dark ? DARK : LIGHT), display: "flex", minHeight: "100vh" }}>
         <style>{CSS}</style>
         <aside className="eb-side" style={{ width: 234, flexShrink: 0, borderRight: "1px solid var(--bdr)", background: "var(--s1)", display: "flex", flexDirection: "column", position: "sticky", top: 0, height: "100vh" }}>
-          <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--bdr)", display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(135deg,#1e3a8a,#2563eb)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontFamily: MONO, fontSize: 13 }}>Eb</span>
-            <div><div style={{ fontWeight: 800, fontSize: 14, letterSpacing: "-.01em" }}>Elecbits ODM</div><div style={{ fontSize: 10.5, color: "var(--txt2)" }}>Project Management System</div></div>
+          <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--bdr)" }}>
+            <img src={elecbitsLogo} alt="Elecbits" style={{ height: 26, width: "auto", display: "block" }} />
+            <div style={{ fontSize: 10.5, color: "var(--txt2)", marginTop: 7, fontWeight: 600, letterSpacing: ".03em", textTransform: "uppercase" }}>ODM · Project Management</div>
           </div>
           <nav style={{ padding: 10, display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
             {visNav.map((n) => (

@@ -85,29 +85,72 @@ src/
   index.css   # minimal first-paint base (App injects its full theme at runtime)
 ```
 
-### Integration seams (swap these for real services in production)
+### Integrations (built — supply your keys to turn them on)
 
-| Seam | Today | In production |
-| --- | --- | --- |
-| **Persistence** — `window.storage` | localStorage shim in `main.jsx` | Supabase / your backend |
-| **AI** — `claude()` in `App.jsx` | Anthropic Messages API, offline fallback | your key-holding proxy |
-| **Drive / Sheets** — `sheetSync()` | visible entries in the **Sync Log** | Drive/Sheets edge functions |
+Three real integrations ship in this repo. Each is **off by default and degrades
+gracefully**, so the app runs end-to-end with zero config; set the matching env
+vars to switch each one on.
 
-None of these block the flow — the app is fully usable without any of them
-wired up.
+| Integration | Code | Off (default) | On |
+| --- | --- | --- | --- |
+| **Supabase DB** | `src/lib/supabase.js`, `main.jsx`, `supabase/schema.sql` | localStorage | cloud persistence via the `app_kv` table |
+| **Anthropic (AI)** | `supabase/functions/claude/` | offline parsers | live Claude, key held server-side |
+| **Google Drive/Sheets** | `supabase/functions/drive-sync/` | local Sync Log | writes each event to a Google Sheet + `drive_sync_log` |
+
+The backend for the AI and Drive integrations is **Supabase Edge Functions** —
+one Supabase project hosts the database *and* the two key-holding functions.
 
 ---
 
-## Configuration
+## Turn on the live services
 
-Copy `.env.example` to `.env` and set what you need (see the file for details):
+### 1. Supabase database
 
-- `VITE_CLAUDE_PROXY_URL` — **recommended**: your backend proxy that holds the
-  API key server-side and forwards to Anthropic. Keeps the key out of the
-  browser.
-- `VITE_ANTHROPIC_API_KEY` — **local dev only**: calls Anthropic directly from
-  the browser (exposes the key — never ship this).
-- `VITE_CLAUDE_MODEL` — model for all AI calls (default `claude-sonnet-4-5`).
+1. Create a project at [supabase.com](https://supabase.com).
+2. **SQL editor** → paste and run [`supabase/schema.sql`](supabase/schema.sql).
+3. **Settings → API** → copy the Project URL and the `anon` public key into
+   `.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 
-With nothing set, every AI feature falls back to a deterministic offline parser
-and the app still works — you just don't get live Claude quality.
+The app now persists to Postgres (shared team state) instead of localStorage.
+
+### 2. Anthropic — live Claude in all four AI windows
+
+The four AI windows are Daily-Scrum *Organise*, Create-Project *Designer LLD*,
+Complete-Now *verification*, and Work-update *scoring*. Enable real Claude with
+the server-side proxy (recommended — the key never touches the browser):
+
+```bash
+npm i -g supabase                      # once
+supabase link --project-ref <your-ref>
+supabase functions deploy claude
+supabase secrets set ANTHROPIC_API_KEY=sk-ant-...   # optionally CLAUDE_MODEL=...
+```
+
+Then set `VITE_CLAUDE_PROXY_URL=https://<ref>.functions.supabase.co/claude` in
+your `.env` (and in your Vercel project's env vars) and redeploy.
+
+> For a quick local-only test you can instead set `VITE_ANTHROPIC_API_KEY` — but
+> that exposes the key in the browser bundle, so never ship it.
+
+### 3. Google Drive / Sheets
+
+1. In Google Cloud: create a **service account**, enable the **Google Sheets
+   API**, and download its JSON key.
+2. Create a Google Sheet, add a `SyncLog` tab, and **share it with the service-
+   account email** as an Editor.
+3. Deploy and configure the function:
+
+   ```bash
+   supabase functions deploy drive-sync
+   supabase secrets set \
+     GOOGLE_SERVICE_ACCOUNT_EMAIL="svc@project.iam.gserviceaccount.com" \
+     GOOGLE_PRIVATE_KEY="$(cat key.json | jq -r .private_key)" \
+     GOOGLE_SHEET_ID="<spreadsheet id>"
+   ```
+
+4. Set `VITE_DRIVE_SYNC_URL=https://<ref>.functions.supabase.co/drive-sync`.
+
+Every project create, scrum push and task closure then appends a row to your
+Sheet and is recorded in `drive_sync_log`.
+
+See [`.env.example`](.env.example) for the full list of variables.

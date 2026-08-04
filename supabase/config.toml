@@ -1,0 +1,12 @@
+# Supabase project config. Set your project ref with:
+#   supabase link --project-ref <your-ref>
+project_id = "elecbits-pms-odm2"
+
+# The frontend calls these functions directly (no end-user login), so JWT
+# verification is disabled. If you later add Supabase Auth, flip these to true
+# and have the app send the user's access token.
+[functions.claude]
+verify_jwt = false
+
+[functions.drive-sync]
+verify_jwt = false
