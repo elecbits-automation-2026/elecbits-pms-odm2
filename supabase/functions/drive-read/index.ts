@@ -39,12 +39,17 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("pkcs8", der.buffer, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
 }
 
+// Full drive scope: the same service account both reads project folders and
+// writes artefacts back (see the `write` action below). Share the ODM folder
+// with the service-account email as an EDITOR for writes to succeed.
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+
 async function getAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = b64url(JSON.stringify({
     iss: SA_EMAIL,
-    scope: "https://www.googleapis.com/auth/drive.readonly",
+    scope: DRIVE_SCOPE,
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
   }));
@@ -100,6 +105,35 @@ async function extractText(token: string, f: GFile): Promise<string> {
   return "";
 }
 
+/* ── WRITE ─────────────────────────────────────────────────────────────────
+   Create (or overwrite) a text/markdown file inside the project's Drive
+   folder. Used to push closure evidence, status notes and AI analyses back to
+   /ODM/PM/<ProjectID>/. Requires the folder shared as Editor.               */
+async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain"): Promise<string> {
+  // Replace an existing file of the same name so re-writes don't duplicate.
+  const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
+  const existing = await drive(token, `files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+  const prevId = existing.files?.[0]?.id;
+
+  const boundary = "ebodm" + Math.random().toString(36).slice(2);
+  const metadata: Record<string, unknown> = prevId ? { name } : { name, parents: [folderId] };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content}\r\n--${boundary}--`;
+
+  const url = prevId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${prevId}?uploadType=multipart&supportsAllDrives=true`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true`;
+  const res = await fetch(url, {
+    method: prevId ? "PATCH" : "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  if (!res.ok) throw new Error(`drive write failed: ${await res.text()}`);
+  const data = await res.json();
+  return data.id as string;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -107,7 +141,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -116,6 +150,16 @@ Deno.serve(async (req) => {
 
   try {
     const token = await getAccessToken();
+
+    // ── write action: { action:"write", projectId, fileName, content } ──
+    if (body.action === "write") {
+      if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
+      const folders = await findFolders(token, String(body.projectId));
+      if (!folders.length) return json({ error: `no Drive folder found for ${body.projectId}` }, 404);
+      const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain");
+      return json({ ok: true, fileId: id, folder: folders[0].name });
+    }
+
     const lines: string[] = [];
     let extracts = 0;
     for (const needle of needles.slice(0, 6)) {

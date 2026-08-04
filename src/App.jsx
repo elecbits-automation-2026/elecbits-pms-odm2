@@ -201,6 +201,20 @@ async function driveReadDigest(projectId, linkedIds) {
     return String(data.digest || "").slice(0, 4000);
   } catch { return ""; }
 }
+/* Write a text file into the project's Drive folder (needs the folder shared
+   with the service account as Editor). Returns true on success. */
+async function driveWriteFile(projectId, fileName, content) {
+  if (!DRIVE_READ_URL || !projectId || !fileName) return false;
+  try {
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN }),
+    });
+    const data = await res.json();
+    return !!(res.ok && data.ok);
+  } catch { return false; }
+}
 /* Tries the proxy first (key stays server-side), then the direct browser key —
    so a configured-but-undeployed proxy no longer silently kills live AI. */
 async function claude(prompt, { json = true } = {}) {
@@ -1107,7 +1121,14 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const analyseDrive = async () => {
     setIntelBusy(true);
     const digest = await driveReadDigest(p.projectId, p.linkedIds);
-    try { const txt = await claude(driveIntelPrompt(p, users, memory, digest), { json: false }); setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString(), live: !!digest } }); if (digest) toast("Analysed with live Drive contents", "green"); }
+    try {
+      const txt = await claude(driveIntelPrompt(p, users, memory, digest), { json: false });
+      setIntel(txt); upd({ driveAnalysis: { text: txt, at: new Date().toISOString(), live: !!digest } });
+      if (digest) toast("Analysed with live Drive contents", "green");
+      // Push the analysis back into the project folder so the team sees it in Drive.
+      const wrote = await driveWriteFile(p.projectId, `${todayStr()}_AI-status-analysis.txt`, `Elecbits ODM — AI status analysis\nProject ${p.projectId} · ${p.name || ""}\nGenerated ${new Date().toISOString()}\n\n${txt}\n`);
+      if (wrote) sheetSync(`/ODM/PM/${p.projectId}/`, `AI status analysis written to Drive`);
+    }
     catch { setIntel(fallbackIntel(p)); toast("AI offline — showing what we have", "amber"); }
     setIntelBusy(false);
   };
@@ -1826,7 +1847,13 @@ function CompleteFlow({ t, onClose }) {
   };
   const closePass = () => {
     finalize({ status: "done", completedAt: new Date().toISOString(), work, aiVerification: { questions: qs, verdict: verdict.verdict, score: verdict.score, feedback: verdict.feedback, offline: !!verdict.offline } });
-    if (t.projectId && t.linked !== false) sheetSync(`/ODM/PM/${t.projectId}/Checklist.xlsx`, `"${t.title}" done · score ${verdict.score}/10`);
+    if (t.projectId && t.linked !== false) {
+      sheetSync(`/ODM/PM/${t.projectId}/Checklist.xlsx`, `"${t.title}" done · score ${verdict.score}/10`);
+      // Write the closure record into the project's Drive folder as evidence.
+      driveWriteFile(t.projectId, `${todayStr()}_closure_${String(t.title).slice(0, 40).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.txt`,
+        `Elecbits ODM — task closure record\nProject: ${t.projectId}\nTask: ${t.title}\nClosed: ${new Date().toISOString()}\nAI verdict: ${verdict.verdict} (${verdict.score}/10)\nFeedback: ${verdict.feedback}\n\nWork log\n  What was done: ${work.whatDone || "—"}\n  File produced: ${work.fileName || "—"}\n  Stored at: ${work.fileLocation || "—"}\n\nVerification Q&A\n${qs.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}\n`
+      ).then((ok) => { if (ok) sheetSync(`/ODM/PM/${t.projectId}/`, `Closure record written to Drive`); });
+    }
     applyEsc();
     toast(`Task closed — ${verdict.score}/10`, "green");
     onClose();
