@@ -29,7 +29,9 @@ import {
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight
 } from "lucide-react";
-import elecbitsLogo from "./assets/elecbits-logo.svg";
+import elecbitsLogo from "./assets/elecbits-logo.jpg";
+/* The official logo is a JPG on white — in dark mode it sits on a white chip. */
+const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from "./lib/auth.js";
 
@@ -2206,7 +2208,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
       <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
         <button onClick={onToggleTheme} title="Toggle theme" style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 20 }}>
-          <img src={elecbitsLogo} alt="Elecbits" style={{ height: 38, marginBottom: 10 }} />
+          <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 38), marginBottom: 10 }} />
           <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
           <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{mode === "signin" || demo ? "Sign in to continue" : "Create your account"}</div>
         </div>
@@ -2255,7 +2257,7 @@ function SupabaseConfigError({ dark, onToggleTheme }) {
     <Shell dark={dark}>
       <div className="fade card" style={{ width: "100%", maxWidth: 480, padding: 28, position: "relative" }}>
         <button onClick={onToggleTheme} style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
-        <img src={elecbitsLogo} alt="Elecbits" style={{ height: 26, marginBottom: 12, display: "block" }} />
+        <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 26), marginBottom: 12 }} />
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <AlertTriangle size={18} style={{ color: "var(--amber)" }} />
           <div style={{ fontWeight: 800, fontSize: 16 }}>Supabase isn't configured correctly</div>
@@ -2375,7 +2377,7 @@ export default function App() {
         <style>{CSS}</style>
         <aside className="eb-side" style={{ width: 234, flexShrink: 0, borderRight: "1px solid var(--bdr)", background: "var(--s1)", display: "flex", flexDirection: "column", position: "sticky", top: 0, height: "100vh" }}>
           <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--bdr)" }}>
-            <img src={elecbitsLogo} alt="Elecbits" style={{ height: 26, width: "auto", display: "block" }} />
+            <img src={elecbitsLogo} alt="Elecbits" style={logoChip(dark, 26)} />
             <div style={{ fontSize: 10.5, color: "var(--txt2)", marginTop: 7, fontWeight: 600, letterSpacing: ".03em", textTransform: "uppercase" }}>ODM · Project Management</div>
           </div>
           <nav style={{ padding: 10, display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
