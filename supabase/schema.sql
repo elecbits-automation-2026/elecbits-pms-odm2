@@ -230,6 +230,16 @@ begin
   end loop;
 end $$;
 
+-- Table-level grants. RLS policies decide WHICH rows a role may touch, but
+-- PostgREST also needs the underlying privilege — without this you get a 401
+-- ("permission denied") on /rest/v1/<table> even while auth works fine.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant select on all tables in schema public to anon;
+grant usage, select on all sequences in schema public to authenticated;
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to authenticated;
+
 alter table public.profiles enable row level security;
 drop policy if exists profiles_read on public.profiles;
 create policy profiles_read on public.profiles for select to authenticated using (true);
