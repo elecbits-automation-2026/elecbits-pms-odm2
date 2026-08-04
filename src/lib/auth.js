@@ -38,24 +38,44 @@ export async function signOut() {
   await supabase.auth.signOut();
 }
 
-/* Roster — every profile, shaped like the app's user objects. */
-export async function fetchProfiles() {
-  if (!supabase) return [];
-  const { data, error } = await supabase.from("profiles").select("*").order("created_at");
-  if (error) throw error;
-  return (data || []).map((p) => ({
-    id: p.id,
-    name: p.name || (p.email || "").split("@")[0] || "User",
-    role: p.role || "engineer",
-    title: p.title || ROLE_TITLES[p.role] || "Team",
-    color: p.color || "#2563eb",
-    email: p.email || "",
-  }));
-}
-
 export const ROLE_TITLES = {
   superadmin: "Super Admin",
   dept_head: "Dept Head — Project Management",
   pm: "Project Manager",
   engineer: "Engineer",
 };
+const RESOURCE_TITLES = {
+  jr_pm: "Jr. Project Manager", sr_pm: "Sr. Project Manager",
+  jr_fw: "Jr. Firmware Engineer", sr_fw: "Sr. Firmware Engineer",
+  jr_hw: "Jr. Hardware Engineer", sr_hw: "Sr. Hardware Engineer",
+  sc: "Supply Chain", ind_design: "Industrial Designer", sol_arch: "Solution Architect",
+};
+const PALETTE = ["#2563eb", "#7c3aed", "#ea580c", "#0891b2", "#16a34a", "#d97706", "#db2777", "#0d9488", "#9333ea", "#dc2626", "#4f46e5", "#0284c7"];
+
+/* Roster. Prefers `profiles`; falls back to the existing `users` table (the
+   org roster) when profiles is empty/absent, so the real team shows post-login. */
+export async function fetchProfiles() {
+  if (!supabase) return [];
+  let rows = [];
+  try {
+    const { data, error } = await supabase.from("profiles").select("*").order("created_at");
+    if (!error && data) rows = data;
+  } catch { /* ignore */ }
+  if (!rows.length) {
+    try {
+      const { data, error } = await supabase.from("users").select("*");
+      if (!error && data) rows = data;
+    } catch { /* ignore */ }
+  }
+  return rows.map((p, i) => {
+    const role = p.role === "developer" ? "engineer" : (p.role || "engineer");
+    return {
+      id: p.id,
+      name: p.name || (p.email || "").split("@")[0] || "User",
+      role,
+      title: p.title || RESOURCE_TITLES[p.resource_role] || ROLE_TITLES[role] || "Team",
+      color: p.color || PALETTE[i % PALETTE.length],
+      email: p.email || "",
+    };
+  });
+}

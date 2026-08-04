@@ -2171,7 +2171,14 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
     try {
       if (mode === "signin") await signIn(email.trim(), pw);
       else { await signUp(email.trim(), pw, name.trim()); setMsg("Account created. If email confirmation is enabled, confirm via the link we sent, then sign in."); setMode("signin"); setPw(""); }
-    } catch (e) { setErr(e.message || "Authentication failed"); }
+    } catch (e) {
+      const m = e?.message || "Authentication failed";
+      if (/failed to fetch|networkerror|load failed|fetch/i.test(m))
+        setErr("Can't reach Supabase. Check VITE_SUPABASE_URL is your exact project URL, the project isn't paused, and a VPN/ad-blocker isn't blocking supabase.co.");
+      else if (/invalid login credentials/i.test(m))
+        setErr("Wrong email or password — or no account yet. Use “Create one” to sign up first (first user becomes admin).");
+      else setErr(m);
+    }
     setBusy(false);
   };
   return (
