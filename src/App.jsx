@@ -107,14 +107,40 @@ const LLD_QUESTIONS = [
 ];
 
 /* ─── SEED DATA ─────────────────────────────────────────────────────────── */
-const SEED_USERS = [
-  { id: "u-admin", name: "Admin", role: "superadmin", title: "Super Admin", color: "#1e3a8a" },
-  { id: "u-shreya", name: "Shreya", role: "dept_head", title: "Dept Head — Project Management", color: "#7c3aed" },
-  { id: "u-akshay", name: "Akshay", role: "pm", title: "Project Manager", color: "#ea580c" },
-  { id: "u-rahul", name: "Rahul", role: "engineer", title: "Jr. Hardware Engineer", color: "#d97706" },
-  { id: "u-gargi", name: "Gargi", role: "engineer", title: "Jr. Hardware Engineer", color: "#16a34a" },
-  { id: "u-nikhil", name: "Nikhil", role: "engineer", title: "Jr. Firmware Engineer", color: "#2563eb" },
+/* Real Elecbits team (from the org roster). IDs are the real profile UUIDs so
+   they line up with Supabase once connected. "Admin" is a demo-only account. */
+const ROLE_TITLE = { jr_pm: "Jr. Project Manager", sr_pm: "Sr. Project Manager", jr_fw: "Jr. Firmware Engineer", sr_fw: "Sr. Firmware Engineer", jr_hw: "Jr. Hardware Engineer", sr_hw: "Sr. Hardware Engineer", sc: "Supply Chain", ind_design: "Industrial Designer", sol_arch: "Solution Architect", admin: "Super Admin" };
+const _PALETTE = ["#2563eb", "#7c3aed", "#ea580c", "#0891b2", "#16a34a", "#d97706", "#db2777", "#0d9488", "#9333ea", "#dc2626", "#4f46e5", "#0284c7", "#059669", "#b45309", "#c026d3", "#e11d48", "#1e3a8a", "#65a30d", "#4338ca", "#be123c"];
+const _TEAM = [
+  ["u-admin", "Admin", "admin@elecbits.in", "superadmin", "admin", "Super Admin"],
+  ["3d6cfb19-1c1c-4d81-b25c-a0631458d955", "Shreya", "shreya@elecbits.in", "superadmin", "sr_pm", "Dept Head — Project Management"],
+  ["9e0c0a11-72df-449d-8aba-0844a69f07e0", "Saurav", "saurav@elecbits.in", "superadmin", "sr_pm", "Dept Head — Project Management"],
+  ["fba02f3c-0a59-42c6-a78e-8b613a4876ba", "Nikhil", "nikhil@elecbits.in", "superadmin", "sol_arch", "Dept Head — Solution Architecture"],
+  ["2222f3cd-340b-47be-8424-e9b427d9700c", "Jerom Johnshibu", "jerom.johnshibu@elecbits.in", "pm", "jr_pm"],
+  ["418b539b-d7e9-4a40-8e04-d4eff407a6a0", "Chhavi Bhatia", "chhavi.bhatia@elecbits.in", "pm", "jr_pm"],
+  ["902d6d92-fc01-408c-b933-19c04541f254", "Gargi Sharma", "gargi.sharma@elecbits.in", "pm", "jr_pm"],
+  ["bda57b8b-94f2-4e1c-98a2-85e07e78ba6e", "Nived P", "nived.p@elecbits.in", "pm", "jr_pm"],
+  ["df5cc7c0-1eff-424b-9996-57aacc27a33d", "Anunay Dixit", "anunay.dixit@elecbits.in", "pm", "sr_pm"],
+  ["852cdee8-1e4f-43e2-aec1-afe034e8e62b", "AXS", "axs@elecbits.in", "pm", "sr_hw"],
+  ["540cc7a6-895a-433e-9364-1c5b4fae3732", "Rahul Singh", "rahul.singh@elecbits.in", "engineer", "jr_hw"],
+  ["4710aed6-904f-4a0c-b9ce-613b9174114c", "Yogesh", "yogesh@elecbits.in", "engineer", "jr_hw"],
+  ["c8cda154-e0f9-4d62-86db-03a0851f8a37", "Ankit Ashok Mishra", "ankit.ashokmishra@elecbits.in", "engineer", "jr_hw"],
+  ["cda383fc-b4fd-475d-9153-966a77511108", "Jeena George", "jeena.george@elecbits.in", "engineer", "jr_hw"],
+  ["92db0288-7def-4051-8354-2cfb14670a09", "Arun Mohan", "arun.mohan@elecbits.in", "engineer", "sr_hw"],
+  ["2b470c12-1377-4f70-b4d3-5b54e4438d64", "Amitabh Gogoi", "amitabh.gogoi@elecbits.in", "engineer", "sr_fw"],
+  ["22632c31-57b3-4da1-8611-19f3f4ba3944", "Aneesh Madhavan", "aneesh.madhavan@elecbits.in", "engineer", "jr_fw"],
+  ["2c30777b-ea66-4469-9e3a-3d697f259ca7", "Vishnu Vardhan", "vishnu.vardhan@elecbits.in", "engineer", "jr_fw"],
+  ["2ed42335-7f17-4f41-a8a0-d29544902d64", "Swati Saxena", "swati.saxena@elecbits.in", "engineer", "jr_fw"],
+  ["72faf88c-6f2a-460c-b6cb-3ab132373f4d", "Sonu Kumar", "sonu.kumar@elecbits.in", "engineer", "jr_fw"],
+  ["7c4e90f4-49bf-4b62-86df-4bce08e7baaf", "Sai Kiran", "sai.kiran@elecbits.in", "engineer", "jr_fw"],
+  ["86b494a0-cabe-4007-83a7-980a8a5eca27", "Israfil Khan", "israfil.khan@elecbits.in", "engineer", "jr_fw"],
+  ["90fc23c7-3b3c-4d87-a537-3c2959aef5d2", "Ayesha Sheik", "sheik.ayesha@elecbits.in", "engineer", "jr_fw"],
+  ["da82cf31-85bc-479f-ad0f-8b8321cd55c6", "Nethravathi GK", "nethravathi.gk@elecbits.in", "engineer", "jr_fw"],
+  ["52546bb1-89f3-4a59-aa5e-b3badb3f2376", "Harshal Vaishampayan", "harshal.vaishampayan@elecbits.in", "engineer", "sc"],
+  ["db9654f0-0b7e-4d3f-b6ed-3fd69ab781db", "Anwer Suhail", "anwer.suhail@elecbits.in", "engineer", "ind_design"],
 ];
+const SEED_USERS = _TEAM.map(([id, name, email, role, rr, titleOverride], i) => ({ id, name, email, role, title: titleOverride || ROLE_TITLE[rr] || "Team", resourceRole: rr, color: _PALETTE[i % _PALETTE.length] }));
+const SHREYA_ID = "3d6cfb19-1c1c-4d81-b25c-a0631458d955";
 const seedDeadline = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 const SEED_CLIENTS = [{ id: "c-seed", clientId: "PL20-001", name: "Acme Devices" }];
 const SEED_PROJECTS = [{
@@ -123,10 +149,10 @@ const SEED_PROJECTS = [{
   contact: { name: "Rajesh Kumar", designation: "CTO", phone: "+91 98000 00000", email: "rajesh@acme.dev" },
   deadline: seedDeadline, status: "In Progress",
   team: [
-    { slot: "PM (Project Manager)", userId: "u-akshay" },
-    { slot: "Jr. Hardware Engineer", userId: "u-rahul" },
-    { slot: "Jr. Hardware Engineer", userId: "u-gargi" },
-    { slot: "Jr. Firmware Engineer", userId: "u-nikhil" },
+    { slot: "PM (Project Manager)", userId: "902d6d92-fc01-408c-b933-19c04541f254" },
+    { slot: "Jr. Hardware Engineer", userId: "540cc7a6-895a-433e-9364-1c5b4fae3732" },
+    { slot: "Jr. Hardware Engineer", userId: "4710aed6-904f-4a0c-b9ce-613b9174114c" },
+    { slot: "Jr. Firmware Engineer", userId: "72faf88c-6f2a-460c-b6cb-3ab132373f4d" },
   ],
   lldCustomer: { mode: "manual", text: "ESP32-based environmental sensor node. Wi-Fi + BLE, battery powered (2000 mAh, 6-month target), 4-layer PCB, IP54 enclosure, BIS + CE targeted. Cloud dashboard on Elecbits platform, OTA essential.", fileName: "" },
   lldDesigner: { mode: "manual", text: "MCU: ESP32-WROOM-32E. Power: Li-ion + TP4056 charge + 3.3 V buck (TPS62840). Sensors: SHT40 (T/RH), BMP390 (pressure) on shared I2C. Interfaces: USB-C via CP2102N, tag-connect for JTAG. FW: ESP-IDF, dual-partition OTA. Test hooks: UART pads, current-sense jumper on VBAT.", fileName: "" },
@@ -1608,7 +1634,7 @@ function CompleteFlow({ t, onClose }) {
   const [rows, setRows] = useState([{ title: "", assigneeId: t.assigneeId || "", timebox: 60 }]);
   const [branchBusy, setBranchBusy] = useState(false);
   const finalize = (patch) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, ...patch } : x)));
-  const applyEsc = () => { if (!esc) return; finalize({ escalated: { to: "u-shreya", note: escNote, at: new Date().toISOString() } }); toast("Escalated to Shreya", "amber"); };
+  const applyEsc = () => { if (!esc) return; finalize({ escalated: { to: SHREYA_ID, note: escNote, at: new Date().toISOString() } }); toast("Escalated to Shreya", "amber"); };
 
   const genQuestions = async () => {
     setPhase("questions"); setQBusy(true);
@@ -2180,13 +2206,13 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
               <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or jump in as</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-              {SEED_USERS.map((u) => (
+              {SEED_USERS.filter((u) => u.role !== "engineer").slice(0, 8).map((u) => (
                 <button key={u.id} onClick={() => onDemoLogin(u.id)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
                   <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
                 </button>
               ))}
             </div>
-            <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>Demo mode — no Supabase connected yet. Any credentials work. Connect Supabase for real accounts &amp; cloud data.</div>
+            <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>The full team (25) is in the "View as" switcher once you're in. Demo mode — any credentials work; connect Supabase for real accounts &amp; cloud data.</div>
           </>
         ) : (
           <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
