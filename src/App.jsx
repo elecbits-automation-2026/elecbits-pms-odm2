@@ -234,9 +234,15 @@ async function claude(prompt, { json = true } = {}) {
         method: "POST", headers,
         body: JSON.stringify({ model: AI_MODEL, max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      // Any non-2xx, or a body that isn't a real Anthropic response, is a
+      // failure — never let it through as empty text, or callers silently
+      // save blank results instead of falling back.
+      if (!res.ok) throw new Error(data.error?.message || data.message || `${res.status} ${res.statusText}`);
       if (data.error) throw new Error(data.error.message || "API error");
-      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (!Array.isArray(data.content)) throw new Error(data.message || "unexpected AI response");
+      const text = data.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (!text) throw new Error("empty AI response");
       if (!json) return text;
       const clean = text.replace(/```json|```/gi, "").trim();
       const s = clean.indexOf("{"), e = clean.lastIndexOf("}");
@@ -1068,6 +1074,13 @@ function AddExistingProject({ onClose }) {
    Clickable from the projects list. Progress and to-dos are derived from the
    Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
 const projTasksCount = (tasks, pid) => tasks.filter((t) => t.projectId === pid).length;
+/* Defined at module scope, NOT inside ProjectDetail: components declared inside
+   a component get a new identity on every render, so React unmounts and
+   remounts their whole subtree — which made inputs lose focus on each
+   keystroke. Keep any component that wraps an input out here. */
+const Section = ({ children, style }) => <div className="card" style={{ padding: 16, ...style }}>{children}</div>;
+const CardLabel = ({ children, right }) => <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 12 }}><span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{children}</span>{right}</div>;
+
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const { tasks, setTasks, users, notes, me, now, setProjects, memory, toast, sheetSync } = useCtx();
   const [confirmDel, setConfirmDel] = useState(false);
@@ -1115,9 +1128,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     : overdue(t) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
     : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
     : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
-  const Section = ({ children, style }) => <div className="card" style={{ padding: 16, ...style }}>{children}</div>;
-  const CardLabel = ({ children, right }) => <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 12 }}><span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{children}</span>{right}</div>;
-
   const analyseDrive = async () => {
     setIntelBusy(true);
     const digest = await driveReadDigest(p.projectId, p.linkedIds);
@@ -1136,8 +1146,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     const raw = noteVal.trim(); if (!raw) return;
     setNoteBusy(true);
     let organised = raw;
-    try { organised = await claude(intelOrgPrompt(p, raw, memory), { json: false }); } catch { }
-    const entry = { id: uid(), at: new Date().toISOString(), by: me, text: organised, raw };
+    // Keep the raw note whenever the AI can't tidy it — never store a blank.
+    try { const t = await claude(intelOrgPrompt(p, raw, memory), { json: false }); if (t && t.trim()) organised = t.trim(); } catch { }
+    const entry = { id: uid(), at: new Date().toISOString(), by: me, text: organised || raw, raw };
     upd({ intelligence: [entry, ...(p.intelligence || [])] });
     setNoteVal(""); setNoteBusy(false);
     toast("Intelligence added", "green");
