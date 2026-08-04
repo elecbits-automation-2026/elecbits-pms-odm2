@@ -181,12 +181,21 @@ const AI_MODEL = import.meta.env.VITE_CLAUDE_MODEL || "claude-sonnet-4-5";
    contents. Set VITE_DRIVE_SYNC_URL (writes) and VITE_DRIVE_READ_URL (reads). */
 const DRIVE_SYNC_URL = import.meta.env.VITE_DRIVE_SYNC_URL || "";
 const DRIVE_READ_URL = import.meta.env.VITE_DRIVE_READ_URL || "";
-/* Fetch the real contents of the project's Drive folders via the drive-read
-   Edge Function. Returns a text digest for prompts, or "" when unavailable. */
+const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
+/* Fetch the real contents of the project's Drive folders. Works with either
+   backend: the drive-read Supabase Edge Function (service account) or the
+   Google Apps Script web app (runs as you — no service-account key needed).
+   Sent as text/plain so the browser skips the CORS preflight that Apps Script
+   can't answer; both backends parse the JSON body regardless. Returns a text
+   digest for prompts, or "" when unavailable. */
 async function driveReadDigest(projectId, linkedIds) {
   if (!DRIVE_READ_URL) return "";
   try {
-    const res = await fetch(DRIVE_READ_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId, linkedIds: linkedIds || [] }) });
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN }),
+    });
     const data = await res.json();
     if (!res.ok || data.error) return "";
     return String(data.digest || "").slice(0, 4000);

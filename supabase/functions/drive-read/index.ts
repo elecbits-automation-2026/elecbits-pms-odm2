@@ -105,8 +105,12 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!SA_EMAIL || !SA_KEY) return json({ error: "Google service-account secrets not set" }, 500);
 
-  let body: { projectId?: string; linkedIds?: string[] };
-  try { body = await req.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+  // Body is parsed regardless of content-type (the app sends text/plain so the
+  // same call also works against the Apps Script backend without a preflight).
+  let body: { projectId?: string; linkedIds?: string[]; token?: string };
+  try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
+  const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
+  if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
   const needles = [body.projectId, ...(body.linkedIds ?? [])].filter(Boolean) as string[];
   if (!needles.length) return json({ error: "projectId required" }, 400);
 
