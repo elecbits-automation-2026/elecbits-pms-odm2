@@ -377,14 +377,16 @@ KNOWN STATUS (human-written): """${(knownStatus || "not provided").slice(0, 1500
 Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, ARTEFACT CONVENTIONS (file names + where closures must store evidence), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
 const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at /ODM/PM/${pid}/ (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under /ODM/PCB/<id>/ (Gerber, BoM, Schematics, Test-Reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
 /* Project chat — the PM's copilot on deep project details. */
-const projChatPrompt = (p, projTasks, users, history, q, memory) => `You are the Elecbits ODM project copilot for ${p.projectId}. Answer the question using the project data below — be specific and direct, plain text (no markdown), under 180 words. If something isn't in the data, say so and point to where it would live in the Drive folders.
+const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `You are the Elecbits ODM project copilot for ${p.projectId}. Answer the question using the project data below — be specific and direct, plain text (no markdown), under 180 words.
+The data below IS your access to this project's Google Drive: it was fetched for you by the system just now. Treat it as what you can see. Never tell the user to open Drive and paste files back to you, and never say you cannot access Drive — instead answer from what is here, and if a specific fact is genuinely absent, say which folder or file would contain it.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
 LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | PM folder /ODM/PM/${p.projectId}/
 KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
 INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
-DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
+${driveData ? `LIVE DRIVE CONTENTS (real files read from Google Drive just now):\n"""${driveData}"""` : "LIVE DRIVE READ: not connected right now — reason from the folder map and notes above, and say plainly that the live Drive link is not configured if asked."}
+LAST SAVED DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
 TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
 QUESTION: """${String(q).slice(0, 600)}"""`;
@@ -1179,7 +1181,10 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     upd({ chat: [...hist, mine] });
     setChatVal(""); setChatBusy(true);
     let reply;
-    try { reply = await claude(projChatPrompt(p, projTasks, users, hist, q, memory), { json: false }); }
+    // Pull live Drive contents so the copilot answers from real files rather
+    // than telling the PM to go and paste them in.
+    const { digest: chatDigest } = await driveReadDigest(p.projectId, p.linkedIds);
+    try { reply = await claude(projChatPrompt(p, projTasks, users, hist, q, memory, chatDigest), { json: false }); }
     catch {
       const open = projTasks.filter((t) => t.status !== "done");
       reply = `AI is unreachable, so here's the data directly: ${p.projectId} is ${p.status}, deadline ${fmtDate(p.deadline)}, ${done.length}/${projTasks.length} tasks done.${open.length ? ` Open: ${open.slice(0, 5).map((t) => t.title).join("; ")}${open.length > 5 ? "…" : ""}.` : ""} Known status: ${p.knownStatus ? p.knownStatus.slice(0, 200) : "not written yet"}.`;
