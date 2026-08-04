@@ -967,8 +967,10 @@ function AddExistingProject({ onClose }) {
 /* ── Project detail — complete progress of the sanctioned project + next to-dos.
    Clickable from the projects list. Progress and to-dos are derived from the
    Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
+const projTasksCount = (tasks, pid) => tasks.filter((t) => t.projectId === pid).length;
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
-  const { tasks, users, notes, me, now, setProjects, memory, toast } = useCtx();
+  const { tasks, setTasks, users, notes, me, now, setProjects, memory, toast, sheetSync } = useCtx();
+  const [confirmDel, setConfirmDel] = useState(false);
   const my = users.find((u) => u.id === me);
   const isPM = isAdmin || my?.role === "pm" || my?.role === "dept_head";
   const [showLLD, setShowLLD] = useState(false);
@@ -1049,8 +1051,26 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                 {STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}
               </select>
             ) : <Pill color={statColor(p.status)}>{p.status}</Pill>}
+            {isAdmin && !confirmDel && <Btn small kind="ghost" icon={Trash2} style={{ color: "var(--red)", borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }} onClick={() => setConfirmDel(true)}>Delete</Btn>}
           </div>
         </div>
+        {confirmDel && (
+          <div className="fade" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 13px", borderRadius: 10, border: "1px solid var(--red)", background: "color-mix(in srgb, var(--red) 8%, transparent)" }}>
+            <AlertTriangle size={15} style={{ color: "var(--red)", flexShrink: 0 }} />
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--red)", flex: 1, minWidth: 220 }}>
+              Delete "{p.name}" permanently? This also removes its {projTasksCount(tasks, p.projectId)} task(s), known status and intelligence log. This cannot be undone.
+            </span>
+            <Btn small kind="danger" icon={Trash2} onClick={() => {
+              const n = projTasksCount(tasks, p.projectId);
+              setTasks((ts) => ts.filter((t) => t.projectId !== p.projectId));
+              setProjects((ps) => ps.filter((x) => x.id !== p.id));
+              sheetSync("Project Data and IDs (Google Sheet)", `${p.projectId} deleted (${n} task(s) removed)`);
+              toast(`Project ${p.projectId} deleted`, "amber");
+              onBack();
+            }}>Yes — delete project</Btn>
+            <Btn small kind="ghost" onClick={() => setConfirmDel(false)}>Cancel</Btn>
+          </div>
+        )}
       </div>
 
       {/* overall progress */}
