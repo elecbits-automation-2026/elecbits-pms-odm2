@@ -240,6 +240,19 @@ grant usage, select on all sequences in schema public to authenticated;
 alter default privileges in schema public
   grant select, insert, update, delete on tables to authenticated;
 
+-- Is the caller an admin? SECURITY DEFINER so a policy on `profiles` can read
+-- `profiles` without recursing through RLS.
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role in ('superadmin', 'dept_head')
+  );
+$$;
+revoke all on function public.is_admin() from public;
+grant execute on function public.is_admin() to authenticated;
+
 alter table public.profiles enable row level security;
 drop policy if exists profiles_read on public.profiles;
 create policy profiles_read on public.profiles for select to authenticated using (true);
@@ -249,3 +262,13 @@ create policy profiles_update_own on public.profiles for update to authenticated
 drop policy if exists profiles_insert_own on public.profiles;
 create policy profiles_insert_own on public.profiles for insert to authenticated
   with check (id = auth.uid());
+-- Admins manage the whole roster (Resources → add / edit / remove).
+drop policy if exists profiles_admin_insert on public.profiles;
+create policy profiles_admin_insert on public.profiles for insert to authenticated
+  with check (public.is_admin());
+drop policy if exists profiles_admin_update on public.profiles;
+create policy profiles_admin_update on public.profiles for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+drop policy if exists profiles_admin_delete on public.profiles;
+create policy profiles_admin_delete on public.profiles for delete to authenticated
+  using (public.is_admin());
