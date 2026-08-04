@@ -768,7 +768,10 @@ function ProjectsModule() {
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
   const [wizard, setWizard] = useState(false);
+  const [openId, setOpenId] = useState(null);
   const setStatus = (id, status) => { setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p))); sheetSync("Project Data and IDs (Google Sheet)", `Status → ${status}`); };
+  const openProject = projects.find((p) => p.id === openId);
+  if (openProject) return <ProjectDetail project={openProject} onBack={() => setOpenId(null)} setStatus={setStatus} isAdmin={isAdmin} />;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card" style={{ padding: 18, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
@@ -784,7 +787,7 @@ function ProjectsModule() {
         const dl = daysLeft(p.deadline);
         const pm = p.team?.find((t) => t.slot.startsWith("PM"));
         return (
-          <div key={p.id} className="card rowHover" style={{ padding: 16 }}>
+          <div key={p.id} className="card rowHover" style={{ padding: 16, cursor: "pointer" }} onClick={() => setOpenId(p.id)} title="Open full progress & to-dos">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div style={{ minWidth: 240, flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
@@ -795,10 +798,11 @@ function ProjectsModule() {
                 <div style={{ fontWeight: 700, fontSize: 14.5, margin: "4px 0 2px" }}>{p.name}</div>
                 <div style={{ fontSize: 12, color: "var(--txt2)" }}>{p.clientName} · {p.clientId}{pm ? ` · PM: ${users.find((u) => u.id === pm.userId)?.name}` : ""}</div>
                 <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginTop: 5 }}>/ODM/PM/{p.projectId}/ → Checklist.xlsx</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 7, fontSize: 11.5, fontWeight: 600, color: "var(--acc)" }}>View full progress &amp; to-dos <ArrowRight size={12} /></div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
                 {isAdmin ? (
-                  <select className="inp" style={{ width: 150, padding: "6px 10px", fontWeight: 600, color: statColor(p.status) }} value={p.status} onChange={(e) => setStatus(p.id, e.target.value)}>
+                  <select className="inp" style={{ width: 150, padding: "6px 10px", fontWeight: 600, color: statColor(p.status) }} value={p.status} onClick={(e) => e.stopPropagation()} onChange={(e) => setStatus(p.id, e.target.value)}>
                     {STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}
                   </select>
                 ) : <Pill color={statColor(p.status)}>{p.status}</Pill>}
@@ -816,6 +820,210 @@ function ProjectsModule() {
         );
       })}
       {wizard && <ProjectWizard onClose={() => setWizard(false)} />}
+    </div>
+  );
+}
+
+/* ── Project detail — complete progress of the sanctioned project + next to-dos.
+   Clickable from the projects list. Progress and to-dos are derived from the
+   Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
+function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
+  const { tasks, users, notes, me, now } = useCtx();
+  const [showLLD, setShowLLD] = useState(false);
+  const nowMs = now || Date.now();
+  const pm = p.team?.find((t) => t.slot.startsWith("PM"));
+  const projTasks = tasks.filter((t) => t.projectId === p.projectId);
+  const done = projTasks.filter((t) => t.status === "done");
+  const openTasks = projTasks.filter((t) => t.status !== "done");
+  const pct = projTasks.length ? Math.round((done.length / projTasks.length) * 100) : 0;
+  const counts = [
+    ["Pending", projTasks.filter((t) => t.status === "pending").length, "var(--txt3)"],
+    ["In progress", projTasks.filter((t) => t.status === "in-progress").length, "var(--blue)"],
+    ["Blocked", projTasks.filter((t) => t.status === "blocked").length, "var(--amber)"],
+    ["Done", done.length, "var(--green)"],
+  ];
+  const dl = daysLeft(p.deadline);
+  const overdue = (t) => t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < nowMs;
+  const rank = (t) => (t.status === "blocked" ? 0 : overdue(t) ? 1 : t.status === "in-progress" ? 2 : 3);
+  const todos = [...openTasks].sort((a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
+  const sanctioned = p.status !== "Planning";
+  const startMs = new Date(p.createdAt).getTime();
+  const endMs = new Date(p.deadline + "T23:59:59").getTime();
+  const elapsedPct = endMs > startMs ? Math.min(100, Math.max(0, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 100;
+  const gates = [
+    ["Project ID", !!p.projectId], ["Customer LLD", !!p.lldCustomer], ["Designer LLD", !!p.lldDesigner],
+    ["PM assigned", !!pm], ["Deadline set", !!p.deadline],
+  ];
+  const todoMeta = (t) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
+    : overdue(t) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
+    : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
+    : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
+  const Section = ({ children, style }) => <div className="card" style={{ padding: 16, ...style }}>{children}</div>;
+  const CardLabel = ({ children }) => <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>{children}</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* header */}
+      <div className="card" style={{ padding: "14px 18px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt2)", display: "flex", alignItems: "center", gap: 5, padding: 0, fontSize: 12.5, fontWeight: 600 }}><ArrowRight size={15} style={{ transform: "rotate(180deg)" }} /> Projects</button>
+          <span style={{ color: "var(--bdr2)" }}>/</span>
+          <span style={{ fontFamily: MONO, fontWeight: 600, fontSize: 13, color: "var(--acc)" }}>{p.projectId}</span>
+          <span style={{ fontWeight: 800, fontSize: 15 }}>{p.name}</span>
+          {sanctioned ? <Pill color="var(--green)"><CheckCircle2 size={11} /> Sanctioned</Pill> : <Pill color="var(--amber)">Planning</Pill>}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+            <Pill color={dl < 0 ? "var(--red)" : dl <= 7 ? "var(--amber)" : "var(--txt2)"}><Calendar size={11} /> {fmtDate(p.deadline)} · {dl < 0 ? `${-dl}d over` : `${dl}d left`}</Pill>
+            {isAdmin ? (
+              <select className="inp" style={{ width: 150, padding: "6px 10px", fontWeight: 600, color: statColor(p.status) }} value={p.status} onChange={(e) => setStatus(p.id, e.target.value)}>
+                {STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}
+              </select>
+            ) : <Pill color={statColor(p.status)}>{p.status}</Pill>}
+          </div>
+        </div>
+      </div>
+
+      {/* overall progress */}
+      <Section>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 90 }}>
+            <div style={{ fontSize: 34, fontWeight: 800, fontFamily: MONO, color: pct === 100 ? "var(--green)" : "var(--acc)", lineHeight: 1 }}>{pct}%</div>
+            <div style={{ fontSize: 11, color: "var(--txt2)", marginTop: 3 }}>{done.length}/{projTasks.length} tasks done</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ display: "flex", marginBottom: 8 }}><Progress pct={pct} color={pct === 100 ? "var(--green)" : "var(--acc)"} h={10} /></div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {counts.map(([label, n, c]) => <Pill key={label} color={c}>{label} {n}</Pill>)}
+            </div>
+          </div>
+        </div>
+      </Section>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,340px)", gap: 16 }}>
+        {/* LEFT — next to-dos + internal sheet */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Section>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Next to-dos</span>
+              {todos.length > 0 && <Pill color="var(--purple)">{todos.length} open</Pill>}
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>
+            </div>
+            {todos.length === 0 ? (
+              <Empty icon={ListChecks} title="No open to-dos" sub="Every open task for this project shows here, most urgent first. Add them in Daily Scrum — organise a note and push the tasks." />
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {todos.map((t) => {
+                  const { Ic, label, color } = todoMeta(t);
+                  const u = users.find((x) => x.id === t.assigneeId);
+                  return (
+                    <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)" }}>
+                      <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+                        <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
+                          {u ? <span style={{ display: "flex", alignItems: "center", gap: 5 }}><AvatarDot user={u} size={18} /><span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>}
+                          {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
+                          <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}</span>
+                          {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length} if/else</Pill>}
+                          {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
+                          {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
+                        </div>
+                      </div>
+                      <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Section>
+
+          <Section style={{ background: "var(--s2)" }}>
+            <CardLabel>Project internal sheet</CardLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "9px 16px", fontSize: 12.5 }}>
+              <KV k="Project ID" v={<span style={{ fontFamily: MONO }}>{p.projectId} <span style={{ color: "var(--txt3)", fontSize: 10 }}>({p.idMode})</span></span>} />
+              <KV k="Status" v={<span style={{ color: statColor(p.status), fontWeight: 600 }}>{p.status}</span>} />
+              <KV k="Client" v={p.clientName || "—"} />
+              <KV k="Client ID" v={<span style={{ fontFamily: MONO }}>{p.clientId || "—"}</span>} />
+              <KV k="Industry" v={p.industry || "—"} />
+              <KV k="Org size" v={p.orgSize || "—"} />
+              <KV k="Contact" v={p.contact?.name ? `${p.contact.name}${p.contact.designation ? " · " + p.contact.designation : ""}` : "—"} />
+              <KV k="Created" v={fmtDate((p.createdAt || "").slice(0, 10))} />
+              <KV k="Drive" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>/ODM/PM/{p.projectId}/</span>} />
+              <KV k="Checklist" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>Checklist.xlsx</span>} />
+            </div>
+          </Section>
+        </div>
+
+        {/* RIGHT — sanction gates, team, timeline, LLDs */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Section>
+            <CardLabel>Sanction gates</CardLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              {gates.map(([label, ok]) => (
+                <div key={label} style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 12.5 }}>
+                  {ok ? <CheckCircle2 size={16} style={{ color: "var(--green)" }} /> : <X size={16} style={{ color: "var(--red)" }} />}
+                  <span style={{ flex: 1, color: ok ? "var(--txt)" : "var(--red)", fontWeight: ok ? 500 : 600 }}>{label}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: ok ? "var(--green)" : "var(--red)" }}>{ok ? "CLEARED" : "MISSING"}</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          <Section>
+            <CardLabel>Team roster</CardLabel>
+            {(p.team || []).length === 0 ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>No team assigned.</div> : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(p.team || []).map((t, i) => {
+                  const u = users.find((x) => x.id === t.userId);
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <AvatarDot user={u} size={30} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12.5 }}>{u?.name || "—"}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>{t.slot}</div>
+                      </div>
+                      {t.slot.startsWith("PM") && <Pill color="var(--purple)">PM</Pill>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Section>
+
+          <Section>
+            <CardLabel>Stage-wise timeline</CardLabel>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+              <span style={{ color: "var(--txt2)", fontWeight: 600 }}>{fmtDate((p.createdAt || "").slice(0, 10))}</span>
+              <span style={{ fontWeight: 800, color: dl < 0 ? "var(--red)" : dl <= 14 ? "var(--amber)" : "var(--green)" }}>{dl < 0 ? `OVERDUE ${-dl}d` : `${dl}d left`}</span>
+              <span style={{ color: "var(--txt2)", fontWeight: 600 }}>{fmtDate(p.deadline)}</span>
+            </div>
+            <div style={{ position: "relative", height: 10, background: "var(--s2)", borderRadius: 99, overflow: "hidden" }}>
+              <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${elapsedPct}%`, background: dl < 0 ? "var(--red)" : elapsedPct > 75 ? "var(--amber)" : "var(--acc)", borderRadius: 99, transition: "width .3s" }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 10.5, color: "var(--txt3)" }}>
+              <span>{elapsedPct}% elapsed</span><span>{pct}% work done</span>
+            </div>
+          </Section>
+
+          <Section>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: showLLD ? 12 : 0 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>LLDs</span>
+              <Pill color="var(--green)">C · {p.lldCustomer?.mode || "—"}</Pill>
+              <Pill color="var(--green)">D · {p.lldDesigner?.mode || "—"}</Pill>
+              <button onClick={() => setShowLLD((s) => !s)} style={{ marginLeft: "auto", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>{showLLD ? "Hide" : "View"} <ChevronDown size={13} style={{ transform: showLLD ? "rotate(180deg)" : "none", transition: "transform .2s" }} /></button>
+            </div>
+            {showLLD && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {[["Customer LLD", p.lldCustomer], ["Designer LLD", p.lldDesigner]].map(([label, lld]) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}><FileText size={12} style={{ color: "var(--acc)" }} /> {label} {lld?.fileName && <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--txt3)" }}>{lld.fileName}</span>}</div>
+                    <pre style={{ margin: 0, padding: 10, background: "var(--s2)", borderRadius: 8, fontSize: 11.5, whiteSpace: "pre-wrap", fontFamily: "inherit", color: "var(--txt2)", lineHeight: 1.55, maxHeight: 200, overflow: "auto" }}>{lld?.text || "—"}</pre>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
+        </div>
+      </div>
     </div>
   );
 }
