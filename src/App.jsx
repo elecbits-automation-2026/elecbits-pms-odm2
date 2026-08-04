@@ -2155,11 +2155,11 @@ const Shell = ({ dark, children }) => (
 /* ═══ LOGIN / SIGN-UP ═════════════════════════════════════════════════════
    Real Supabase email/password auth when Supabase is connected; a working demo
    login (any credentials, or pick a role) when it isn't. Always the front door. */
-const SAMPLE_LOGIN = { email: "admin@elecbits.in", pw: "elecbits123" };
+const SAMPLE_LOGIN = { email: "saurav@elecbits.in", pw: "Elecbits@2026" };
 function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
   const [mode, setMode] = useState("signin");
-  const [email, setEmail] = useState(demo ? SAMPLE_LOGIN.email : "");
-  const [pw, setPw] = useState(demo ? SAMPLE_LOGIN.pw : "");
+  const [email, setEmail] = useState(SAMPLE_LOGIN.email);
+  const [pw, setPw] = useState(SAMPLE_LOGIN.pw);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -2190,15 +2190,13 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
           <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
           <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{mode === "signin" || demo ? "Sign in to continue" : "Create your account"}</div>
         </div>
-        {demo && (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--soft)", border: "1px solid var(--bdr)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
-            <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
-            <div style={{ fontSize: 11.5, lineHeight: 1.5, flex: 1 }}>
-              <b>Sample login</b> — <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.email}</span> · <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.pw}</span><br />
-              <span style={{ color: "var(--txt2)" }}>Prefilled below — just press Sign in. Any credentials work in demo.</span>
-            </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--soft)", border: "1px solid var(--bdr)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+          <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
+          <div style={{ fontSize: 11.5, lineHeight: 1.5, flex: 1 }}>
+            <b>Sample login</b> — <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.email}</span> · <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.pw}</span><br />
+            <span style={{ color: "var(--txt2)" }}>{demo ? "Prefilled below — press Sign in. Any credentials work in demo." : "Prefilled below — press Sign in. Shared password for all team accounts (from the setup script)."}</span>
           </div>
-        )}
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
           {mode === "signup" && !demo && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
           <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
@@ -2207,20 +2205,18 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
           {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>{msg}</div>}
           <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : mode === "signin" || demo ? "Sign in" : "Create account"}</Btn>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
+          <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>{demo ? "or jump in as" : "quick fill a team member"}</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+          {SEED_USERS.filter((u) => u.role !== "engineer" && u.id !== "u-admin").slice(0, 8).map((u) => (
+            <button key={u.id} title={u.email} onClick={() => { if (demo) { onDemoLogin(u.id); } else { setEmail(u.email); setPw(SAMPLE_LOGIN.pw); setErr(""); } }} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
+              <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
+            </button>
+          ))}
+        </div>
         {demo ? (
-          <>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
-              <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or jump in as</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-              {SEED_USERS.filter((u) => u.role !== "engineer").slice(0, 8).map((u) => (
-                <button key={u.id} onClick={() => onDemoLogin(u.id)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
-                  <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
-                </button>
-              ))}
-            </div>
-            <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>The full team (25) is in the "View as" switcher once you're in. Demo mode — any credentials work; connect Supabase for real accounts &amp; cloud data.</div>
-          </>
+          <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>The full team (25) is in the "View as" switcher once you're in. Demo mode — any credentials work; connect Supabase for real accounts.</div>
         ) : (
           <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
             {mode === "signin" ? "New to the workspace? " : "Already have an account? "}
