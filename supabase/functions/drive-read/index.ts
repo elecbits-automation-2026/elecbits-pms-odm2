@@ -42,17 +42,22 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
   let s = String(pem).trim();
   s = s.replace(/^["']+|["']+$/g, "");   // surrounding quotes from a JSON paste
   s = s.replace(/\\n/g, "\n");            // literal backslash-n escapes
-  if (!/BEGIN [A-Z ]*PRIVATE KEY/.test(s)) {
-    throw new Error("GOOGLE_PRIVATE_KEY does not look like a PEM key — paste the whole private_key value, including the BEGIN/END lines");
-  }
+  if (!s) throw new Error("GOOGLE_PRIVATE_KEY secret is empty — add it under Edge Functions → Secrets");
   if (/BEGIN RSA PRIVATE KEY/.test(s)) {
     throw new Error("GOOGLE_PRIVATE_KEY is PKCS#1 (BEGIN RSA PRIVATE KEY); Google's JSON key is PKCS#8 — re-copy the private_key field from the downloaded JSON");
   }
+  // Accept a full PEM, or just the base64 body: some secret UIs cut everything
+  // after the first newline, leaving the BEGIN/END lines behind.
   const body = s
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "")
     .replace(/-----END [A-Z ]*PRIVATE KEY-----/, "")
     .replace(/[^A-Za-z0-9+/=]/g, "");     // drop newlines, spaces, quotes, anything else
-  if (body.length < 100) throw new Error("GOOGLE_PRIVATE_KEY looks truncated — re-paste the full key");
+  if (body.length < 500) {
+    throw new Error(
+      `GOOGLE_PRIVATE_KEY looks incomplete (only ${body.length} usable characters; a Google key has ~1600). ` +
+      `The secret box likely cut it at the first line break — paste the private_key value as ONE line with literal \\n sequences, exactly as it appears inside the JSON file.`,
+    );
+  }
   let der: Uint8Array;
   try {
     der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
