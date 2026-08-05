@@ -112,10 +112,36 @@ async function drive(token: string, path: string): Promise<any> {
   return res.json();
 }
 
-async function findFolders(token: string, needle: string): Promise<GFile[]> {
-  const q = encodeURIComponent(`name contains '${needle.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
-  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,parents,webViewLink)&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
+async function searchFolders(token: string, term: string): Promise<GFile[]> {
+  const q = encodeURIComponent(`name contains '${term.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,parents,webViewLink)&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
   return data.files ?? [];
+}
+
+/* Forgiving lookup: people name folders inconsistently, so try progressively
+   looser terms rather than reporting "not found". Drive's `contains` is
+   case-insensitive, so variants here are about separators and length. */
+async function findFolders(token: string, needle: string): Promise<GFile[]> {
+  const raw = String(needle).trim();
+  const tried = new Set<string>();
+  const attempts: string[] = [];
+  const push = (t?: string) => { const v = (t || "").trim(); if (v.length >= 3 && !tried.has(v.toLowerCase())) { tried.add(v.toLowerCase()); attempts.push(v); } };
+
+  push(raw);                                   // exact-ish
+  push(raw.replace(/[_\s]+/g, "-"));           // underscores/spaces → dashes
+  push(raw.replace(/[-_\s]+/g, ""));           // no separators at all
+  const parts = raw.split(/[-_\s]+/).filter(Boolean);
+  if (parts.length > 2) {
+    push(parts.slice(0, Math.max(2, parts.length - 1)).join("-")); // drop last chunk
+    push(parts.slice(-2).join("-"));                                // last two chunks
+  }
+  push(parts.find((x) => /\d/.test(x) && x.length >= 3));           // the most number-like chunk
+
+  for (const term of attempts) {
+    const hits = await searchFolders(token, term);
+    if (hits.length) return hits;
+  }
+  return [];
 }
 
 async function listChildren(token: string, folderId: string): Promise<GFile[]> {
@@ -219,7 +245,7 @@ Deno.serve(async (req) => {
     let extracts = 0;
     for (const needle of needles.slice(0, 6)) {
       const folders = await findFolders(token, needle);
-      if (!folders.length) { lines.push(`[${needle}] no matching Drive folder found`); continue; }
+      if (!folders.length) { lines.push(`Nothing found in Drive for ${needle} yet.`); continue; }
       for (const folder of folders.slice(0, 2)) {
         const files = await listChildren(token, folder.id);
         const path = await folderPath(token, folder);

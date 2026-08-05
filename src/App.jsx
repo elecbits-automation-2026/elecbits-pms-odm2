@@ -367,6 +367,20 @@ const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""
 const intelOrgPrompt = (p, raw, memory) => `Organise this manual intelligence note about Elecbits ODM project ${p.projectId} into one or two crisp status sentences (plain text, no markdown). Keep facts, drop filler.
 ${memCtx(memory)}
 NOTE: """${String(raw).slice(0, 1200)}"""`;
+/* Workspace assistant — the chat that follows you across every page. */
+const workspacePrompt = (ctx, history, q, memory) => `You are the Elecbits ODM assistant. You help everyone here — project managers, engineers, department heads — with anything about their work.
+${CHAT_STYLE}
+Everything below is what you can see across the whole workspace. Use it to answer. If the answer needs a specific project's Drive files, say which project to open and offer what you do know.
+WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})
+TODAY: ${todayStr()}
+PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 120)}` : ""}`).join("\n") || "none yet"}
+OPEN TASKS (${ctx.openTasks.length}): ${ctx.openTasks.slice(0, 30).map((t) => `${t.title} — ${t.who} · ${t.projectId || "no project"} · ${t.status}${t.when ? ` · ${t.when}` : ""}`).join("\n") || "none"}
+TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} (${u.title})${u.load ? ` — ${u.load} open` : ""}`).join(", ")}
+RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 160)}`).join(" | ") || "none"}
+${memCtx(memory)}
+RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "User" : "You"}: ${m.text}`).join(" | ") || "—"}
+QUESTION: """${String(q).slice(0, 600)}"""`;
+
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
 const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
 ${memCtx(memory)}
@@ -377,9 +391,19 @@ KNOWN STATUS (human-written): """${(knownStatus || "not provided").slice(0, 1500
 Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, ARTEFACT CONVENTIONS (file names + where closures must store evidence), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
 const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at /ODM/PM/${pid}/ (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under /ODM/PCB/<id>/ (Gerber, BoM, Schematics, Test-Reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
 /* Project chat — the PM's copilot on deep project details. */
-const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `You are the Elecbits ODM project copilot for ${p.projectId}. Answer the question using the project data below — be specific and direct, plain text (no markdown), under 180 words.
-The data below IS your access to this project's Google Drive: it was fetched for you by the system just now. Treat it as what you can see. Never tell the user to open Drive and paste files back to you, and never say you cannot access Drive — instead answer from what is here, and if a specific fact is genuinely absent, say which folder or file would contain it.
-When the live listing is present, quote the REAL Drive paths and file names exactly as they appear in it (they may differ in case, naming or location from the /ODM/PM/... convention — trust the live listing over the convention, and point out the difference if it matters). If asked what you can see or where you looked, list the actual folders, sub-folders and files found, with their paths.
+const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers and engineers, not to developers:
+- Plain, warm, everyday English. Short sentences. No jargon, no system-speak.
+- Never mention paths being "invalid", "non-standard", "case-variant", conventions, templates, schemas, IDs of internals, or how the system fetched anything. Nobody cares how it works.
+- Never lecture, never explain your limitations, never give instructions about folder naming.
+- If you searched and found things, simply say what you found, in normal words: "I looked in the FMS-200 folder and found 12 files. The latest is..."
+- If you truly could not find something, say it kindly in one line and offer the closest thing you did find, or ask one simple question. Never blame the user or their naming.
+- Answer the question first, in the first sentence. Details after. Under 150 words unless asked for more.
+- No markdown symbols, no bullet characters like * or #. Use plain lines.`;
+
+const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `You are the project assistant for ${p.name || p.projectId} at Elecbits. Help the person in front of you get their answer fast.
+${CHAT_STYLE}
+The information below is everything you can see, including this project's Google Drive, which was searched for you just now. Treat it as your own knowledge — never tell the user to go and fetch files for you, and never say you cannot access Drive.
+When you mention a file or folder, use the real name and location shown below, exactly as it appears. Do not comment on whether it matches any expected structure — just use what is there.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
@@ -2676,6 +2700,89 @@ function MemoryModule() {
   );
 }
 
+/* ═══ WORKSPACE ASSISTANT — the chat available on every page ═════════════ */
+function WorkspaceChat() {
+  const { projects, tasks, users, notes, me, memory } = useCtx();
+  const [open, setOpen] = useState(false);
+  const [msgs, setMsgs] = useState([]);
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const bodyRef = useRef(null);
+  const my = users.find((u) => u.id === me);
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }, [msgs.length, busy, open]);
+
+  const send = async (preset) => {
+    const q = (preset || val).trim(); if (!q || busy) return;
+    const hist = msgs;
+    setMsgs((m) => [...m, { id: uid(), who: "me", text: q }]);
+    setVal(""); setBusy(true);
+    const ctx = {
+      meName: my?.name || "there", meTitle: my?.title || "",
+      projects: projects.map((p) => {
+        const ts = tasks.filter((t) => t.projectId === p.projectId);
+        return { projectId: p.projectId, name: p.name, status: p.status, deadline: p.deadline, knownStatus: p.knownStatus,
+          pmName: users.find((u) => u.id === (p.team || []).find((t) => t.slot.startsWith("PM"))?.userId)?.name,
+          done: ts.filter((t) => t.status === "done").length, total: ts.length };
+      }),
+      openTasks: tasks.filter((t) => t.status !== "done").map((t) => ({
+        title: t.title, who: users.find((u) => u.id === t.assigneeId)?.name || "unassigned",
+        projectId: t.projectId, status: t.status, when: [t.date, t.endTime].filter(Boolean).join(" "),
+      })),
+      team: users.filter((u) => u.id !== "u-admin").map((u) => ({ name: u.name, title: u.title, load: tasks.filter((t) => t.assigneeId === u.id && t.status !== "done").length })),
+      notes: notes.map((n) => ({ date: n.date, raw: n.raw })),
+    };
+    let reply;
+    try { reply = await claude(workspacePrompt(ctx, hist, q, memory), { json: false }); }
+    catch {
+      const openN = ctx.openTasks.length;
+      reply = `I can't reach the AI right now, so here's the short version: you have ${ctx.projects.length} project${ctx.projects.length === 1 ? "" : "s"} and ${openN} open task${openN === 1 ? "" : "s"}.${ctx.projects.length ? ` Closest deadline: ${[...ctx.projects].sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)))[0]?.name}.` : ""}`;
+    }
+    setMsgs((m) => [...m, { id: uid(), who: "me", text: q }, { id: uid(), who: "ai", text: reply }].filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i));
+    setBusy(false);
+  };
+  // keep one clean list (the optimistic user message is already in state)
+  const shown = msgs.filter((m, i, a) => !(m.who === "me" && a[i + 1]?.who === "me" && a[i + 1]?.text === m.text));
+
+  const SUGGESTIONS = ["What needs my attention today?", "Who is free this week?", "Which projects are at risk?"];
+  if (!open) return (
+    <button onClick={() => setOpen(true)} title="Ask the assistant" style={{ position: "fixed", right: 20, bottom: 20, zIndex: 1500, display: "flex", alignItems: "center", gap: 9, padding: "12px 18px", borderRadius: 99, border: "none", background: "var(--acc)", color: "#fff", fontWeight: 700, fontSize: 13.5, cursor: "pointer", boxShadow: "0 8px 26px rgba(37,99,235,.4)" }}>
+      <Bot size={17} /> Ask anything
+    </button>
+  );
+  return (
+    <div className="fade" style={{ position: "fixed", right: 20, bottom: 20, zIndex: 1500, width: "min(420px, calc(100vw - 40px))", height: "min(560px, calc(100vh - 100px))", display: "flex", flexDirection: "column", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 16, boxShadow: "0 24px 70px rgba(0,0,0,.28)", overflow: "hidden" }}>
+      <div style={{ padding: "13px 16px", borderBottom: "1px solid var(--bdr)", display: "flex", alignItems: "center", gap: 9, background: "var(--soft)" }}>
+        <Bot size={17} style={{ color: "var(--acc)" }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5 }}>Assistant</div>
+          <div style={{ fontSize: 11, color: "var(--txt2)" }}>Knows your projects, tasks and team</div>
+        </div>
+        <button onClick={() => setOpen(false)} style={{ background: "none", border: "none", color: "var(--txt2)", cursor: "pointer", padding: 4 }}><X size={17} /></button>
+      </div>
+      <div ref={bodyRef} style={{ flex: 1, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 9 }}>
+        {shown.length === 0 && !busy && (
+          <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.7 }}>
+            Hi {my?.name?.split(" ")[0] || "there"} — ask me anything about your work.
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, alignItems: "flex-start" }}>
+              {SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)} style={chipS(false)}>{s}</button>)}
+            </div>
+          </div>
+        )}
+        {shown.map((m) => (
+          <div key={m.id} style={{ display: "flex", justifyContent: m.who === "me" ? "flex-end" : "flex-start" }}>
+            <div style={{ maxWidth: "88%", padding: "9px 13px", borderRadius: m.who === "me" ? "13px 13px 4px 13px" : "13px 13px 13px 4px", background: m.who === "me" ? "var(--acc)" : "var(--s2)", color: m.who === "me" ? "#fff" : "var(--txt)", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{m.text}</div>
+          </div>
+        ))}
+        {busy && <div style={{ padding: "7px 13px", borderRadius: 13, background: "var(--s2)", alignSelf: "flex-start" }}><TypingDots /></div>}
+      </div>
+      <div style={{ padding: 12, borderTop: "1px solid var(--bdr)", display: "flex", gap: 8 }}>
+        <input className="inp" style={{ flex: 1 }} placeholder="Ask anything…" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+        <Btn icon={busy ? Loader2 : Send} disabled={busy || !val.trim()} onClick={() => send()} style={{ width: 42, padding: 0 }} title="Send"> </Btn>
+      </div>
+    </div>
+  );
+}
+
 /* ═══ SHELL — SIDEBAR, HEADER, TOASTS, APP ROOT ══════════════════════════ */
 const NAV = [
   { id: "projects", label: "Create a Project", icon: FolderPlus, admin: true },
@@ -2989,6 +3096,7 @@ export default function App() {
             {view === "memory" && <MemoryModule />}
           </div>
         </main>
+        <WorkspaceChat />
         <div style={{ position: "fixed", bottom: 18, right: 18, display: "flex", flexDirection: "column", gap: 8, zIndex: 2000 }}>
           {toasts.map((t) => (
             <div key={t.id} className="fade" style={{ padding: "10px 15px", borderRadius: 10, background: "var(--s1)", border: `1px solid var(--${t.kind === "green" ? "green" : t.kind === "amber" ? "amber" : t.kind === "red" ? "red" : "acc"})`, boxShadow: "0 8px 26px rgba(0,0,0,.25)", fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 8, maxWidth: 340 }}>
