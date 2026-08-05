@@ -210,7 +210,9 @@ async function driveReadDigest(projectId, linkedIds) {
       return { digest: "", error: `Drive read failed (${res.status}): ${String(hint).slice(0, 220)}` };
     }
     if (data.error) return { digest: "", error: `Drive read: ${data.error}` };
-    return { digest: String(data.digest || "").slice(0, 4000), error: "" };
+    // Generous cap: the digest now carries the text inside the documents, not
+    // just the file list, and that is the whole point of reading Drive.
+    return { digest: String(data.digest || "").slice(0, 16000), error: "" };
   } catch (e) {
     return { digest: "", error: `Drive unreachable: ${e.message || e}` };
   }
@@ -381,6 +383,62 @@ ${memCtx(memory)}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "User" : "You"}: ${m.text}`).join(" | ") || "—"}
 QUESTION: """${String(q).slice(0, 600)}"""`;
 
+/* ── COMMAND CENTRE ────────────────────────────────────────────────────────
+   The full assistant on the main menu. Same knowledge as the workspace chat,
+   but it can actually DO things: create projects, put people on them, raise
+   tasks, write today's scrum, add memory, assign training, and read or write
+   the project's Google Drive. It performs actions by emitting DO blocks that
+   the app executes — see runAction() in AssistantModule.                      */
+const ASSISTANT_ACTIONS = `WHAT YOU CAN DO (you are not just an adviser — you operate this system)
+To do something, end your reply with one or more blocks in exactly this shape, and nothing after the last one:
+<<<DO>>>
+{"action":"...", ...}
+<<<END>>>
+One block per thing. Always write one short plain line BEFORE the blocks saying what you are doing. Never show the blocks themselves in your sentence, never explain the format, never ask the user to run anything.
+
+The actions, with their fields:
+{"action":"create_project","projectId":"EB-24-001","name":"Smart Meter","clientName":"Acme","deadline":"2026-09-30","status":"Planning","linkedIds":["EB-24-001-PCB-R1"],"knownStatus":"one paragraph of where it stands","team":[{"name":"Saurav","slot":"PM (Project Manager)"},{"name":"Ravi","slot":"Jr. Hardware Engineer"}]}
+{"action":"update_project","projectId":"EB-24-001","status":"In Progress","deadline":"2026-10-15","knownStatus":"...","name":"...","linkedIds":["..."]}
+{"action":"delete_project","projectId":"EB-24-001"}
+{"action":"assign_resource","name":"Ravi","projectId":"EB-24-001","slot":"Jr. Hardware Engineer"}
+{"action":"unassign_resource","name":"Ravi","projectId":"EB-24-001"}
+{"action":"add_resource","name":"Asha Menon","title":"Jr. Firmware Engineer","dept":"Firmware","resourceRole":"jr_fw","role":"engineer","skills":["Embedded C"],"maxProjects":3,"email":"asha@elecbits.in"}
+{"action":"add_task","title":"Run DRC on rev B gerbers","assignee":"Ravi","projectId":"EB-24-001","date":"2026-08-06","startTime":"10:00","endTime":"12:00"}
+{"action":"update_task","match":"DRC on rev B","status":"done","assignee":"Neha"}
+{"action":"add_scrum_note","text":"the full note in the user's own words","date":"2026-08-05"}
+{"action":"add_memory","title":"Gerber review rule","content":"the full text to remember","type":"instruction"}
+{"action":"assign_training","name":"Ravi","title":"Altium constraint manager","resource":"link or book","due":"2026-08-20"}
+{"action":"read_drive","projectId":"EB-24-001"}
+{"action":"write_drive_file","projectId":"EB-24-001","fileName":"Milestones.md","content":"the complete file content"}
+{"action":"open_page","page":"scrum"}    (pages: projects, scrum, tasks, resources, perf, memory)
+
+HOW TO DECIDE
+- If the person is telling you something that belongs in the daily scrum ("today Ravi will…", a stand-up dump, anything about who is doing what today) — put it in with add_scrum_note. Do not just reply about it.
+- If they ask you to remember something, add_memory.
+- If they name work for someone, add_task with that person.
+- If they describe a project that is not in the list, create_project. Use whatever they gave you and sensible defaults for the rest; never refuse for a missing field, and never interrogate them with a list of questions. Ask at most one short question, and only if you truly cannot proceed.
+- If they want to know what is inside a project's files, read_drive for that project first. The contents come back to you and you answer in the same conversation.
+- If they ask for a document, sheet, plan or minutes to exist in Drive, write_drive_file with the real, complete content.
+- Statuses are one of: Planning, In Progress, On Hold, Delayed, Completed. Team slots: ${TEAM_SLOTS.join(", ")}.
+- Dates are YYYY-MM-DD. Times are HH:MM, 24-hour.
+- Use people's names as they appear in the team list; near-enough spelling is fine, the system matches them.
+- Do several things in one go when that is what was asked — several blocks, one after another.
+- If the request is only a question, answer it and emit no blocks at all.`;
+
+const assistantPrompt = (ctx, history, q, memory, driveData) => `You are the Elecbits ODM assistant — the person everyone in this company asks first. You know the whole workspace and you run it for them.
+${CHAT_STYLE}
+${ASSISTANT_ACTIONS}
+WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})${ctx.isAdmin ? " — an admin, so anything goes" : ""}
+TODAY: ${todayStr()} ${nowHM()}
+PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · team ${p.teamNames || "none"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 140)}` : ""}`).join("\n") || "none yet"}
+OPEN TASKS (${ctx.openTasks.length}): ${ctx.openTasks.slice(0, 40).map((t) => `${t.title} — ${t.who} · ${t.projectId || "no project"} · ${t.status}${t.when ? ` · ${t.when}` : ""}`).join("\n") || "none"}
+TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} — ${u.title}${u.dept ? `, ${u.dept}` : ""} · ${u.load} open task(s)`).join("\n")}
+RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 200)}`).join(" | ") || "none"}
+${memCtx(memory)}
+${driveData ? `DRIVE — folders, files and the text inside them, read just now:\n"""${driveData}"""` : ""}
+RECENT CHAT: ${history.slice(-8).map((m) => `${m.who === "me" ? "User" : "You"}: ${m.text}`).join(" | ") || "—"}
+WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
+
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
 const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
 ${memCtx(memory)}
@@ -395,6 +453,10 @@ const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers an
 - Plain, warm, everyday English. Short sentences. No jargon, no system-speak.
 - Never mention paths being "invalid", "non-standard", "case-variant", conventions, templates, schemas, IDs of internals, or how the system fetched anything. Nobody cares how it works.
 - Never lecture, never explain your limitations, never give instructions about folder naming.
+- NEVER describe what you can or cannot see, read or do. No "What I can see" / "What I cannot see" lists, no "I only have metadata, not the contents", no "I do not have the ability to...", no talk of file contents versus file names. The user does not want a report on your abilities — they want the answer.
+- You CAN read what is inside the files, including Word documents, PDFs, spreadsheets and presentations. Their text is given to you below whenever it was available. Use it.
+- If something you need genuinely is not in front of you, just do the most useful thing you can with what you have, and if you must, ask one short ordinary question ("Which board are you asking about?"). Never turn it into an explanation of the system.
+- Never use the words: metadata, capability, limitation, access, permission, integration, API, fetch, index, schema, structure convention.
 - If you searched and found things, simply say what you found, in normal words: "I looked in the FMS-200 folder and found 12 files. The latest is..."
 - If you truly could not find something, say it kindly in one line and offer the closest thing you did find, or ask one simple question. Never blame the user or their naming.
 - Answer the question first, in the first sentence. Details after. Under 150 words unless asked for more.
@@ -402,8 +464,9 @@ const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers an
 
 const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `You are the project assistant for ${p.name || p.projectId} at Elecbits. Help the person in front of you get their answer fast.
 ${CHAT_STYLE}
-The information below is everything you can see, including this project's Google Drive, which was searched for you just now. Treat it as your own knowledge — never tell the user to go and fetch files for you, and never say you cannot access Drive.
+The information below is everything you can see, including this project's Google Drive folders AND the text inside the files there, read for you just now. Treat all of it as your own knowledge — you looked at these documents yourself. Never tell the user to go and fetch or paste files for you.
 When you mention a file or folder, use the real name and location shown below, exactly as it appears. Do not comment on whether it matches any expected structure — just use what is there.
+Quote and summarise document contents freely when they help answer the question. If a file's text is not shown below, simply answer from everything else you have — do not point out that it is missing.
 
 YOU CAN ALSO WRITE TO DRIVE. You are not read-only. When the user asks you to create, add, write, draft, update or save something into the project folder, actually do it by ending your reply with this block and nothing after it:
 <<<WRITE filename.md>>>
@@ -416,7 +479,7 @@ TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name 
 LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | PM folder /ODM/PM/${p.projectId}/
 KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
 INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
-${driveData ? `LIVE DRIVE CONTENTS (real files read from Google Drive just now):\n"""${driveData}"""` : "LIVE DRIVE READ: not connected right now — reason from the folder map and notes above, and say plainly that the live Drive link is not configured if asked."}
+${driveData ? `THE PROJECT'S DRIVE — folders, files, and the text inside them, read just now:\n"""${driveData}"""` : "No Drive files came back this time. Answer from the project notes above without mentioning Drive at all."}
 LAST SAVED DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
 TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
@@ -2805,8 +2868,319 @@ function WorkspaceChat() {
   );
 }
 
+/* ═══ ASSISTANT — THE COMMAND CENTRE ON THE MAIN MENU ════════════════════
+   A full-page chat that can read the whole workspace AND change it. The model
+   replies in plain English and appends <<<DO>>>{json}<<<END>>> blocks; every
+   block is executed here against real state, and what happened is reported
+   back in the conversation. Destructive actions wait for a confirm click.   */
+const ASSIST_SUGGESTIONS = [
+  "Today Ravi finishes the rev-B gerbers and Neha freezes the BoM",
+  "Put Ravi on ESP32-123 as a junior hardware engineer",
+  "What is inside the ESP32-123 folder?",
+  "Remember: every gerber check needs the DRC report saved next to it",
+];
+/* Forgiving people lookup — first name, surname, near-enough spelling. */
+const findPerson = (users, name) => {
+  const n = normId(name);
+  if (!n) return null;
+  return users.find((u) => normId(u.name) === n)
+    || users.find((u) => normId(u.name).startsWith(n))
+    || users.find((u) => normId(u.name).includes(n))
+    || users.find((u) => n.includes(normId(u.name.split(" ")[0])))
+    || null;
+};
+const findProject = (projects, pid) => {
+  const n = normId(pid);
+  if (!n) return null;
+  return projects.find((p) => normId(p.projectId) === n)
+    || projects.find((p) => normId(p.projectId).includes(n) || n.includes(normId(p.projectId)))
+    || projects.find((p) => normId(p.name).includes(n))
+    || null;
+};
+const PAGE_NAMES = { projects: "Create a Project", scrum: "Daily Scrum", tasks: "My Projects & Tasks", resources: "Resources", perf: "Performance & Training", memory: "System Memory", assistant: "Assistant" };
+
+function AssistantModule() {
+  const { users, me, projects, setProjects, tasks, setTasks, notes, setNotes, memory, setMemory, setTrainings, toast, sheetSync, setView, addUser } = useCtx();
+  const [msgs, setMsgs] = useState([]);
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const bodyRef = useRef(null);
+  const my = users.find((u) => u.id === me);
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }, [msgs.length, busy]);
+
+  const say = (who, text, extra) => setMsgs((m) => [...m, { id: uid(), who, text, ...(extra || {}) }]);
+
+  /* Everything the model can see. */
+  const buildCtx = () => ({
+    meName: my?.name || "there", meTitle: my?.title || "", isAdmin: my?.role === "superadmin",
+    projects: projects.map((p) => {
+      const ts = tasks.filter((t) => t.projectId === p.projectId);
+      return { projectId: p.projectId, name: p.name, status: p.status, deadline: p.deadline, knownStatus: p.knownStatus,
+        pmName: users.find((u) => u.id === (p.team || []).find((t) => t.slot.startsWith("PM"))?.userId)?.name,
+        teamNames: (p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", "),
+        done: ts.filter((t) => t.status === "done").length, total: ts.length };
+    }),
+    openTasks: tasks.filter((t) => t.status !== "done").map((t) => ({
+      title: t.title, who: users.find((u) => u.id === t.assigneeId)?.name || "unassigned",
+      projectId: t.projectId, status: t.status, when: [t.date, t.endTime].filter(Boolean).join(" "),
+    })),
+    team: users.map((u) => ({ name: u.name, title: u.title, dept: u.dept, load: tasks.filter((t) => t.assigneeId === u.id && t.status !== "done").length })),
+    notes,
+  });
+
+  /* Execute one DO block. Returns { line, driveWanted?, confirm? }. */
+  const runAction = async (a, live) => {
+    const A = String(a.action || "").toLowerCase();
+    const proj = (pid) => findProject(live.projects, pid);
+    switch (A) {
+      case "create_project": {
+        const pid = String(a.projectId || "").trim() || `EB-${todayStr().slice(2, 4)}-${String(live.projects.length + 1).padStart(3, "0")}`;
+        if (proj(pid)) return { line: `${pid} already exists — I left it as it is.` };
+        const team = (a.team || []).map((t) => {
+          const u = findPerson(users, t.name);
+          return u ? { slot: t.slot || "Jr. Hardware Engineer", userId: u.id } : null;
+        }).filter(Boolean);
+        const p = {
+          id: uid(), projectId: pid, idMode: "manual", name: a.name || pid, clientName: a.clientName || "",
+          clientId: a.clientId || "", deadline: a.deadline || "", status: STATUSES.some((s) => s.k === a.status) ? a.status : "Planning",
+          linkedIds: a.linkedIds || [], knownStatus: a.knownStatus || "", team, source: "assistant",
+          createdAt: new Date().toISOString(), createdBy: me,
+        };
+        live.projects = [p, ...live.projects];
+        setProjects((ps) => [p, ...ps]);
+        sheetSync(`/ODM/PM/${pid}/`, "Project created from the assistant");
+        return { line: `Created ${pid} — ${p.name}${team.length ? ` with ${team.length} person(s) on it` : ""}.` };
+      }
+      case "update_project": {
+        const p = proj(a.projectId);
+        if (!p) return { line: `I couldn't find a project called ${a.projectId}.` };
+        const patch = {};
+        for (const k of ["name", "deadline", "knownStatus", "clientName", "linkedIds"]) if (a[k] != null && a[k] !== "") patch[k] = a[k];
+        if (STATUSES.some((s) => s.k === a.status)) patch.status = a.status;
+        live.projects = live.projects.map((x) => (x.id === p.id ? { ...x, ...patch } : x));
+        setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, ...patch } : x)));
+        return { line: `Updated ${p.projectId}${patch.status ? ` — now ${patch.status}` : ""}.` };
+      }
+      case "delete_project": {
+        const p = proj(a.projectId);
+        if (!p) return { line: `There is no project called ${a.projectId}.` };
+        return { confirm: { kind: "delete_project", id: p.id, label: `Delete ${p.projectId} — ${p.name}? Its tasks stay, but the project goes.` } };
+      }
+      case "assign_resource": {
+        const p = proj(a.projectId), u = findPerson(users, a.name);
+        if (!p) return { line: `I couldn't find a project called ${a.projectId}.` };
+        if (!u) return { line: `I couldn't find anyone called ${a.name} in the team.` };
+        if ((p.team || []).some((t) => t.userId === u.id)) return { line: `${u.name} is already on ${p.projectId}.` };
+        const slot = TEAM_SLOTS.includes(a.slot) ? a.slot : (u.title || "Jr. Hardware Engineer");
+        const team = [...(p.team || []), { slot, userId: u.id }];
+        live.projects = live.projects.map((x) => (x.id === p.id ? { ...x, team } : x));
+        setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, team } : x)));
+        sheetSync(`/ODM/PM/${p.projectId}/`, `${u.name} added as ${slot}`);
+        return { line: `${u.name} is now on ${p.projectId} as ${slot}.` };
+      }
+      case "unassign_resource": {
+        const p = proj(a.projectId), u = findPerson(users, a.name);
+        if (!p || !u) return { line: `I couldn't match ${a.name || "that person"} to ${a.projectId || "that project"}.` };
+        const team = (p.team || []).filter((t) => t.userId !== u.id);
+        live.projects = live.projects.map((x) => (x.id === p.id ? { ...x, team } : x));
+        setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, team } : x)));
+        return { line: `Took ${u.name} off ${p.projectId}.` };
+      }
+      case "add_resource": {
+        if (!a.name) return { line: "I need a name to add someone." };
+        if (findPerson(users, a.name)) return { line: `${a.name} is already in the team.` };
+        const rr = rrInfo(a.resourceRole);
+        const u = { id: uid(), name: a.name, email: a.email || "", title: a.title || rr?.label || "Engineer",
+          role: ["superadmin", "dept_head", "pm", "engineer"].includes(a.role) ? a.role : "engineer",
+          dept: a.dept || rr?.dept || "", resourceRole: a.resourceRole || "", skills: a.skills || rr?.skills || [],
+          maxProjects: a.maxProjects || rr?.cap || 3, projectTags: [], color: "#2563eb" };
+        await addUser(u);
+        return { line: `Added ${u.name} to the team as ${u.title}.` };
+      }
+      case "add_task": {
+        if (!a.title) return { line: "I need a task title." };
+        const u = findPerson(users, a.assignee);
+        const p = proj(a.projectId);
+        const t = { id: uid(), projectId: p?.projectId || "", linked: !!p, title: a.title, assigneeId: u?.id || "",
+          date: a.date || todayStr(), startTime: a.startTime || nowHM(),
+          endTime: a.endTime || new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
+          steps: [], conditions: [], status: "pending", origin: "assistant", createdBy: me, createdAt: new Date().toISOString(), work: {} };
+        live.tasks = [t, ...live.tasks];
+        setTasks((ts) => [t, ...ts]);
+        if (p) sheetSync(`/ODM/PM/${p.projectId}/Checklist.xlsx`, `Task "${t.title}" raised from the assistant`);
+        return { line: `Task raised: ${t.title}${u ? ` for ${u.name}` : ""}${p ? ` on ${p.projectId}` : ""}, due ${t.endTime} today.` };
+      }
+      case "update_task": {
+        const needle = normId(a.match || a.title);
+        const t = live.tasks.find((x) => normId(x.title).includes(needle)) || null;
+        if (!t) return { line: `I couldn't find a task like "${a.match || a.title}".` };
+        const patch = {};
+        if (["pending", "in-progress", "blocked", "done"].includes(a.status)) patch.status = a.status;
+        if (a.status === "done") patch.completedAt = new Date().toISOString();
+        const u = findPerson(users, a.assignee);
+        if (u) patch.assigneeId = u.id;
+        if (a.endTime) patch.endTime = a.endTime;
+        live.tasks = live.tasks.map((x) => (x.id === t.id ? { ...x, ...patch } : x));
+        setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, ...patch } : x)));
+        return { line: `Updated "${t.title}"${patch.status ? ` — ${patch.status}` : ""}${u ? `, now with ${u.name}` : ""}.` };
+      }
+      case "add_scrum_note": {
+        const date = a.date || todayStr();
+        const dayN = notes.filter((n) => n.date === date).length;
+        const raw = String(a.text || "").trim();
+        if (!raw) return { line: "There was nothing to put in the scrum." };
+        // Carry a visible one-liner so the note reads without expanding it.
+        const n = { id: uid(), date, noteNo: dayN + 1, time: nowHM(), raw, organized: { summary: raw.slice(0, 220), engine: "assistant" }, origin: "assistant", by: me, createdAt: new Date().toISOString() };
+        setNotes((ns) => [n, ...ns]);
+        return { line: `Written into the ${date === todayStr() ? "today's" : date} scrum as Note ${n.noteNo}. Open Daily Scrum and press Organise with AI to turn it into tasks.` };
+      }
+      case "add_memory": {
+        if (!a.content) return { line: "There was nothing to remember." };
+        setMemory((m) => [{ id: uid(), type: a.type || "instruction", title: a.title || String(a.content).slice(0, 40), content: String(a.content), createdAt: new Date().toISOString() }, ...m]);
+        return { line: `Saved to system memory: ${a.title || String(a.content).slice(0, 40)}. Every AI answer from now on knows it.` };
+      }
+      case "assign_training": {
+        const u = findPerson(users, a.name);
+        if (!u || !a.title) return { line: `I couldn't assign that training${a.name ? ` to ${a.name}` : ""}.` };
+        setTrainings((t) => [{ id: uid(), userId: u.id, title: a.title, resource: a.resource || "", due: a.due || "", status: "Assigned", assignedBy: me, at: new Date().toISOString() }, ...t]);
+        return { line: `Training "${a.title}" assigned to ${u.name}${a.due ? `, due ${fmtDate(a.due)}` : ""}.` };
+      }
+      case "read_drive": {
+        const p = proj(a.projectId);
+        const { digest } = await driveReadDigest(p?.projectId || a.projectId, p?.linkedIds);
+        return { line: digest ? "" : `I couldn't open anything in Drive for ${a.projectId} just now.`, drive: digest };
+      }
+      case "write_drive_file": {
+        const p = proj(a.projectId);
+        const fileName = String(a.fileName || "note.md").replace(/[\\/:*?"<>|]/g, "-");
+        const ok = await driveWriteFile(p?.projectId || a.projectId, fileName, String(a.content || ""));
+        if (ok && p) sheetSync(`/ODM/PM/${p.projectId}/`, `${fileName} written from the assistant`);
+        return { line: ok ? `Saved ${fileName} into the ${p?.projectId || a.projectId} folder in Drive.` : `Couldn't save ${fileName} — Drive isn't reachable right now.` };
+      }
+      case "open_page": {
+        if (!PAGE_NAMES[a.page]) return { line: "" };
+        setView(a.page);
+        return { line: `Opened ${PAGE_NAMES[a.page]} for you.` };
+      }
+      default:
+        return { line: "" };
+    }
+  };
+
+  const doDelete = (id) => {
+    const p = projects.find((x) => x.id === id);
+    setProjects((ps) => ps.filter((x) => x.id !== id));
+    toast(`${p?.projectId || "Project"} deleted`, "amber");
+    say("sys", `Deleted ${p?.projectId || "the project"}.`);
+  };
+
+  /* One turn: ask → execute → (optionally) ask again with the Drive contents. */
+  const send = async (preset) => {
+    const q = (preset || val).trim(); if (!q || busy) return;
+    const hist = msgs.filter((m) => m.who !== "sys");
+    say("me", q); setVal(""); setBusy(true);
+
+    // If they named a project, open its Drive before answering, so the first
+    // reply already knows what is inside the files.
+    let drive = "";
+    const mentioned = projects.find((p) => normId(q).includes(normId(p.projectId)) || (p.name && normId(q).includes(normId(p.name))));
+    if (mentioned && DRIVE_READ_URL) { try { drive = (await driveReadDigest(mentioned.projectId, mentioned.linkedIds)).digest; } catch { /* carry on */ } }
+
+    const live = { projects: [...projects], tasks: [...tasks] };
+    const runOnce = async (driveData) => {
+      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData), { json: false });
+      const blocks = [...String(reply).matchAll(/<<<DO>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
+      const clean = String(reply).replace(/<<<DO>>>[\s\S]*?<<<END>>>/g, "").trim();
+      return { clean, blocks };
+    };
+
+    try {
+      let { clean, blocks } = await runOnce(drive);
+      const lines = []; let confirm = null; let freshDrive = "";
+      for (const [, raw] of blocks) {
+        let a; try { a = JSON.parse(raw); } catch { continue; }
+        for (const one of Array.isArray(a) ? a : [a]) {
+          const r = await runAction(one, live);
+          if (r.drive) freshDrive = r.drive;
+          if (r.confirm) confirm = r.confirm;
+          if (r.line) lines.push(r.line);
+        }
+      }
+      // The model asked to look in Drive — hand it the contents and let it finish.
+      if (freshDrive) {
+        const second = await runOnce(freshDrive);
+        clean = [clean, second.clean].filter(Boolean).join("\n\n");
+        for (const [, raw] of second.blocks) {
+          let a; try { a = JSON.parse(raw); } catch { continue; }
+          for (const one of Array.isArray(a) ? a : [a]) {
+            if (String(one.action).toLowerCase() === "read_drive") continue;   // no loops
+            const r = await runAction(one, live);
+            if (r.confirm) confirm = r.confirm;
+            if (r.line) lines.push(r.line);
+          }
+        }
+      }
+      say("ai", clean || (lines.length ? "Done." : "I didn't catch that — say it again in your own words?"));
+      if (lines.length) { say("sys", lines.join("\n")); toast(lines.length === 1 ? lines[0].slice(0, 60) : `${lines.length} things done`, "green"); }
+      if (confirm) say("sys", confirm.label, { confirm });
+    } catch (e) {
+      const open = tasks.filter((t) => t.status !== "done").length;
+      say("ai", `I can't reach the AI right now, so nothing was changed. What I can tell you from here: ${projects.length} project${projects.length === 1 ? "" : "s"} and ${open} open task${open === 1 ? "" : "s"}.`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="card" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 190px)", minHeight: 460, overflow: "hidden" }}>
+        <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--bdr)", background: "var(--soft)", display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+          <Bot size={17} style={{ color: "var(--acc)" }} />
+          <div style={{ fontWeight: 700, fontSize: 13.5, flex: 1 }}>Tell me what you need and I'll do it</div>
+          <Pill color="var(--purple)"><Sparkles size={11} /> Runs the whole tool</Pill>
+          {DRIVE_READ_URL ? <Pill color="var(--green)"><FolderPlus size={11} /> Drive connected</Pill> : null}
+          {msgs.length > 0 && <Btn small kind="ghost" icon={RefreshCw} onClick={() => setMsgs([])}>Clear</Btn>}
+        </div>
+        <div ref={bodyRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 11 }}>
+          {msgs.length === 0 && !busy && (
+            <div style={{ fontSize: 13, color: "var(--txt2)", lineHeight: 1.75, maxWidth: 620 }}>
+              Hi {my?.name?.split(" ")[0] || "there"} — write it the way you'd say it out loud. I'll create the project, put people on it, raise the tasks, write today's scrum, remember what you tell me, and open or update the project files in Drive.
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 14, alignItems: "flex-start" }}>
+                {ASSIST_SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)} style={chipS(false)}>{s}</button>)}
+              </div>
+            </div>
+          )}
+          {msgs.map((m) => m.who === "sys" ? (
+            <div key={m.id} className="fade" style={{ alignSelf: "flex-start", maxWidth: "88%", border: "1px solid var(--green)", background: "color-mix(in srgb, var(--green) 8%, transparent)", borderRadius: 11, padding: "10px 14px", fontSize: 12.5, lineHeight: 1.65, whiteSpace: "pre-wrap", display: "flex", gap: 9 }}>
+              {m.confirm ? <AlertTriangle size={15} style={{ color: "var(--amber)", flexShrink: 0, marginTop: 2 }} /> : <CheckCircle2 size={15} style={{ color: "var(--green)", flexShrink: 0, marginTop: 2 }} />}
+              <div>
+                {m.text}
+                {m.confirm && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+                    <Btn small kind="danger" icon={Trash2} onClick={() => { doDelete(m.confirm.id); setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, confirm: null, text: "Deleted." } : y))); }}>Yes, delete</Btn>
+                    <Btn small kind="ghost" onClick={() => setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, confirm: null, text: "Left it alone." } : y)))}>Keep it</Btn>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div key={m.id} style={{ display: "flex", justifyContent: m.who === "me" ? "flex-end" : "flex-start" }}>
+              <div style={{ maxWidth: "82%", padding: "10px 14px", borderRadius: m.who === "me" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.who === "me" ? "var(--acc)" : "var(--s2)", color: m.who === "me" ? "#fff" : "var(--txt)", fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{m.text}</div>
+            </div>
+          ))}
+          {busy && <div style={{ padding: "8px 14px", borderRadius: 13, background: "var(--s2)", alignSelf: "flex-start" }}><TypingDots /></div>}
+        </div>
+        <div style={{ padding: 13, borderTop: "1px solid var(--bdr)", display: "flex", gap: 9 }}>
+          <input className="inp" style={{ flex: 1 }} placeholder="e.g. create project EB-26-014 for Acme, due 30 Sep, Saurav as PM" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+          <Btn icon={busy ? Loader2 : Send} disabled={busy || !val.trim()} onClick={() => send()}>{busy ? "Working…" : "Send"}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ═══ SHELL — SIDEBAR, HEADER, TOASTS, APP ROOT ══════════════════════════ */
 const NAV = [
+  { id: "assistant", label: "Assistant", icon: Bot },
   { id: "projects", label: "Create a Project", icon: FolderPlus, admin: true },
   { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
   { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
@@ -2815,6 +3189,7 @@ const NAV = [
   { id: "memory", label: "System Memory", icon: Database, admin: true },
 ];
 const TITLES = {
+  assistant: ["Assistant", "Say it in plain words — it creates projects, staffs them, raises tasks, writes the scrum, remembers, and reads & writes Drive"],
   projects: ["Create a Project", "Chat-guided creation · hard gates on Project ID + both LLDs · list & status only"],
   scrum: ["Daily Scrum", "Write it as it comes — AI turns it into assigned, time-boxed, if/else-aware tasks"],
   tasks: ["My Projects & Tasks", "Start → work window → AI-gated closure · branch stuck work back to scrum"],
@@ -2944,7 +3319,7 @@ export default function App() {
   const [demoUser, setDemoUser] = useState(() => { try { return localStorage.getItem("pms-demo-user") || ""; } catch { return ""; } });
   const demoLogin = useCallback((id) => { setDemoUser(id); setMe(id); try { localStorage.setItem("pms-demo-user", id); } catch { } }, []);
   const demoLogout = useCallback(() => { setDemoUser(""); try { localStorage.removeItem("pms-demo-user"); } catch { } }, []);
-  const [view, setView] = useState("projects");
+  const [view, setView] = useState("assistant");
   const [projects, setProjects] = useState(SEED_PROJECTS);
   const [clients, setClients] = useState(SEED_CLIENTS);
   const [notes, setNotes] = useState([]);
@@ -3050,7 +3425,7 @@ export default function App() {
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
-  const ctx = { users, me, setMe, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser };
+  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser };
   const visNav = NAV.filter((n) => !n.admin || isAdmin);
   const [t1, t2] = TITLES[view] || ["", ""];
 
@@ -3110,6 +3485,7 @@ export default function App() {
             </div>
           </header>
           <div style={{ flex: 1, padding: 22, maxWidth: 1120, width: "100%", margin: "0 auto" }}>
+            {view === "assistant" && <AssistantModule />}
             {view === "projects" && <ProjectsModule />}
             {view === "scrum" && <ScrumModule />}
             {view === "tasks" && <TasksModule />}
@@ -3118,7 +3494,7 @@ export default function App() {
             {view === "memory" && <MemoryModule />}
           </div>
         </main>
-        <WorkspaceChat />
+        {view !== "assistant" && <WorkspaceChat />}
         <div style={{ position: "fixed", bottom: 18, right: 18, display: "flex", flexDirection: "column", gap: 8, zIndex: 2000 }}>
           {toasts.map((t) => (
             <div key={t.id} className="fade" style={{ padding: "10px 15px", borderRadius: 10, background: "var(--s1)", border: `1px solid var(--${t.kind === "green" ? "green" : t.kind === "amber" ? "amber" : t.kind === "red" ? "red" : "acc"})`, boxShadow: "0 8px 26px rgba(0,0,0,.25)", fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 8, maxWidth: 340 }}>

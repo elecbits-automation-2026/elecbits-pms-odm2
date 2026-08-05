@@ -170,18 +170,53 @@ async function folderPath(token: string, f: GFile): Promise<string> {
   return full;
 }
 
-async function extractText(token: string, f: GFile): Promise<string> {
+async function exportAs(token: string, id: string, mimeType: string, limit: number): Promise<string> {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(mimeType)}`, { headers: { authorization: `Bearer ${token}` } });
+  return res.ok ? (await res.text()).slice(0, limit) : "";
+}
+
+/* Office files (.xlsx/.docx/.pptx) and PDFs can't be exported directly, but
+   Drive will convert them: copy the file into the matching Google format, read
+   the text out, then delete the temporary copy. PDF→Doc conversion also OCRs.
+   Needs Editor access on the folder, which we already require for writes. */
+async function convertAndExtract(token: string, f: GFile, limit: number): Promise<string> {
+  const m = f.mimeType || "";
+  const name = f.name.toLowerCase();
+  const asSheet = /spreadsheet|excel|\.xlsx?$|\.csv$/.test(m) || /\.xlsx?$/.test(name);
+  const asDoc = /word|document|pdf|presentation|powerpoint/.test(m) || /\.(docx?|pdf|pptx?)$/.test(name);
+  if (!asSheet && !asDoc) return "";
+  const targetMime = asSheet ? "application/vnd.google-apps.spreadsheet" : "application/vnd.google-apps.document";
+  let copyId = "";
   try {
-    if (f.mimeType === "application/vnd.google-apps.document") {
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}/export?mimeType=text/plain`, { headers: { authorization: `Bearer ${token}` } });
-      if (res.ok) return (await res.text()).slice(0, 1200);
-    } else if (f.mimeType === "application/vnd.google-apps.spreadsheet") {
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}/export?mimeType=text/csv`, { headers: { authorization: `Bearer ${token}` } });
-      if (res.ok) return (await res.text()).slice(0, 1200);
-    } else if (/^text\/|json|csv/.test(f.mimeType) && Number(f.size || 0) < 200_000) {
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, { headers: { authorization: `Bearer ${token}` } });
-      if (res.ok) return (await res.text()).slice(0, 1200);
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}/copy?supportsAllDrives=true&fields=id`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: `~ebtmp-${f.name}`, mimeType: targetMime }),
+    });
+    if (!res.ok) return "";
+    copyId = (await res.json()).id;
+    return await exportAs(token, copyId, asSheet ? "text/csv" : "text/plain", limit);
+  } catch {
+    return "";
+  } finally {
+    // never leave temporary copies behind
+    if (copyId) {
+      try { await fetch(`https://www.googleapis.com/drive/v3/files/${copyId}?supportsAllDrives=true`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } }); } catch { /* ignore */ }
     }
+  }
+}
+
+async function extractText(token: string, f: GFile, limit = 1800): Promise<string> {
+  try {
+    if (f.mimeType === "application/vnd.google-apps.document") return await exportAs(token, f.id, "text/plain", limit);
+    if (f.mimeType === "application/vnd.google-apps.spreadsheet") return await exportAs(token, f.id, "text/csv", limit);
+    if (f.mimeType === "application/vnd.google-apps.presentation") return await exportAs(token, f.id, "text/plain", limit);
+    if (/^text\/|json|csv/.test(f.mimeType) && Number(f.size || 0) < 200_000) {
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, { headers: { authorization: `Bearer ${token}` } });
+      if (res.ok) return (await res.text()).slice(0, limit);
+    }
+    // .xlsx / .docx / .pdf / .pptx — convert, read, clean up
+    if (Number(f.size || 0) < 15_000_000) return await convertAndExtract(token, f, limit);
   } catch { /* best effort */ }
   return "";
 }
@@ -242,7 +277,10 @@ Deno.serve(async (req) => {
     }
 
     const lines: string[] = [];
-    let extracts = 0;
+    // Every readable file we met, with its full path, so we can read the most
+    // useful ones after the whole tree is mapped (not just the first folder's).
+    const candidates: { f: GFile; path: string }[] = [];
+
     for (const needle of needles.slice(0, 6)) {
       const folders = await findFolders(token, needle);
       if (!folders.length) { lines.push(`Nothing found in Drive for ${needle} yet.`); continue; }
@@ -253,6 +291,7 @@ Deno.serve(async (req) => {
         for (const f of files.slice(0, 20)) {
           const kind = isFolder(f) ? "folder" : f.mimeType.split(".").pop();
           lines.push(`  - ${path}${f.name}${isFolder(f) ? "/" : ""} · ${kind} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
+          if (!isFolder(f)) candidates.push({ f, path });
         }
         // one level deeper for sub-folders, so the AI sees the real structure
         for (const sub of files.filter(isFolder).slice(0, 5)) {
@@ -261,18 +300,29 @@ Deno.serve(async (req) => {
             lines.push(`  SUBFOLDER ${path}${sub.name}/ (${kids.length} items):`);
             for (const k of kids.slice(0, 12)) {
               lines.push(`    - ${path}${sub.name}/${k.name}${isFolder(k) ? "/" : ""} · ${isFolder(k) ? "folder" : k.mimeType.split(".").pop()} · modified ${String(k.modifiedTime || "").slice(0, 10)}`);
+              if (!isFolder(k)) candidates.push({ f: k, path: `${path}${sub.name}/` });
             }
           } catch { /* keep going */ }
         }
-        // extract text from up to 2 key files per folder (checklists, docs, notes)
-        for (const f of files.filter((x) => /checklist|status|report|lld|notes?/i.test(x.name)).slice(0, 2)) {
-          if (extracts >= 4) break;
-          const txt = await extractText(token, f);
-          if (txt) { lines.push(`  EXTRACT ${f.name}: """${txt}"""`); extracts++; }
-        }
       }
     }
-    return json({ ok: true, digest: lines.join("\n").slice(0, 6000) });
+
+    // Read what is INSIDE the files, not just their names. Interesting ones
+    // first (checklists, reports, LLDs, BoMs…), then whatever is most recent.
+    const score = (n: string) => (/checklist|status|report|lld|note|bom|spec|minutes|plan|test/i.test(n) ? 0 : 1);
+    candidates.sort((a, b) =>
+      score(a.f.name) - score(b.f.name) ||
+      String(b.f.modifiedTime || "").localeCompare(String(a.f.modifiedTime || "")));
+
+    let extracts = 0, tries = 0;
+    for (const { f, path } of candidates) {
+      if (extracts >= 8 || tries >= 14) break;   // keep well inside the function timeout
+      tries++;
+      const txt = await extractText(token, f);
+      if (txt) { lines.push(`  CONTENTS OF ${path}${f.name}: """${txt}"""`); extracts++; }
+    }
+
+    return json({ ok: true, digest: lines.join("\n").slice(0, 18000) });
   } catch (e) {
     // Log it too, so the reason is visible in the function's Logs tab and not
     // only in the response body.
