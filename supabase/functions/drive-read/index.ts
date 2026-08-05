@@ -225,7 +225,7 @@ async function extractText(token: string, f: GFile, limit = 1800): Promise<strin
    Create (or overwrite) a text/markdown file inside the project's Drive
    folder. Used to push closure evidence, status notes and AI analyses back to
    /ODM/PM/<ProjectID>/. Requires the folder shared as Editor.               */
-async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain"): Promise<string> {
+async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
   const existing = await drive(token, `files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
@@ -233,9 +233,12 @@ async function writeFile(token: string, folderId: string, name: string, content:
 
   const boundary = "ebodm" + Math.random().toString(36).slice(2);
   const metadata: Record<string, unknown> = prevId ? { name } : { name, parents: [folderId] };
+  // encoding "base64" carries a real binary — a PDF, a spreadsheet, a photo.
+  // Drive accepts it verbatim in a multipart part with this header.
+  const b64 = encoding === "base64";
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content}\r\n--${boundary}--`;
+    `--${boundary}\r\nContent-Type: ${mimeType}\r\n${b64 ? "Content-Transfer-Encoding: base64\r\n" : ""}\r\n${content}\r\n--${boundary}--`;
 
   const url = prevId
     ? `https://www.googleapis.com/upload/drive/v3/files/${prevId}?uploadType=multipart&supportsAllDrives=true`
@@ -257,7 +260,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -272,7 +275,7 @@ Deno.serve(async (req) => {
       if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
       const folders = await findFolders(token, String(body.projectId));
       if (!folders.length) return json({ error: `no Drive folder found for ${body.projectId}` }, 404);
-      const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain");
+      const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name });
     }
 

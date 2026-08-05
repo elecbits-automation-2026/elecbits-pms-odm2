@@ -27,7 +27,7 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -217,20 +217,51 @@ async function driveReadDigest(projectId, linkedIds) {
     return { digest: "", error: `Drive unreachable: ${e.message || e}` };
   }
 }
-/* Write a text file into the project's Drive folder (needs the folder shared
-   with the service account as Editor). Returns true on success. */
-async function driveWriteFile(projectId, fileName, content) {
+/* Write a file into the project's Drive folder (needs the folder shared with
+   the service account as Editor). Plain text by default; pass base64 + a mime
+   type to push a real binary — a PDF, a spec sheet, a photo of a board.
+   Returns true on success. */
+async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL || !projectId || !fileName) return false;
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN }),
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}) }),
     });
     const data = await res.json();
     return !!(res.ok && data.ok);
   } catch { return false; }
 }
+
+/* ── ATTACHMENTS ───────────────────────────────────────────────────────────
+   Anything the user drops into a chat. Text-ish files are read straight in so
+   the AI can act on their contents; everything else is carried as base64 and
+   can be pushed into a project's Drive folder, where the Drive reader will
+   pull the text back out of it on the next look. */
+const TEXTY = /\.(txt|md|markdown|csv|tsv|json|xml|ya?ml|log|html?|css|js|jsx|ts|tsx|py|c|h|cpp|ino|sh|sql|ini|cfg|conf|net|bom)$/i;
+const MAX_ATTACH = 6 * 1024 * 1024;
+const readAttachment = (file) => new Promise((resolve) => {
+  const base = { id: uid(), name: file.name, mime: file.type || "application/octet-stream", size: file.size };
+  if (file.size > MAX_ATTACH) return resolve({ ...base, tooBig: true });
+  const r = new FileReader();
+  if (TEXTY.test(file.name) || /^text\//.test(file.type)) {
+    r.onload = () => resolve({ ...base, text: String(r.result).slice(0, 20000) });
+    r.onerror = () => resolve({ ...base, failed: true });
+    r.readAsText(file);
+  } else {
+    r.onload = () => resolve({ ...base, b64: String(r.result).split(",")[1] || "" });
+    r.onerror = () => resolve({ ...base, failed: true });
+    r.readAsDataURL(file);
+  }
+});
+const kb = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+/* What the model is told about the files in front of it. */
+const attachCtx = (atts) => !atts?.length ? "" : `\nFILES THE USER JUST ATTACHED — treat these as documents you have open in front of you:\n${atts.map((a) => a.tooBig
+  ? `- ${a.name} (${kb(a.size)}) — too big to open here; ask them to put it in the project folder instead.`
+  : a.text != null
+    ? `- ${a.name} (${kb(a.size)}), contents:\n"""${a.text}"""`
+    : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. You have not stored it anywhere yet. If it belongs in a project folder, use save_attachment with that project's ID, and after it is saved you can read what is inside it.`).join("\n")}\n`;
 /* Tries the proxy first (key stays server-side), then the direct browser key —
    so a configured-but-undeployed proxy no longer silently kills live AI. */
 async function claude(prompt, { json = true } = {}) {
@@ -410,6 +441,7 @@ The actions, with their fields:
 {"action":"assign_training","name":"Ravi","title":"Altium constraint manager","resource":"link or book","due":"2026-08-20"}
 {"action":"read_drive","projectId":"EB-24-001"}
 {"action":"write_drive_file","projectId":"EB-24-001","fileName":"Milestones.md","content":"the complete file content"}
+{"action":"save_attachment","name":"Datasheet.pdf","projectId":"EB-24-001"}   (puts a file they attached into that project's Drive folder)
 {"action":"open_page","page":"scrum"}    (pages: projects, scrum, tasks, resources, perf, memory)
 
 HOW TO DECIDE
@@ -419,13 +451,15 @@ HOW TO DECIDE
 - If they describe a project that is not in the list, create_project. Use whatever they gave you and sensible defaults for the rest; never refuse for a missing field, and never interrogate them with a list of questions. Ask at most one short question, and only if you truly cannot proceed.
 - If they want to know what is inside a project's files, read_drive for that project first. The contents come back to you and you answer in the same conversation.
 - If they ask for a document, sheet, plan or minutes to exist in Drive, write_drive_file with the real, complete content.
+- When they attach a file: if you can see its contents, use them straight away — summarise it, answer from it, turn it into tasks, remember it, whatever they asked. If they want it kept, save_attachment into the right project. If it is obvious which project it belongs to, just do it; otherwise ask one short question naming the likely projects.
+- You can accept files. Never say you cannot take an upload or cannot add interface features.
 - Statuses are one of: Planning, In Progress, On Hold, Delayed, Completed. Team slots: ${TEAM_SLOTS.join(", ")}.
 - Dates are YYYY-MM-DD. Times are HH:MM, 24-hour.
 - Use people's names as they appear in the team list; near-enough spelling is fine, the system matches them.
 - Do several things in one go when that is what was asked — several blocks, one after another.
 - If the request is only a question, answer it and emit no blocks at all.`;
 
-const assistantPrompt = (ctx, history, q, memory, driveData) => `You are the Elecbits ODM assistant — the person everyone in this company asks first. You know the whole workspace and you run it for them.
+const assistantPrompt = (ctx, history, q, memory, driveData, atts) => `You are the Elecbits ODM assistant — the person everyone in this company asks first. You know the whole workspace and you run it for them.
 ${CHAT_STYLE}
 ${ASSISTANT_ACTIONS}
 WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})${ctx.isAdmin ? " — an admin, so anything goes" : ""}
@@ -436,6 +470,7 @@ TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} — ${u.title}${u.de
 RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 200)}`).join(" | ") || "none"}
 ${memCtx(memory)}
 ${driveData ? `DRIVE — folders, files and the text inside them, read just now:\n"""${driveData}"""` : ""}
+${attachCtx(atts)}
 RECENT CHAT: ${history.slice(-8).map((m) => `${m.who === "me" ? "User" : "You"}: ${m.text}`).join(" | ") || "—"}
 WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
 
@@ -2904,9 +2939,21 @@ function AssistantModule() {
   const [msgs, setMsgs] = useState([]);
   const [val, setVal] = useState("");
   const [busy, setBusy] = useState(false);
+  const [atts, setAtts] = useState([]);
   const bodyRef = useRef(null);
+  const fileRef = useRef(null);
+  const lastAtts = useRef([]);          // so "save that to EB-09" still works next turn
   const my = users.find((u) => u.id === me);
-  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }, [msgs.length, busy]);
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }, [msgs.length, busy, atts.length]);
+
+  const pickFiles = async (fileList) => {
+    const files = [...(fileList || [])].slice(0, 5);
+    if (!files.length) return;
+    const read = await Promise.all(files.map(readAttachment));
+    setAtts((a) => [...a, ...read].slice(0, 5));
+    const big = read.filter((r) => r.tooBig);
+    if (big.length) toast(`${big[0].name} is over 6 MB — too big to attach`, "amber");
+  };
 
   const say = (who, text, extra) => setMsgs((m) => [...m, { id: uid(), who, text, ...(extra || {}) }]);
 
@@ -3050,6 +3097,21 @@ function AssistantModule() {
         const { digest } = await driveReadDigest(p?.projectId || a.projectId, p?.linkedIds);
         return { line: digest ? "" : `I couldn't open anything in Drive for ${a.projectId} just now.`, drive: digest };
       }
+      case "save_attachment": {
+        const want = normId(a.name);
+        const f = (live.attachments || []).find((x) => normId(x.name) === want)
+          || (live.attachments || []).find((x) => normId(x.name).includes(want) || want.includes(normId(x.name)))
+          || (live.attachments || [])[0];
+        if (!f) return { line: "There is no file attached to save." };
+        if (f.tooBig || f.failed) return { line: `${f.name} is too big for me to handle here.` };
+        const p = proj(a.projectId);
+        if (!p) return { line: `I couldn't find a project called ${a.projectId} to put ${f.name} in.` };
+        const ok = f.b64 != null
+          ? await driveWriteFile(p.projectId, f.name, f.b64, { encoding: "base64", mimeType: f.mime })
+          : await driveWriteFile(p.projectId, f.name, f.text || "", { mimeType: "text/plain" });
+        if (ok) sheetSync(`/ODM/PM/${p.projectId}/`, `${f.name} uploaded from the assistant`);
+        return { line: ok ? `Saved ${f.name} into the ${p.projectId} folder in Drive.` : `Couldn't save ${f.name} — Drive isn't reachable right now.` };
+      }
       case "write_drive_file": {
         const p = proj(a.projectId);
         const fileName = String(a.fileName || "note.md").replace(/[\\/:*?"<>|]/g, "-");
@@ -3076,9 +3138,13 @@ function AssistantModule() {
 
   /* One turn: ask → execute → (optionally) ask again with the Drive contents. */
   const send = async (preset) => {
-    const q = (preset || val).trim(); if (!q || busy) return;
+    const q = (preset || val).trim();
+    if ((!q && !atts.length) || busy) return;
     const hist = msgs.filter((m) => m.who !== "sys");
-    say("me", q); setVal(""); setBusy(true);
+    const sent = atts;
+    if (sent.length) lastAtts.current = sent;
+    say("me", q || `Sent ${sent.map((a) => a.name).join(", ")}`, sent.length ? { files: sent.map((a) => ({ name: a.name, size: a.size })) } : null);
+    setVal(""); setAtts([]); setBusy(true);
 
     // If they named a project, open its Drive before answering, so the first
     // reply already knows what is inside the files.
@@ -3086,9 +3152,9 @@ function AssistantModule() {
     const mentioned = projects.find((p) => normId(q).includes(normId(p.projectId)) || (p.name && normId(q).includes(normId(p.name))));
     if (mentioned && DRIVE_READ_URL) { try { drive = (await driveReadDigest(mentioned.projectId, mentioned.linkedIds)).digest; } catch { /* carry on */ } }
 
-    const live = { projects: [...projects], tasks: [...tasks] };
+    const live = { projects: [...projects], tasks: [...tasks], attachments: sent.length ? sent : lastAtts.current };
     const runOnce = async (driveData) => {
-      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData), { json: false });
+      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData, sent), { json: false });
       const blocks = [...String(reply).matchAll(/<<<DO>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
       const clean = String(reply).replace(/<<<DO>>>[\s\S]*?<<<END>>>/g, "").trim();
       return { clean, blocks };
@@ -3143,7 +3209,7 @@ function AssistantModule() {
         <div ref={bodyRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 11 }}>
           {msgs.length === 0 && !busy && (
             <div style={{ fontSize: 13, color: "var(--txt2)", lineHeight: 1.75, maxWidth: 620 }}>
-              Hi {my?.name?.split(" ")[0] || "there"} — write it the way you'd say it out loud. I'll create the project, put people on it, raise the tasks, write today's scrum, remember what you tell me, and open or update the project files in Drive.
+              Hi {my?.name?.split(" ")[0] || "there"} — write it the way you'd say it out loud. I'll create the project, put people on it, raise the tasks, write today's scrum, remember what you tell me, and open or update the project files in Drive. Attach a file with the clip below (or just drop it in) and I'll read it or file it away for you.
               <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 14, alignItems: "flex-start" }}>
                 {ASSIST_SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)} style={chipS(false)}>{s}</button>)}
               </div>
@@ -3164,14 +3230,45 @@ function AssistantModule() {
             </div>
           ) : (
             <div key={m.id} style={{ display: "flex", justifyContent: m.who === "me" ? "flex-end" : "flex-start" }}>
-              <div style={{ maxWidth: "82%", padding: "10px 14px", borderRadius: m.who === "me" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.who === "me" ? "var(--acc)" : "var(--s2)", color: m.who === "me" ? "#fff" : "var(--txt)", fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{m.text}</div>
+              <div style={{ maxWidth: "82%", padding: "10px 14px", borderRadius: m.who === "me" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.who === "me" ? "var(--acc)" : "var(--s2)", color: m.who === "me" ? "#fff" : "var(--txt)", fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>
+                {m.text}
+                {m.files?.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                    {m.files.map((f, i) => (
+                      <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 99, background: "rgba(255,255,255,.2)", fontSize: 11.5 }}>
+                        <FileText size={11} /> {f.name} · {kb(f.size)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           ))}
           {busy && <div style={{ padding: "8px 14px", borderRadius: 13, background: "var(--s2)", alignSelf: "flex-start" }}><TypingDots /></div>}
         </div>
-        <div style={{ padding: 13, borderTop: "1px solid var(--bdr)", display: "flex", gap: 9 }}>
-          <input className="inp" style={{ flex: 1 }} placeholder="e.g. create project EB-26-014 for Acme, due 30 Sep, Saurav as PM" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
-          <Btn icon={busy ? Loader2 : Send} disabled={busy || !val.trim()} onClick={() => send()}>{busy ? "Working…" : "Send"}</Btn>
+        {atts.length > 0 && (
+          <div style={{ padding: "10px 13px 0", display: "flex", flexWrap: "wrap", gap: 7 }}>
+            {atts.map((a) => (
+              <span key={a.id} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 8px 5px 11px", borderRadius: 8, border: `1px solid ${a.tooBig ? "var(--amber)" : "var(--bdr2)"}`, background: "var(--s2)", fontSize: 12 }}>
+                <FileText size={12} style={{ color: a.tooBig ? "var(--amber)" : "var(--acc)" }} />
+                <span style={{ fontWeight: 600 }}>{a.name}</span>
+                <span style={{ color: "var(--txt3)", fontSize: 11 }}>{a.tooBig ? "too big" : a.text != null ? "readable" : kb(a.size)}</span>
+                <button onClick={() => setAtts((x) => x.filter((y) => y.id !== a.id))} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 2 }}><X size={13} /></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={(e) => { e.preventDefault(); pickFiles(e.dataTransfer?.files); }}
+          style={{ padding: 13, borderTop: "1px solid var(--bdr)", display: "flex", gap: 9, alignItems: "center" }}>
+          <input ref={fileRef} type="file" multiple style={{ display: "none" }} onChange={(e) => { pickFiles(e.target.files); e.target.value = ""; }} />
+          <button title="Attach a file — drop one here too" onClick={() => fileRef.current?.click()}
+            style={{ width: 40, height: 38, flexShrink: 0, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Paperclip size={16} />
+          </button>
+          <input className="inp" style={{ flex: 1 }} placeholder={atts.length ? "What should I do with it?" : "e.g. create project EB-26-014 for Acme, due 30 Sep, Saurav as PM"} value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+          <Btn icon={busy ? Loader2 : Send} disabled={busy || (!val.trim() && !atts.length)} onClick={() => send()}>{busy ? "Working…" : "Send"}</Btn>
         </div>
       </div>
     </div>
