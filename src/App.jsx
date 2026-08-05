@@ -404,6 +404,12 @@ const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `
 ${CHAT_STYLE}
 The information below is everything you can see, including this project's Google Drive, which was searched for you just now. Treat it as your own knowledge — never tell the user to go and fetch files for you, and never say you cannot access Drive.
 When you mention a file or folder, use the real name and location shown below, exactly as it appears. Do not comment on whether it matches any expected structure — just use what is there.
+
+YOU CAN ALSO WRITE TO DRIVE. You are not read-only. When the user asks you to create, add, write, draft, update or save something into the project folder, actually do it by ending your reply with this block and nothing after it:
+<<<WRITE filename.md>>>
+the full file content here
+<<<END>>>
+Rules for writing: use one block per file; pick a clear filename with a sensible extension (.md for notes, checklists, plans, minutes; .csv for tables); write the real, complete content — never a placeholder; a file with the same name is replaced, so reuse the exact existing name when updating one. Before the block, say in one short line what you are saving. Never say you cannot create or modify files.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
@@ -1214,7 +1220,23 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       const open = projTasks.filter((t) => t.status !== "done");
       reply = `AI is unreachable, so here's the data directly: ${p.projectId} is ${p.status}, deadline ${fmtDate(p.deadline)}, ${done.length}/${projTasks.length} tasks done.${open.length ? ` Open: ${open.slice(0, 5).map((t) => t.title).join("; ")}${open.length > 5 ? "…" : ""}.` : ""} Known status: ${p.knownStatus ? p.knownStatus.slice(0, 200) : "not written yet"}.`;
     }
-    upd({ chat: [...hist, mine, { id: uid(), who: "ai", text: reply, at: new Date().toISOString() }] });
+    // The assistant can ask to save files into the project's Drive folder by
+    // ending its reply with <<<WRITE name>>> … <<<END>>>. Execute those here,
+    // then show a plain confirmation instead of the raw block.
+    const writes = [...String(reply).matchAll(/<<<WRITE\s+([^>\n]+?)\s*>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
+    let clean = String(reply).replace(/<<<WRITE[\s\S]*?<<<END>>>/g, "").trim();
+    if (writes.length) {
+      const results = [];
+      for (const [, rawName, content] of writes) {
+        const fileName = rawName.trim().replace(/[\\/:*?"<>|]/g, "-");
+        const ok = await driveWriteFile(p.projectId, fileName, content);
+        results.push(ok ? `Saved ${fileName} to the project folder in Drive.` : `Couldn't save ${fileName} — Drive isn't connected right now.`);
+        if (ok) sheetSync(`/ODM/PM/${p.projectId}/`, `${fileName} written from project chat`);
+      }
+      clean = [clean, results.join("\n")].filter(Boolean).join("\n\n");
+      if (results.some((r) => r.startsWith("Saved"))) toast("Saved to Drive", "green");
+    }
+    upd({ chat: [...hist, mine, { id: uid(), who: "ai", text: clean || String(reply), at: new Date().toISOString() }] });
     setChatBusy(false);
   };
 
