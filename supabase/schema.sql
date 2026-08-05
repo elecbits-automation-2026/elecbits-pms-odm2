@@ -18,9 +18,18 @@ create table if not exists public.profiles (
                   check (role in ('superadmin','dept_head','pm','engineer')),
   title         text,
   resource_role text,
+  dept          text,
+  skills        jsonb default '[]'::jsonb,
+  max_projects  int,
+  project_tags  jsonb default '[]'::jsonb,
   color         text default '#2563eb',
   created_at    timestamptz not null default now()
 );
+-- For projects provisioned before these columns existed.
+alter table public.profiles add column if not exists dept         text;
+alter table public.profiles add column if not exists skills       jsonb default '[]'::jsonb;
+alter table public.profiles add column if not exists max_projects int;
+alter table public.profiles add column if not exists project_tags jsonb default '[]'::jsonb;
 
 -- Create a profile automatically for every new auth user.
 -- The very first user to sign up becomes the superadmin; everyone else an engineer.

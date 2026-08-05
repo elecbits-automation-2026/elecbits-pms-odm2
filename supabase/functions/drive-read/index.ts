@@ -99,7 +99,10 @@ async function getAccessToken(): Promise<string> {
   return data.access_token as string;
 }
 
-type GFile = { id: string; name: string; mimeType: string; modifiedTime?: string; size?: string };
+type GFile = { id: string; name: string; mimeType: string; modifiedTime?: string; size?: string; parents?: string[]; webViewLink?: string };
+
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+const isFolder = (f: GFile) => f.mimeType === FOLDER_MIME;
 
 async function drive(token: string, path: string): Promise<any> {
   const res = await fetch(`https://www.googleapis.com/drive/v3/${path}`, {
@@ -110,15 +113,35 @@ async function drive(token: string, path: string): Promise<any> {
 }
 
 async function findFolders(token: string, needle: string): Promise<GFile[]> {
-  const q = encodeURIComponent(`name contains '${needle.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime)&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
+  const q = encodeURIComponent(`name contains '${needle.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,parents,webViewLink)&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
   return data.files ?? [];
 }
 
 async function listChildren(token: string, folderId: string): Promise<GFile[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size)&pageSize=50&orderBy=modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,webViewLink)&pageSize=50&orderBy=folder,modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true`);
   return data.files ?? [];
+}
+
+/* Walk up the parent chain so the AI can quote the REAL Drive path
+   (e.g. /My Drive/ODM/Projects/Eb-09-.../) instead of the assumed convention. */
+const pathCache = new Map<string, string>();
+async function folderPath(token: string, f: GFile): Promise<string> {
+  if (pathCache.has(f.id)) return pathCache.get(f.id)!;
+  const parts = [f.name];
+  let parentId = f.parents?.[0];
+  for (let depth = 0; depth < 6 && parentId; depth++) {
+    try {
+      const p: GFile = await drive(token, `files/${parentId}?fields=id,name,parents&supportsAllDrives=true`);
+      if (!p?.name) break;
+      parts.unshift(p.name);
+      parentId = p.parents?.[0];
+    } catch { break; }
+  }
+  const full = "/" + parts.join("/") + "/";
+  pathCache.set(f.id, full);
+  return full;
 }
 
 async function extractText(token: string, f: GFile): Promise<string> {
@@ -199,9 +222,21 @@ Deno.serve(async (req) => {
       if (!folders.length) { lines.push(`[${needle}] no matching Drive folder found`); continue; }
       for (const folder of folders.slice(0, 2)) {
         const files = await listChildren(token, folder.id);
-        lines.push(`FOLDER ${folder.name} (${files.length} items):`);
+        const path = await folderPath(token, folder);
+        lines.push(`FOLDER ${folder.name} — real Drive path: ${path} (${files.length} items)${folder.webViewLink ? ` · link: ${folder.webViewLink}` : ""}`);
         for (const f of files.slice(0, 20)) {
-          lines.push(`  - ${f.name} · ${f.mimeType.split(".").pop()} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
+          const kind = isFolder(f) ? "folder" : f.mimeType.split(".").pop();
+          lines.push(`  - ${path}${f.name}${isFolder(f) ? "/" : ""} · ${kind} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
+        }
+        // one level deeper for sub-folders, so the AI sees the real structure
+        for (const sub of files.filter(isFolder).slice(0, 5)) {
+          try {
+            const kids = await listChildren(token, sub.id);
+            lines.push(`  SUBFOLDER ${path}${sub.name}/ (${kids.length} items):`);
+            for (const k of kids.slice(0, 12)) {
+              lines.push(`    - ${path}${sub.name}/${k.name}${isFolder(k) ? "/" : ""} · ${isFolder(k) ? "folder" : k.mimeType.split(".").pop()} · modified ${String(k.modifiedTime || "").slice(0, 10)}`);
+            }
+          } catch { /* keep going */ }
         }
         // extract text from up to 2 key files per folder (checklists, docs, notes)
         for (const f of files.filter((x) => /checklist|status|report|lld|notes?/i.test(x.name)).slice(0, 2)) {

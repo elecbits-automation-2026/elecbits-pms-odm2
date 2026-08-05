@@ -379,6 +379,7 @@ const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tr
 /* Project chat — the PM's copilot on deep project details. */
 const projChatPrompt = (p, projTasks, users, history, q, memory, driveData) => `You are the Elecbits ODM project copilot for ${p.projectId}. Answer the question using the project data below — be specific and direct, plain text (no markdown), under 180 words.
 The data below IS your access to this project's Google Drive: it was fetched for you by the system just now. Treat it as what you can see. Never tell the user to open Drive and paste files back to you, and never say you cannot access Drive — instead answer from what is here, and if a specific fact is genuinely absent, say which folder or file would contain it.
+When the live listing is present, quote the REAL Drive paths and file names exactly as they appear in it (they may differ in case, naming or location from the /ODM/PM/... convention — trust the live listing over the convention, and point out the difference if it matters). If asked what you can see or where you looked, list the actual folders, sub-folders and files found, with their paths.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
@@ -2889,7 +2890,16 @@ export default function App() {
   const applyRoster = useCallback((fn) => { if (supabaseEnabled) setProfiles((ps) => fn(ps || [])); else setCustomRoster((r) => fn(r || SEED_USERS)); }, []);
   const dbProfileUpsert = async (u) => {
     if (!supabaseEnabled) return null;
-    const { error } = await supabase.from("profiles").upsert({ id: u.id, email: u.email || null, name: u.name, role: u.role, title: u.title, color: u.color });
+    // Persist the FULL resource record — dept, role/function, skills and
+    // capacity, not just the display fields, or they vanish on refresh.
+    const { error } = await supabase.from("profiles").upsert({
+      id: u.id, email: u.email || null, name: u.name, role: u.role, title: u.title, color: u.color,
+      dept: u.dept || null,
+      resource_role: u.resourceRole || null,
+      skills: u.skills || [],
+      max_projects: u.maxProjects || null,
+      project_tags: u.projectTags || [],
+    });
     return error;
   };
   const addUser = useCallback(async (u) => {

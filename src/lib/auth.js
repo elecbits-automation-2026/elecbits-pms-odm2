@@ -76,6 +76,12 @@ export async function fetchProfiles() {
       title: p.title || RESOURCE_TITLES[p.resource_role] || ROLE_TITLES[role] || "Team",
       color: p.color || PALETTE[i % PALETTE.length],
       email: p.email || "",
+      // Full resource record, so Dept / capacity / skills survive a refresh.
+      dept: p.dept || "",
+      resourceRole: p.resource_role || "",
+      skills: p.skills || [],
+      maxProjects: p.max_projects || undefined,
+      projectTags: p.project_tags || [],
     };
   });
 }
