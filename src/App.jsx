@@ -47,6 +47,17 @@ const MONO = "'IBM Plex Mono',monospace";
 const hmToDate = (dateStr, hm) => new Date(`${dateStr}T${hm || "23:59"}:00`);
 const fmtDur = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60; return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(ss).padStart(2, "0"); };
 const normId = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+/* ─── THE REAL DRIVE ADDRESS ──────────────────────────────────────────────
+   One chain, two branches. PMs work out of Project Management, engineers out
+   of PCB & Firmware. Everything the OS reads or writes lives under here — no
+   guessing at folder names anywhere else in Drive. */
+const DRIVE_CHAIN = "Eb-02-ODM/Eb-ODM Execution/Engineering Services";
+const PM_ROOT = `/${DRIVE_CHAIN}/Project Management`;
+const PCB_ROOT = `/${DRIVE_CHAIN}/PCB & Firmware`;
+const pmPath = (id) => `${PM_ROOT}/${id || "<Project ID>"}/`;
+const pcbPath = (id) => `${PCB_ROOT}/${id || "<board>"}/`;
+/* Which branch a person looks in first. */
+const driveScope = (role) => (role === "engineer" ? "pcb" : "pm");
 const MD = ({ t }) => { const parts = String(t || "").split("**"); return <span>{parts.map((p, i) => (i % 2 ? <b key={i}>{p}</b> : <span key={i}>{p}</span>))}</span>; };
 
 /* ─── STATUS / THEME ────────────────────────────────────────────────────── */
@@ -161,8 +172,8 @@ const SEED_PROJECTS = [{
   createdAt: new Date(Date.now() - 3 * 86400000).toISOString(), createdBy: "u-admin",
 }];
 const SEED_MEMORY = [
-  { id: "m1", type: "sitemap", title: "Drive sitemap — Project ID folders", content: "/ODM/PM/<ProjectID>/ → Checklist.xlsx, Reports/, Client-Comms/, LLD/\nChecklist.xlsx tabs: Gantt, PM Milestones, HW Design, HW Testing, FW Logic, FW Testing, Overall Testing\nReports naming: YYYY-MM-DD_<topic>.pdf", createdAt: new Date().toISOString() },
-  { id: "m2", type: "sitemap", title: "Drive sitemap — PCB ID folders", content: "/ODM/PCB/<PCB-ID>/ → Gerber/, BoM/, Schematics/, Test-Reports/\nPCB naming: <ProjectID>-PCB-<rev> (e.g. ESP32-123-PCB-R2)\nGerber checks require the DRC report saved alongside.", createdAt: new Date().toISOString() },
+  { id: "m1", type: "sitemap", title: "Drive sitemap — where everything lives", content: `Every project folder sits under one chain:\n${PM_ROOT}/<Project ID>/        ← project managers work here\n${PCB_ROOT}/<board folder>/     ← hardware and firmware engineers work here\nNothing outside this chain belongs to a project. Always start from here, then look inside.`, createdAt: new Date().toISOString() },
+  { id: "m2", type: "sitemap", title: "Finding things inside a project folder", content: "File names are NOT consistent — do not expect a fixed name for anything. Inside a project folder there may be a checklist or tracker, reports, client communication, LLDs, gerbers, BoMs, schematics and test reports, in sub-folders or loose, named however the person who made them felt like naming them.\nSo: look at everything in the folder and its sub-folders, read what looks relevant, and answer from what is actually in there. Never say a file is missing because it does not have the name you expected.", createdAt: new Date().toISOString() },
   { id: "m3", type: "instruction", title: "Task quality bar", content: "Every closed task must name the exact file produced and its Drive path. Gerber checks require a DRC report. BoM checks require the availability + alternates columns filled. A task without a stored artifact is not a finished task.", createdAt: new Date().toISOString() },
 ];
 const KPI_DEFS = "PM KPIs (daily): (1) Customer queries answered — every client question closed same day, minimum 3 logged; (2) Decisions taken that move the project to completion — minimum 5/day; (3) Team on-time — every R&D member on the PM's projects finishes tasks on time (≥70%); (4) AI-checked closures — task completions verified through the AI gate; (5) Escalations to Shreya (Dept Head) — the fewer decisions that reach her, the better; target 0–1/day.";
@@ -190,13 +201,15 @@ const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
    digest for prompts, or "" when unavailable. */
 /* Returns { digest, error } — the caller shows `error` so a misconfigured Drive
    function explains itself instead of silently degrading. */
-async function driveReadDigest(projectId, linkedIds) {
+async function driveReadDigest(projectId, linkedIds, opts = {}) {
   if (!DRIVE_READ_URL) return { digest: "", error: "" };
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN }),
+      // scope picks which branch to look in first; search tells the reader what
+      // to hunt for inside the folder, since file names are never consistent.
+      body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN, scope: opts.scope || "pm", search: opts.search || "" }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -227,7 +240,7 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}) }),
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
     const data = await res.json();
     return !!(res.ok && data.ok);
@@ -385,17 +398,26 @@ const fallbackScrum = (raw, date, users, projects) => {
   return { summary: "Offline basic parse — AI was unreachable, review before pushing.", tasks };
 };
 /* Drive intelligence — read the PM + PCB folders and say what's going on. */
+/* Told to every AI that touches Drive, so none of them invent an address or a
+   filename. The tree is fixed; what sits inside a project folder is not. */
+const DRIVE_FACTS = `WHERE THE FILES ARE
+Project folders live at one address and nowhere else:
+  ${PM_ROOT}/<Project ID>/      — the project management side
+  ${PCB_ROOT}/<board folder>/   — the hardware and firmware side
+Names INSIDE a project folder are not standard. There is no guaranteed checklist, no guaranteed Reports folder — people name things however they like, and it changes from project to project. So never expect a particular file name, never say something is missing because it is not called what you expected, and never tell anyone what a folder "should" contain. Look at what is actually there, including the sub-folders, read whatever is relevant, and answer from that.`;
+
 const driveIntelPrompt = (p, users, memory, driveData) => `You are the Elecbits ODM project-intelligence analyst. Read the project's Google Drive knowledge and report what is actually going on and how things are moving.
 ${memCtx(memory)}
 PROJECT: ${p.projectId} — ${p.name || "(unnamed)"} | status ${p.status} | deadline ${p.deadline || "?"}
-PM FOLDER: /ODM/PM/${p.projectId}/ (Checklist.xlsx + Reports/ + Client-Comms/)
-PCB / LINKED ID FOLDERS: ${(p.linkedIds || []).map((x) => `/ODM/PCB/${x}/`).join(", ") || "none linked"}
-${driveData ? `LIVE DRIVE CONTENTS (real files just read from Google Drive):\n"""${driveData}"""` : "LIVE DRIVE READ: not connected — reason from the folder map, known status and intelligence log."}
+${DRIVE_FACTS}
+PROJECT FOLDER: ${pmPath(p.projectId)}
+LINKED BOARD FOLDERS: ${(p.linkedIds || []).map((x) => `${pcbPath(x)}`).join(", ") || "none linked"}
+${driveData ? `WHAT IS ACTUALLY IN THOSE FOLDERS RIGHT NOW — the full listing plus the text inside the files:\n"""${driveData}"""` : "The Drive read came back empty this time — reason from the known status and the intelligence log below."}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
 KNOWN STATUS (human-written): """${(p.knownStatus || "not provided").slice(0, 1500)}"""
 MANUAL INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 1500) || "none"}
 Write plain text (no markdown symbols), under 220 words, with these labelled lines: WHERE IT STANDS, HOW IT IS MOVING, RISKS / BLOCKERS, NEXT MOVES. Be concrete and reference the folders, files and IDs above.`;
-const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""}, status ${p.status}, deadline ${p.deadline || "?"}. ${p.knownStatus ? "Known status: " + p.knownStatus.slice(0, 300) : "No written status yet."}\n\nHOW IT IS MOVING\nDrive read unavailable (AI offline). Reference: /ODM/PM/${p.projectId}/ and PCB folders ${(p.linkedIds || []).join(", ") || "—"}.\n\nRISKS / BLOCKERS\nAdd manual intelligence below so the OS can reason about this project.\n\nNEXT MOVES\nOrganise a scrum note to create the first tasks, then re-run the analysis.`;
+const fallbackIntel = (p) => `WHERE IT STANDS\n${p.projectId} — ${p.name || ""}, status ${p.status}, deadline ${p.deadline || "?"}. ${p.knownStatus ? "Known status: " + p.knownStatus.slice(0, 300) : "No written status yet."}\n\nHOW IT IS MOVING\nDrive read unavailable (AI offline). Reference: ${pmPath(p.projectId)} and PCB folders ${(p.linkedIds || []).join(", ") || "—"}.\n\nRISKS / BLOCKERS\nAdd manual intelligence below so the OS can reason about this project.\n\nNEXT MOVES\nOrganise a scrum note to create the first tasks, then re-run the analysis.`;
 /* Organise a manual-intelligence note into a crisp status line. */
 const intelOrgPrompt = (p, raw, memory) => `Organise this manual intelligence note about Elecbits ODM project ${p.projectId} into one or two crisp status sentences (plain text, no markdown). Keep facts, drop filler.
 ${memCtx(memory)}
@@ -439,7 +461,7 @@ The actions, with their fields:
 {"action":"add_scrum_note","text":"the full note in the user's own words","date":"2026-08-05"}
 {"action":"add_memory","title":"Gerber review rule","content":"the full text to remember","type":"instruction"}
 {"action":"assign_training","name":"Ravi","title":"Altium constraint manager","resource":"link or book","due":"2026-08-20"}
-{"action":"read_drive","projectId":"EB-24-001"}
+{"action":"read_drive","projectId":"EB-24-001","search":"thermal test"}   (search is optional — it tells the reader what to hunt for inside the folder)
 {"action":"write_drive_file","projectId":"EB-24-001","fileName":"Milestones.md","content":"the complete file content"}
 {"action":"save_attachment","name":"Datasheet.pdf","projectId":"EB-24-001"}   (puts a file they attached into that project's Drive folder)
 {"action":"open_page","page":"scrum"}    (pages: projects, scrum, tasks, resources, perf, memory)
@@ -449,7 +471,8 @@ HOW TO DECIDE
 - If they ask you to remember something, add_memory.
 - If they name work for someone, add_task with that person.
 - If they describe a project that is not in the list, create_project. Use whatever they gave you and sensible defaults for the rest; never refuse for a missing field, and never interrogate them with a list of questions. Ask at most one short question, and only if you truly cannot proceed.
-- If they want to know what is inside a project's files, read_drive for that project first. The contents come back to you and you answer in the same conversation.
+- If they want to know what is inside a project's files, read_drive for that project first, putting what they are after in "search". The whole folder tree comes back with the text inside the files, and you answer in the same conversation. Read it yourself — never ask them which file to open, and never ask them to send you a file that is already in the folder.
+- If the first look does not have what they need, read_drive again with a different search term before saying you could not find it.
 - If they ask for a document, sheet, plan or minutes to exist in Drive, write_drive_file with the real, complete content.
 - When they attach a file: if you can see its contents, use them straight away — summarise it, answer from it, turn it into tasks, remember it, whatever they asked. If they want it kept, save_attachment into the right project. If it is obvious which project it belongs to, just do it; otherwise ask one short question naming the likely projects.
 - You can accept files. Never say you cannot take an upload or cannot add interface features.
@@ -469,7 +492,8 @@ OPEN TASKS (${ctx.openTasks.length}): ${ctx.openTasks.slice(0, 40).map((t) => `$
 TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} — ${u.title}${u.dept ? `, ${u.dept}` : ""} · ${u.load} open task(s)`).join("\n")}
 RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 200)}`).join(" | ") || "none"}
 ${memCtx(memory)}
-${driveData ? `DRIVE — folders, files and the text inside them, read just now:\n"""${driveData}"""` : ""}
+${DRIVE_FACTS}
+${driveData ? `DRIVE — the full folder tree and the text inside the files, read just now:\n"""${driveData}"""` : ""}
 ${attachCtx(atts)}
 RECENT CHAT: ${history.slice(-8).map((m) => `${m.who === "me" ? "User" : "You"}: ${m.text}`).join(" | ") || "—"}
 WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
@@ -477,12 +501,13 @@ WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
 const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
 ${memCtx(memory)}
-PM FOLDER: /ODM/PM/${pid}/ → Checklist.xlsx (tabs: Gantt, PM Milestones, HW Design, HW Testing, FW Logic, FW Testing, Overall Testing), Reports/, Client-Comms/, LLD/
-LINKED GW/PCB FOLDERS: ${(linkedIds || []).map((x) => `/ODM/PCB/${x}/ → Gerber/, BoM/, Schematics/, Test-Reports/`).join("; ") || "none linked"}
-${driveData ? `LIVE DRIVE CONTENTS (real files just read from Google Drive):\n"""${driveData}"""` : ""}
+${DRIVE_FACTS}
+PROJECT FOLDER: ${pmPath(pid)}
+LINKED BOARD FOLDERS: ${(linkedIds || []).map((x) => pcbPath(x)).join("; ") || "none linked"}
+${driveData ? `WHAT IS ACTUALLY IN THOSE FOLDERS RIGHT NOW — the full listing plus the text inside the files:\n"""${driveData}"""` : ""}
 KNOWN STATUS (human-written): """${(knownStatus || "not provided").slice(0, 1500)}"""
-Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, ARTEFACT CONVENTIONS (file names + where closures must store evidence), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
-const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at /ODM/PM/${pid}/ (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under /ODM/PCB/<id>/ (Gerber, BoM, Schematics, Test-Reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
+Write plain text (no markdown symbols), under 180 words, with these labelled lines: PROJECT SHAPE, ACTIVE WORKSTREAMS, WHAT IS IN THE FOLDER (the real file and sub-folder names you can see, and what each one is for — describe what is there, do not prescribe what should be there), ALLOCATION HINTS (which role types should get which task kinds on this project and what proof to demand at closure).`;
+const fallbackLearn = (pid, linkedIds, knownStatus) => `PROJECT SHAPE\n${pid} tracked at ${pmPath(pid)} (Checklist.xlsx: Gantt, PM Milestones, HW Design/Testing, FW Logic/Testing, Overall Testing).${linkedIds?.length ? ` Hardware IDs: ${linkedIds.join(", ")} under ${PCB_ROOT}/ (gerbers, BoM, schematics, test reports).` : ""}\n\nACTIVE WORKSTREAMS\n${knownStatus ? knownStatus.slice(0, 300) : "No written status yet — capture it in Known Status."}\n\nARTEFACT CONVENTIONS\nReports as YYYY-MM-DD_<topic>.pdf in Reports/; Gerber checks need the DRC report saved alongside; BoM checks need availability + alternates columns filled.\n\nALLOCATION HINTS\nHW tasks → hardware engineers with the PCB folder path as evidence; FW tasks → firmware engineers against FW Logic/Testing tabs; client comms → the PM, logged in Client-Comms/. Every closure must name the exact file + Drive path. (AI offline — template learning; re-run later.)`;
 /* Project chat — the PM's copilot on deep project details. */
 const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers and engineers, not to developers:
 - Plain, warm, everyday English. Short sentences. No jargon, no system-speak.
@@ -509,12 +534,13 @@ the full file content here
 <<<END>>>
 Rules for writing: use one block per file; pick a clear filename with a sensible extension (.md for notes, checklists, plans, minutes; .csv for tables); write the real, complete content — never a placeholder; a file with the same name is replaced, so reuse the exact existing name when updating one. Before the block, say in one short line what you are saving. Never say you cannot create or modify files.
 ${memCtx(memory)}
+${DRIVE_FACTS}
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"} | client ${p.clientName || "—"}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
-LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | PM folder /ODM/PM/${p.projectId}/
+LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | project folder ${pmPath(p.projectId)}
 KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
 INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
-${driveData ? `THE PROJECT'S DRIVE — folders, files, and the text inside them, read just now:\n"""${driveData}"""` : "No Drive files came back this time. Answer from the project notes above without mentioning Drive at all."}
+${driveData ? `THE PROJECT'S DRIVE — the whole folder tree and the text inside the files, read just now:\n"""${driveData}"""` : "No Drive files came back this time. Answer from the project notes above without mentioning Drive at all."}
 LAST SAVED DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
 TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
@@ -693,7 +719,7 @@ function ProjectWizard({ onClose }) {
       case "lldsum": { const answered = LLD_QUESTIONS.filter((q) => d.lldAnswers[q.id] && d.lldAnswers[q.id] !== "TBD").length; d.lldC = { mode: "chat", answers: { ...d.lldAnswers }, text: composeLLDText(), fileName: "" }; await sys(`Customer LLD captured through chat — **${answered}/30 answered**, the rest marked TBD.`, "lldsumw"); break; }
       case "lldd": await sys("**LLD for Designer** — generate it with AI from the customer LLD, or upload / paste it manually. Also a hard gate.", "lldd"); break;
       case "review": await sys("Here's the full picture. Every item in the required checklist must be green before the project can be created.", "review"); break;
-      case "done": await sys(`Project **${d.projectId}** created and appended to the projects sheet. The Drive folder /ODM/PM/${d.projectId}/ with Checklist.xlsx is initialised (simulated sync).`, "donew"); break;
+      case "done": await sys(`Project **${d.projectId}** created and appended to the projects sheet. The Drive folder ${pmPath(d.projectId)} with Checklist.xlsx is initialised (simulated sync).`, "donew"); break;
       default: break;
     }
   }, []);
@@ -839,7 +865,7 @@ function ProjectWizard({ onClose }) {
           <input type="file" style={{ display: "none" }} onChange={(e) => { const f = e.target.files[0]; if (!f) return; setFileName(f.name); if (/\.(txt|md|json|csv)$/i.test(f.name)) { const r = new FileReader(); r.onload = () => setFileTxt(String(r.result).slice(0, 8000)); r.readAsText(f); } }} />
         </label>
         <div><Btn small disabled={!text.trim() && !fileName} icon={CheckCircle2} onClick={() => onUse({ mode: "manual", text: text.trim() || fileTxt || `(content in attached file ${fileName})`, fileName })}>Use this LLD</Btn></div>
-        <div style={{ fontSize: 11, color: "var(--txt3)" }}>Real Drive upload to /ODM/PM/&lt;ProjectID&gt;/LLD/ is an integration seam — stored as reference here.</div>
+        <div style={{ fontSize: 11, color: "var(--txt3)" }}>Stored as a reference here; the assistant can push it into the project folder in Drive.</div>
       </div>
     );
   };
@@ -949,7 +975,7 @@ function ProjectWizard({ onClose }) {
           setProjects((x) => [p, ...x]);
           if (!d.existingClient && d.clientId) setClients((x) => [...x, { id: uid(), clientId: d.clientId, name: d.clientName }]);
           sheetSync("Project Data and IDs (Google Sheet)", `${d.projectId} appended`);
-          sheetSync(`Drive /ODM/PM/${d.projectId}/`, "Folder + Checklist.xlsx initialised");
+          sheetSync(`Drive ${pmPath(d.projectId)}`, "Folder + Checklist.xlsx initialised");
           toast(`Project ${d.projectId} created`, "green");
           freeze(m.id, "Project created"); go("done");
         }}>Create project</Btn>
@@ -1061,7 +1087,7 @@ function ProjectsModule() {
                 </div>
                 <div style={{ fontWeight: 700, fontSize: 14.5, margin: "4px 0 2px" }}>{p.name}</div>
                 <div style={{ fontSize: 12, color: "var(--txt2)" }}>{p.clientName} · {p.clientId}{pm ? ` · PM: ${users.find((u) => u.id === pm.userId)?.name}` : ""}</div>
-                <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginTop: 5 }}>/ODM/PM/{p.projectId}/ → Checklist.xlsx</div>
+                <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginTop: 5 }}>{pmPath(p.projectId)} → Checklist.xlsx</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 7, fontSize: 11.5, fontWeight: 600, color: "var(--acc)" }}>View full progress &amp; to-dos <ArrowRight size={12} /></div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
@@ -1116,7 +1142,7 @@ function AddExistingProject({ onClose }) {
   const learnFromDrive = async () => {
     const ids = linked.map((x) => x.trim().toUpperCase()).filter(Boolean);
     setLearnBusy(true);
-    const { digest, error: driveErr } = await driveReadDigest(clean, ids);
+    const { digest, error: driveErr } = await driveReadDigest(clean, ids, { scope: driveScope(me && users.find((u) => u.id === me)?.role) });
     if (driveErr) toast(driveErr, "amber");
     try { const txt = await claude(driveLearnPrompt(clean || "(new project)", ids, knownStatus, memory, digest), { json: false }); setLearning(txt); if (digest) toast("Learned from live Drive contents", "green"); }
     catch { setLearning(fallbackLearn(clean || "(new project)", ids, knownStatus)); toast("AI offline — template learning loaded, edit freely", "amber"); }
@@ -1142,7 +1168,7 @@ function AddExistingProject({ onClose }) {
       sheetSync("System Memory", `Drive learning for ${clean} stored`);
     }
     sheetSync("Project Data and IDs (Google Sheet)", `${clean} registered (existing)`);
-    sheetSync(`Drive /ODM/PM/${clean}/`, `Linked to ${p.linkedIds.length} PCB folder(s)`);
+    sheetSync(`Drive ${pmPath(clean)}`, `Linked to ${p.linkedIds.length} PCB folder(s)`);
     toast(`Project ${clean} added${learning.trim() ? " — Drive learning saved to memory" : ""}`, "green");
     onClose();
   };
@@ -1201,7 +1227,7 @@ function AddExistingProject({ onClose }) {
         <div style={{ border: "1px dashed var(--bdr2)", borderRadius: 11, padding: 13, background: "var(--s2)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
             <Btn small icon={learnBusy ? Loader2 : Database} disabled={learnBusy || !clean} onClick={learnFromDrive}>{learnBusy ? "Learning from Drive…" : learning ? "Re-learn from Drive" : "Learn from Drive"}</Btn>
-            <span style={{ fontSize: 11.5, color: "var(--txt2)", flex: 1, minWidth: 200 }}>Reads the /ODM/PM/{clean || "<ID>"}/ and linked GW/PCB folders and distils a knowledge note. Saved to System Memory on creation — used for this project's task allocation.</span>
+            <span style={{ fontSize: 11.5, color: "var(--txt2)", flex: 1, minWidth: 200 }}>Reads the {pmPath(clean || "<ID>")} and linked GW/PCB folders and distils a knowledge note. Saved to System Memory on creation — used for this project's task allocation.</span>
           </div>
           {learnBusy && <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", color: "var(--txt2)", fontSize: 12 }}><Loader2 className="spin" size={13} /> Reading folder structure, checklist tabs and status — distilling allocation hints…</div>}
           {learning && !learnBusy && (
@@ -1276,7 +1302,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
   const analyseDrive = async () => {
     setIntelBusy(true);
-    const { digest, error: driveErr } = await driveReadDigest(p.projectId, p.linkedIds);
+    const { digest, error: driveErr } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role) });
     if (driveErr) toast(driveErr, "amber");
     try {
       const txt = await claude(driveIntelPrompt(p, users, memory, digest), { json: false });
@@ -1284,7 +1310,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       if (digest) toast("Analysed with live Drive contents", "green");
       // Push the analysis back into the project folder so the team sees it in Drive.
       const wrote = await driveWriteFile(p.projectId, `${todayStr()}_AI-status-analysis.txt`, `Elecbits ODM — AI status analysis\nProject ${p.projectId} · ${p.name || ""}\nGenerated ${new Date().toISOString()}\n\n${txt}\n`);
-      if (wrote) sheetSync(`/ODM/PM/${p.projectId}/`, `AI status analysis written to Drive`);
+      if (wrote) sheetSync(`${pmPath(p.projectId)}`, `AI status analysis written to Drive`);
     }
     catch { setIntel(fallbackIntel(p)); toast("AI offline — showing what we have", "amber"); }
     setIntelBusy(false);
@@ -1312,7 +1338,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     let reply;
     // Pull live Drive contents so the copilot answers from real files rather
     // than telling the PM to go and paste them in.
-    const { digest: chatDigest } = await driveReadDigest(p.projectId, p.linkedIds);
+    const { digest: chatDigest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: q });
     try { reply = await claude(projChatPrompt(p, projTasks, users, hist, q, memory, chatDigest), { json: false }); }
     catch {
       const open = projTasks.filter((t) => t.status !== "done");
@@ -1329,7 +1355,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
         const fileName = rawName.trim().replace(/[\\/:*?"<>|]/g, "-");
         const ok = await driveWriteFile(p.projectId, fileName, content);
         results.push(ok ? `Saved ${fileName} to the project folder in Drive.` : `Couldn't save ${fileName} — Drive isn't connected right now.`);
-        if (ok) sheetSync(`/ODM/PM/${p.projectId}/`, `${fileName} written from project chat`);
+        if (ok) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from project chat`);
       }
       clean = [clean, results.join("\n")].filter(Boolean).join("\n\n");
       if (results.some((r) => r.startsWith("Saved"))) toast("Saved to Drive", "green");
@@ -1447,8 +1473,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
 
           <Section>
             <CardLabel right={<Pill color="var(--purple)"><Database size={11} /> PM + PCB folders</Pill>}>Drive intelligence</CardLabel>
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 4 }}>/ODM/PM/{p.projectId}/ → Checklist.xlsx · Reports/ · Client-Comms/</div>
-            {(p.linkedIds || []).length > 0 && <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 10 }}>{p.linkedIds.map((x) => `/ODM/PCB/${x}/`).join("   ")}</div>}
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 4 }}>{pmPath(p.projectId)} → Checklist.xlsx · Reports/ · Client-Comms/</div>
+            {(p.linkedIds || []).length > 0 && <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 10 }}>{p.linkedIds.map((x) => `${pcbPath(x)}`).join("   ")}</div>}
             <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10, lineHeight: 1.5 }}>The OS reads these folders and tells you what's going on. Live Drive read is the integration seam; the analysis uses the folder map, the known status and the intelligence log below.</div>
             <Btn small icon={intelBusy ? Loader2 : Sparkles} disabled={intelBusy} onClick={analyseDrive}>{intelBusy ? "Analysing…" : intel ? "Re-analyse how it's moving" : "Analyse how things are moving"}</Btn>
             {intel && <div style={{ marginTop: 12, padding: 12, background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 10, fontSize: 12.5, whiteSpace: "pre-wrap", lineHeight: 1.6, color: "var(--txt)" }}>{intel}{p.driveAnalysis?.at && <div style={{ fontSize: 10, color: "var(--txt3)", marginTop: 8 }}>analysed {fmtDate(p.driveAnalysis.at.slice(0, 10))}</div>}</div>}
@@ -1513,7 +1539,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               <KV k="Contact" v={p.contact?.name ? `${p.contact.name}${p.contact.designation ? " · " + p.contact.designation : ""}` : "—"} />
               <KV k="Created" v={fmtDate((p.createdAt || "").slice(0, 10))} />
               {p.startDate && <KV k="Start" v={fmtDate(p.startDate)} />}
-              <KV k="Drive" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>/ODM/PM/{p.projectId}/</span>} />
+              <KV k="Drive" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{pmPath(p.projectId)}</span>} />
               {(p.linkedIds || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><KV k="Linked IDs (GW / PCB)" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{p.linkedIds.join(", ")}</span>} /></div>}
             </div>
           </Section>
@@ -1659,7 +1685,7 @@ function ScrumModule() {
       created = newTasks.length;
       setTasks((x) => [...newTasks, ...x]);
       [...new Set(newTasks.filter((t) => t.linked).map((t) => t.projectId))].forEach((pid) =>
-        sheetSync(`/ODM/PM/${pid}/Checklist.xlsx`, `${newTasks.filter((t) => t.projectId === pid).length} task(s) appended from Scrum Note ${note.noteNo}`));
+        sheetSync(`${pmPath(pid)}Checklist.xlsx`, `${newTasks.filter((t) => t.projectId === pid).length} task(s) appended from Scrum Note ${note.noteNo}`));
     }
     setNotes((x) => [note, ...x]);
     toast(created ? `Note ${note.noteNo} saved — ${created} task(s) created` : `Note ${note.noteNo} saved`, "green");
@@ -1921,7 +1947,7 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
 
 function WorkWindow({ t, onClose, onComplete }) {
   const { setTasks, projects, memory, toast, now } = useCtx();
-  const [w, setW] = useState({ whatDone: t.work?.whatDone || "", fileName: t.work?.fileName || "", fileLocation: t.work?.fileLocation || (t.projectId ? `/ODM/PM/${t.projectId}/Reports/` : ""), attach: t.work?.attach || "" });
+  const [w, setW] = useState({ whatDone: t.work?.whatDone || "", fileName: t.work?.fileName || "", fileLocation: t.work?.fileLocation || (t.projectId ? `${pmPath(t.projectId)}Reports/` : ""), attach: t.work?.attach || "" });
   const [checks, setChecks] = useState(t.stepsDone || []);
   const p = projects.find((x) => x.projectId === t.projectId);
   const sitemaps = memory.filter((m) => m.type === "sitemap");
@@ -1949,7 +1975,7 @@ function WorkWindow({ t, onClose, onComplete }) {
           <ConditionRail conditions={t.conditions} />
           <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
             <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>Where things live</div>
-            {t.projectId && <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", marginBottom: 5 }}>/ODM/PM/{t.projectId}/ → Checklist.xlsx</div>}
+            {t.projectId && <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", marginBottom: 5 }}>{pmPath(t.projectId)} → Checklist.xlsx</div>}
             {sitemaps.map((m) => <div key={m.id} style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", whiteSpace: "pre-wrap", marginBottom: 5 }}>{m.content.split("\n").slice(0, 2).join("\n")}</div>)}
           </div>
           {bar && <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--soft)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)" }}><b style={{ color: "var(--acc)" }}>{bar.title}:</b> {bar.content}</div>}
@@ -2017,7 +2043,7 @@ function CompleteFlow({ t, onClose }) {
     const dayN = notes.filter((n) => n.date === dt).length;
     const story = `Task "${t.title}"${t.projectId ? ` on ${t.projectId}` : ""} could not be closed${blocker ? ` — ${blocker}` : ""}. Branched into: ${subs.map((r, i) => `${i + 1}) ${r.title} → ${users.find((u) => u.id === r.assigneeId)?.name || "unassigned"} (${r.timebox || 60}m)`).join("; ")}. Clock started ${startHM}.`;
     setNotes((n) => [{ id: uid(), date: dt, noteNo: dayN + 1, time: startHM, raw: story, organized: { summary: "Auto story — a stuck task branched into timeboxed sub-tasks.", engine: "system", tasks: newTasks.map((x) => ({ title: x.title, projectId: x.projectId, assigneeId: x.assigneeId, startTime: x.startTime, endTime: x.endTime, conditions: [], include: true })) }, origin: "system", by: me, createdAt: new Date().toISOString() }, ...n]);
-    if (t.projectId && t.linked !== false) sheetSync(`/ODM/PM/${t.projectId}/Checklist.xlsx`, `${newTasks.length} branch task(s) from "${t.title}"`);
+    if (t.projectId && t.linked !== false) sheetSync(`${pmPath(t.projectId)}Checklist.xlsx`, `${newTasks.length} branch task(s) from "${t.title}"`);
     applyEsc();
     toast(`${newTasks.length} sub-task(s) created — story written to today's scrum`, "green");
     onClose();
@@ -2025,11 +2051,11 @@ function CompleteFlow({ t, onClose }) {
   const closePass = () => {
     finalize({ status: "done", completedAt: new Date().toISOString(), work, aiVerification: { questions: qs, verdict: verdict.verdict, score: verdict.score, feedback: verdict.feedback, offline: !!verdict.offline } });
     if (t.projectId && t.linked !== false) {
-      sheetSync(`/ODM/PM/${t.projectId}/Checklist.xlsx`, `"${t.title}" done · score ${verdict.score}/10`);
+      sheetSync(`${pmPath(t.projectId)}Checklist.xlsx`, `"${t.title}" done · score ${verdict.score}/10`);
       // Write the closure record into the project's Drive folder as evidence.
       driveWriteFile(t.projectId, `${todayStr()}_closure_${String(t.title).slice(0, 40).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.txt`,
         `Elecbits ODM — task closure record\nProject: ${t.projectId}\nTask: ${t.title}\nClosed: ${new Date().toISOString()}\nAI verdict: ${verdict.verdict} (${verdict.score}/10)\nFeedback: ${verdict.feedback}\n\nWork log\n  What was done: ${work.whatDone || "—"}\n  File produced: ${work.fileName || "—"}\n  Stored at: ${work.fileLocation || "—"}\n\nVerification Q&A\n${qs.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}\n`
-      ).then((ok) => { if (ok) sheetSync(`/ODM/PM/${t.projectId}/`, `Closure record written to Drive`); });
+      ).then((ok) => { if (ok) sheetSync(`${pmPath(t.projectId)}`, `Closure record written to Drive`); });
     }
     applyEsc();
     toast(`Task closed — ${verdict.score}/10`, "green");
@@ -2995,7 +3021,7 @@ function AssistantModule() {
         };
         live.projects = [p, ...live.projects];
         setProjects((ps) => [p, ...ps]);
-        sheetSync(`/ODM/PM/${pid}/`, "Project created from the assistant");
+        sheetSync(`${pmPath(pid)}`, "Project created from the assistant");
         return { line: `Created ${pid} — ${p.name}${team.length ? ` with ${team.length} person(s) on it` : ""}.` };
       }
       case "update_project": {
@@ -3022,7 +3048,7 @@ function AssistantModule() {
         const team = [...(p.team || []), { slot, userId: u.id }];
         live.projects = live.projects.map((x) => (x.id === p.id ? { ...x, team } : x));
         setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, team } : x)));
-        sheetSync(`/ODM/PM/${p.projectId}/`, `${u.name} added as ${slot}`);
+        sheetSync(`${pmPath(p.projectId)}`, `${u.name} added as ${slot}`);
         return { line: `${u.name} is now on ${p.projectId} as ${slot}.` };
       }
       case "unassign_resource": {
@@ -3054,7 +3080,7 @@ function AssistantModule() {
           steps: [], conditions: [], status: "pending", origin: "assistant", createdBy: me, createdAt: new Date().toISOString(), work: {} };
         live.tasks = [t, ...live.tasks];
         setTasks((ts) => [t, ...ts]);
-        if (p) sheetSync(`/ODM/PM/${p.projectId}/Checklist.xlsx`, `Task "${t.title}" raised from the assistant`);
+        if (p) sheetSync(`${pmPath(p.projectId)}Checklist.xlsx`, `Task "${t.title}" raised from the assistant`);
         return { line: `Task raised: ${t.title}${u ? ` for ${u.name}` : ""}${p ? ` on ${p.projectId}` : ""}, due ${t.endTime} today.` };
       }
       case "update_task": {
@@ -3094,7 +3120,7 @@ function AssistantModule() {
       }
       case "read_drive": {
         const p = proj(a.projectId);
-        const { digest } = await driveReadDigest(p?.projectId || a.projectId, p?.linkedIds);
+        const { digest } = await driveReadDigest(p?.projectId || a.projectId, p?.linkedIds, { scope: driveScope(my?.role), search: a.search || "" });
         return { line: digest ? "" : `I couldn't open anything in Drive for ${a.projectId} just now.`, drive: digest };
       }
       case "save_attachment": {
@@ -3107,16 +3133,16 @@ function AssistantModule() {
         const p = proj(a.projectId);
         if (!p) return { line: `I couldn't find a project called ${a.projectId} to put ${f.name} in.` };
         const ok = f.b64 != null
-          ? await driveWriteFile(p.projectId, f.name, f.b64, { encoding: "base64", mimeType: f.mime })
-          : await driveWriteFile(p.projectId, f.name, f.text || "", { mimeType: "text/plain" });
-        if (ok) sheetSync(`/ODM/PM/${p.projectId}/`, `${f.name} uploaded from the assistant`);
+          ? await driveWriteFile(p.projectId, f.name, f.b64, { encoding: "base64", mimeType: f.mime, scope: driveScope(my?.role) })
+          : await driveWriteFile(p.projectId, f.name, f.text || "", { mimeType: "text/plain", scope: driveScope(my?.role) });
+        if (ok) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from the assistant`);
         return { line: ok ? `Saved ${f.name} into the ${p.projectId} folder in Drive.` : `Couldn't save ${f.name} — Drive isn't reachable right now.` };
       }
       case "write_drive_file": {
         const p = proj(a.projectId);
         const fileName = String(a.fileName || "note.md").replace(/[\\/:*?"<>|]/g, "-");
-        const ok = await driveWriteFile(p?.projectId || a.projectId, fileName, String(a.content || ""));
-        if (ok && p) sheetSync(`/ODM/PM/${p.projectId}/`, `${fileName} written from the assistant`);
+        const ok = await driveWriteFile(p?.projectId || a.projectId, fileName, String(a.content || ""), { scope: driveScope(my?.role) });
+        if (ok && p) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from the assistant`);
         return { line: ok ? `Saved ${fileName} into the ${p?.projectId || a.projectId} folder in Drive.` : `Couldn't save ${fileName} — Drive isn't reachable right now.` };
       }
       case "open_page": {
@@ -3150,7 +3176,7 @@ function AssistantModule() {
     // reply already knows what is inside the files.
     let drive = "";
     const mentioned = projects.find((p) => normId(q).includes(normId(p.projectId)) || (p.name && normId(q).includes(normId(p.name))));
-    if (mentioned && DRIVE_READ_URL) { try { drive = (await driveReadDigest(mentioned.projectId, mentioned.linkedIds)).digest; } catch { /* carry on */ } }
+    if (mentioned && DRIVE_READ_URL) { try { drive = (await driveReadDigest(mentioned.projectId, mentioned.linkedIds, { scope: driveScope(my?.role), search: q })).digest; } catch { /* carry on */ } }
 
     const live = { projects: [...projects], tasks: [...tasks], attachments: sent.length ? sent : lastAtts.current };
     const runOnce = async (driveData) => {

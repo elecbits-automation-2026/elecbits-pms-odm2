@@ -146,8 +146,90 @@ async function findFolders(token: string, needle: string): Promise<GFile[]> {
 
 async function listChildren(token: string, folderId: string): Promise<GFile[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,webViewLink)&pageSize=50&orderBy=folder,modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+  const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,webViewLink)&pageSize=200&orderBy=folder,modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true`);
   return data.files ?? [];
+}
+
+/* ── THE REAL ELECBITS TREE ────────────────────────────────────────────────
+   Project folders are not scattered around Drive — they live at a fixed
+   address, and searching the whole Drive by name lands on the wrong thing.
+   Walk the chain instead:
+     Eb-02-ODM / Eb-ODM Execution / Engineering Services / Project Management / <Project ID>
+     Eb-02-ODM / Eb-ODM Execution / Engineering Services / PCB & Firmware    / <board folder>
+   PMs work out of the first branch, engineers out of the second; both are
+   reachable either way, only the order of looking changes.                  */
+const ROOT_CHAIN = ["Eb-02-ODM", "Eb-ODM Execution", "Engineering Services"];
+const BRANCH: Record<string, string> = { pm: "Project Management", pcb: "PCB & Firmware" };
+const ROOT_PATH = "/" + ROOT_CHAIN.join("/") + "/";
+
+const norm = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/* Folder names drift (spacing, ampersands, case) — match on the letters. */
+async function childFolder(token: string, parentId: string, name: string): Promise<GFile | null> {
+  let kids: GFile[];
+  try { kids = (await listChildren(token, parentId)).filter(isFolder); } catch { return null; }
+  const n = norm(name);
+  return kids.find((k) => norm(k.name) === n)
+    || kids.find((k) => norm(k.name).includes(n) || n.includes(norm(k.name)))
+    || null;
+}
+
+/* Resolved once per warm instance — the IDs don't move. */
+let branchCache: { pm: GFile | null; pcb: GFile | null; ok: boolean } | null = null;
+async function resolveBranches(token: string) {
+  if (branchCache) return branchCache;
+  const top = await searchFolders(token, ROOT_CHAIN[0]);
+  let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
+  for (let i = 1; node && i < ROOT_CHAIN.length; i++) node = await childFolder(token, node.id, ROOT_CHAIN[i]);
+  const out = { pm: null as GFile | null, pcb: null as GFile | null, ok: !!node };
+  if (node) {
+    out.pm = await childFolder(token, node.id, BRANCH.pm);
+    out.pcb = await childFolder(token, node.id, BRANCH.pcb);
+  }
+  branchCache = out;
+  return out;
+}
+
+/* Find the folder for an ID somewhere under a branch. Level by level, so a
+   folder nested one deeper than expected is still found. */
+async function findFolderUnder(token: string, root: GFile, needle: string, maxDepth = 3): Promise<GFile[]> {
+  const n = norm(needle);
+  if (!n || n.length < 3) return [];
+  let level: GFile[] = [root];
+  for (let d = 0; d < maxDepth && level.length; d++) {
+    const hits: GFile[] = [], next: GFile[] = [];
+    for (const f of level.slice(0, 40)) {
+      let kids: GFile[];
+      try { kids = (await listChildren(token, f.id)).filter(isFolder); } catch { continue; }
+      for (const k of kids) {
+        const kn = norm(k.name);
+        if (kn === n || kn.includes(n) || (n.length >= 8 && kn.length >= 6 && n.includes(kn))) hits.push(k);
+        else next.push(k);
+      }
+    }
+    if (hits.length) return hits.slice(0, 3);
+    level = next;
+  }
+  return [];
+}
+
+type Entry = { f: GFile; path: string };
+/* Everything inside the folder, all the way down — not just the first level.
+   Bounded so a huge folder can't run the function out of time.              */
+async function walkTree(token: string, root: GFile, basePath: string, maxDepth = 5, maxEntries = 250) {
+  const entries: Entry[] = [];
+  const queue: { f: GFile; path: string; d: number }[] = [{ f: root, path: basePath, d: 0 }];
+  let listed = 0;
+  while (queue.length && entries.length < maxEntries && listed < 70) {
+    const cur = queue.shift()!;
+    let kids: GFile[];
+    try { kids = await listChildren(token, cur.f.id); listed++; } catch { continue; }
+    for (const k of kids) {
+      entries.push({ f: k, path: cur.path });
+      if (isFolder(k) && cur.d + 1 < maxDepth) queue.push({ f: k, path: `${cur.path}${k.name}/`, d: cur.d + 1 });
+    }
+  }
+  return { entries, truncated: queue.length > 0 || entries.length >= maxEntries };
 }
 
 /* Walk up the parent chain so the AI can quote the REAL Drive path
@@ -260,7 +342,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -273,59 +355,89 @@ Deno.serve(async (req) => {
     // ── write action: { action:"write", projectId, fileName, content } ──
     if (body.action === "write") {
       if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
-      const folders = await findFolders(token, String(body.projectId));
+      // Same address as the read side, so writes land in the real project folder.
+      const br = await resolveBranches(token);
+      let folders: GFile[] = [];
+      for (const key of (body.scope === "pcb" ? ["pcb", "pm"] : ["pm", "pcb"])) {
+        const root = br[key as "pm" | "pcb"];
+        if (!root) continue;
+        folders = await findFolderUnder(token, root, String(body.projectId));
+        if (folders.length) break;
+      }
+      if (!folders.length) folders = await findFolders(token, String(body.projectId));
       if (!folders.length) return json({ error: `no Drive folder found for ${body.projectId}` }, 404);
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name });
     }
 
+    // PMs look in Project Management first, engineers in PCB & Firmware —
+    // but both branches are searched either way.
+    const order = body.scope === "pcb" ? ["pcb", "pm"] : ["pm", "pcb"];
+    const branches = await resolveBranches(token);
+    const search = String(body.search || "").trim();
+
     const lines: string[] = [];
     // Every readable file we met, with its full path, so we can read the most
     // useful ones after the whole tree is mapped (not just the first folder's).
-    const candidates: { f: GFile; path: string }[] = [];
+    const candidates: Entry[] = [];
+
+    if (branches.ok) lines.push(`Everything below lives under ${ROOT_PATH}${order[0] === "pcb" ? BRANCH.pcb : BRANCH.pm}/.`);
 
     for (const needle of needles.slice(0, 6)) {
-      const folders = await findFolders(token, needle);
+      // 1. the proper address, 2. the other branch, 3. anywhere in Drive.
+      let folders: GFile[] = [];
+      let where = "";
+      for (const key of order) {
+        const root = branches[key as "pm" | "pcb"];
+        if (!root) continue;
+        folders = await findFolderUnder(token, root, needle);
+        if (folders.length) { where = `${ROOT_PATH}${root.name}/`; break; }
+      }
+      if (!folders.length) { folders = await findFolders(token, needle); where = ""; }
       if (!folders.length) { lines.push(`Nothing found in Drive for ${needle} yet.`); continue; }
+
       for (const folder of folders.slice(0, 2)) {
-        const files = await listChildren(token, folder.id);
-        const path = await folderPath(token, folder);
-        lines.push(`FOLDER ${folder.name} — real Drive path: ${path} (${files.length} items)${folder.webViewLink ? ` · link: ${folder.webViewLink}` : ""}`);
-        for (const f of files.slice(0, 20)) {
-          const kind = isFolder(f) ? "folder" : f.mimeType.split(".").pop();
-          lines.push(`  - ${path}${f.name}${isFolder(f) ? "/" : ""} · ${kind} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
-          if (!isFolder(f)) candidates.push({ f, path });
-        }
-        // one level deeper for sub-folders, so the AI sees the real structure
-        for (const sub of files.filter(isFolder).slice(0, 5)) {
-          try {
-            const kids = await listChildren(token, sub.id);
-            lines.push(`  SUBFOLDER ${path}${sub.name}/ (${kids.length} items):`);
-            for (const k of kids.slice(0, 12)) {
-              lines.push(`    - ${path}${sub.name}/${k.name}${isFolder(k) ? "/" : ""} · ${isFolder(k) ? "folder" : k.mimeType.split(".").pop()} · modified ${String(k.modifiedTime || "").slice(0, 10)}`);
-              if (!isFolder(k)) candidates.push({ f: k, path: `${path}${sub.name}/` });
-            }
-          } catch { /* keep going */ }
+        const base = where || await folderPath(token, folder).then((p) => p.replace(new RegExp(`${folder.name}/$`), ""));
+        const path = `${base}${folder.name}/`;
+        const { entries, truncated } = await walkTree(token, folder, path);
+        const fileCount = entries.filter((e) => !isFolder(e.f)).length;
+        lines.push(`FOLDER ${folder.name} — real Drive path: ${path} · ${fileCount} file(s) in ${entries.filter((e) => isFolder(e.f)).length + 1} folder(s), listed in full below${folder.webViewLink ? ` · link: ${folder.webViewLink}` : ""}`);
+        if (truncated) lines.push(`  (very large folder — the listing below is the first ${entries.length} items)`);
+        for (const e of entries) {
+          lines.push(`  ${e.path}${e.f.name}${isFolder(e.f) ? "/" : ""} · ${isFolder(e.f) ? "folder" : (e.f.mimeType || "").split(".").pop()} · modified ${String(e.f.modifiedTime || "").slice(0, 10)}`);
+          if (!isFolder(e.f)) candidates.push(e);
         }
       }
     }
 
-    // Read what is INSIDE the files, not just their names. Interesting ones
-    // first (checklists, reports, LLDs, BoMs…), then whatever is most recent.
-    const score = (n: string) => (/checklist|status|report|lld|note|bom|spec|minutes|plan|test/i.test(n) ? 0 : 1);
+    // Read what is INSIDE the files, not just their names. Whatever the person
+    // is actually asking about first, then the usual suspects (checklists,
+    // reports, LLDs, BoMs…), then whatever changed most recently. Names are
+    // never consistent, so this never depends on an exact filename.
+    const terms = search.split(/\s+/).map(norm).filter((t) => t.length >= 3);
+    const hit = (n: string) => terms.length > 0 && terms.some((t) => norm(n).includes(t));
+    const score = (e: Entry) => (hit(e.f.name) || hit(e.path) ? 0 : /checklist|status|report|lld|note|bom|spec|minutes|plan|test|review/i.test(e.f.name) ? 1 : 2);
     candidates.sort((a, b) =>
-      score(a.f.name) - score(b.f.name) ||
+      score(a) - score(b) ||
       String(b.f.modifiedTime || "").localeCompare(String(a.f.modifiedTime || "")));
 
+    if (search) {
+      const named = candidates.filter((e) => hit(e.f.name) || hit(e.path));
+      lines.push(named.length
+        ? `Looking for "${search}": ${named.length} file(s) match by name — their contents are below.`
+        : `Looking for "${search}": nothing matches by name, so the most relevant files' contents are below — read them and answer from what is actually in them.`);
+    }
+
     let extracts = 0, tries = 0;
+    const budget = search ? 10 : 8;
     for (const { f, path } of candidates) {
-      if (extracts >= 8 || tries >= 14) break;   // keep well inside the function timeout
+      if (extracts >= budget || tries >= 18) break;   // keep well inside the function timeout
       tries++;
       const txt = await extractText(token, f);
       if (txt) { lines.push(`  CONTENTS OF ${path}${f.name}: """${txt}"""`); extracts++; }
     }
 
-    return json({ ok: true, digest: lines.join("\n").slice(0, 18000) });
+    return json({ ok: true, digest: lines.join("\n").slice(0, 24000), root: branches.ok ? ROOT_PATH : "" });
   } catch (e) {
     // Log it too, so the reason is visible in the function's Logs tab and not
     // only in the response body.
