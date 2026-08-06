@@ -203,9 +203,15 @@ const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
    function explains itself instead of silently degrading. */
 async function driveReadDigest(projectId, linkedIds, opts = {}) {
   if (!DRIVE_READ_URL) return { digest: "", error: "" };
+  if (!projectId && !(linkedIds || []).length) return { digest: "", error: "" };
+  // The reader works to its own 20s budget; give up at 40 so a stalled call
+  // can never leave the page spinning on "Analysing…".
+  const ctrl = new AbortController();
+  const bail = setTimeout(() => ctrl.abort(), 40000);
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
+      signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       // scope picks which branch to look in first; search tells the reader what
       // to hunt for inside the folder, since file names are never consistent.
@@ -219,6 +225,8 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
       const hint = serverMsg
         || (res.status === 401 ? "unauthorized — turn Verify JWT off, or check the token"
           : res.status === 404 ? "function not found — check VITE_DRIVE_READ_URL"
+          : res.status === 504 || res.status === 408 ? "Drive took too long — the folder is very large. Ask about one project or one board at a time."
+          : res.status >= 500 ? `the Drive reader errored (${res.status}) — check the function's Logs`
           : `${res.statusText || "error"} — check the function's Logs`);
       return { digest: "", error: `Drive read failed (${res.status}): ${String(hint).slice(0, 220)}` };
     }
@@ -227,7 +235,10 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
     // just the file list, and that is the whole point of reading Drive.
     return { digest: String(data.digest || "").slice(0, 16000), error: "" };
   } catch (e) {
+    if (e?.name === "AbortError") return { digest: "", error: "Drive took too long to answer — try again, or ask about one project at a time." };
     return { digest: "", error: `Drive unreachable: ${e.message || e}` };
+  } finally {
+    clearTimeout(bail);
   }
 }
 /* Write a file into the project's Drive folder (needs the folder shared with
@@ -491,7 +502,7 @@ The actions, with their fields:
 {"action":"add_scrum_note","text":"the full note in the user's own words","date":"2026-08-05"}
 {"action":"add_memory","title":"Gerber review rule","content":"the full text to remember","type":"instruction"}
 {"action":"assign_training","name":"Ravi","title":"Altium constraint manager","resource":"link or book","due":"2026-08-20"}
-{"action":"read_drive","projectId":"EB-24-001","search":"thermal test"}   (search is optional — it tells the reader what to hunt for inside the folder)
+{"action":"read_drive","projectId":"EB-24-001","search":"thermal test"}   (search tells the reader what to hunt for inside the folder; leave projectId out entirely and it searches every project folder in the company for that term instead)
 {"action":"write_drive_file","projectId":"EB-24-001","fileName":"Milestones.md","content":"the complete file content"}
 {"action":"save_attachment","name":"Datasheet.pdf","projectId":"EB-24-001"}   (puts a file they attached into that project's Drive folder)
 {"action":"create_doc","title":"Kickoff plan","fileName":"Kickoff-Plan.md","content":"the complete document","projectId":"EB-24-001"}   (writes a real document and shows it in the chat as an openable, downloadable card; projectId is optional — include it to also file the doc in that project's Drive folder)
@@ -504,6 +515,7 @@ HOW TO DECIDE
 - If they describe a project that is not in the list, create_project. Use whatever they gave you and sensible defaults for the rest; never refuse for a missing field, and never interrogate them with a list of questions. Ask at most one short question, and only if you truly cannot proceed.
 - If they want to know what is inside a project's files, read_drive for that project first, putting what they are after in "search". The whole folder tree comes back with the text inside the files, and you answer in the same conversation. Read it yourself — never ask them which file to open, and never ask them to send you a file that is already in the folder.
 - If the first look does not have what they need, read_drive again with a different search term before saying you could not find it.
+- When they ask about something across the whole company rather than one project ("find the checklists everywhere", "which projects have a BoM"), use read_drive with just a search term and no projectId. Do that instead of asking them which project they mean.
 - When they ask you to draft, write, prepare or make any document — a plan, checklist, report, minutes, summary, spec — use create_doc with the real, complete content. The document appears right in the chat, where they can open it and download it. Include projectId when it belongs to a project so it is also filed in Drive. Use .md for documents and .csv for tables.
 - write_drive_file is for when a file only needs to exist in Drive; create_doc is better whenever a person is waiting to see the document.
 - When they attach a file: if you can see its contents, use them straight away — summarise it, answer from it, turn it into tasks, remember it, whatever they asked. If they want it kept, save_attachment into the right project. If it is obvious which project it belongs to, just do it; otherwise ask one short question naming the likely projects.
@@ -3292,8 +3304,14 @@ function AssistantModule() {
       }
       case "read_drive": {
         const p = proj(a.projectId);
-        const { digest } = await driveReadDigest(p?.projectId || a.projectId, p?.linkedIds, { scope: driveScope(my?.role), search: a.search || "" });
-        return { line: digest ? "" : `I couldn't open anything in Drive for ${a.projectId} just now.`, drive: digest };
+        const pid = p?.projectId || a.projectId || "";
+        const term = a.search || "";
+        if (!pid && !term.trim()) return { line: "" };
+        const { digest, error } = await driveReadDigest(pid, p?.linkedIds, { scope: driveScope(my?.role), search: term });
+        return {
+          line: digest ? "" : (error || `I couldn't open anything in Drive for ${pid || `"${term}"`} just now.`),
+          drive: digest,
+        };
       }
       case "save_attachment": {
         const want = normId(a.name);

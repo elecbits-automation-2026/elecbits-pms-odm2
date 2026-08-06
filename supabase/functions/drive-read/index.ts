@@ -144,11 +144,39 @@ async function findFolders(token: string, needle: string): Promise<GFile[]> {
   return [];
 }
 
+/* ── TIME BUDGET ───────────────────────────────────────────────────────────
+   A project tree can be arbitrarily large and every listing is a network
+   round trip, so the reader works to a wall clock and returns whatever it has
+   when the time is up. A partial answer in twenty seconds beats a gateway
+   timeout, which is what killed this before.                                */
+const BUDGET_MS = 20000;
+let deadline = Number.MAX_SAFE_INTEGER;
+const outOfTime = () => Date.now() > deadline;
+
+/* Round trips in batches instead of one at a time — the whole reason a big
+   folder used to run past the gateway limit. */
+async function inParallel<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += limit) {
+    if (outOfTime()) break;
+    out.push(...(await Promise.all(items.slice(i, i + limit).map(fn))));
+  }
+  return out;
+}
+
+/* One listing per folder per request — the search and the walk cover the same
+   ground, and listing it twice was pure waste. Cleared on every request. */
+let kidsCache = new Map<string, GFile[]>();
 async function listChildren(token: string, folderId: string): Promise<GFile[]> {
+  const hit = kidsCache.get(folderId);
+  if (hit) return hit;
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   const data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,webViewLink)&pageSize=200&orderBy=folder,modifiedTime desc&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-  return data.files ?? [];
+  const files: GFile[] = data.files ?? [];
+  kidsCache.set(folderId, files);
+  return files;
 }
+const listSafe = (token: string, id: string) => listChildren(token, id).catch(() => [] as GFile[]);
 
 /* ── THE REAL ELECBITS TREE ────────────────────────────────────────────────
    Project folders are not scattered around Drive — they live at a fixed
@@ -186,50 +214,80 @@ async function resolveBranches(token: string) {
     out.pm = await childFolder(token, node.id, BRANCH.pm);
     out.pcb = await childFolder(token, node.id, BRANCH.pcb);
   }
-  branchCache = out;
+  if (out.ok) branchCache = out;   // never cache a lookup that failed or ran out of time
   return out;
 }
 
-/* Find the folder for an ID somewhere under a branch. Level by level, so a
-   folder nested one deeper than expected is still found. */
-async function findFolderUnder(token: string, root: GFile, needle: string, maxDepth = 3): Promise<GFile[]> {
+/* Find the folder for an ID somewhere under a branch. A level at a time, so a
+   folder nested one deeper than expected is still found — but each level goes
+   out in parallel and the breadth is capped, or a wide branch costs minutes. */
+async function findFolderUnder(token: string, root: GFile, needle: string, maxDepth = 2): Promise<GFile[]> {
   const n = norm(needle);
   if (!n || n.length < 3) return [];
   let level: GFile[] = [root];
-  for (let d = 0; d < maxDepth && level.length; d++) {
+  for (let d = 0; d < maxDepth && level.length && !outOfTime(); d++) {
+    const lists = await inParallel(level.slice(0, 12), 8, (f: GFile) => listSafe(token, f.id));
     const hits: GFile[] = [], next: GFile[] = [];
-    for (const f of level.slice(0, 40)) {
-      let kids: GFile[];
-      try { kids = (await listChildren(token, f.id)).filter(isFolder); } catch { continue; }
+    for (const kids of lists) {
       for (const k of kids) {
+        if (!isFolder(k)) continue;
         const kn = norm(k.name);
         if (kn === n || kn.includes(n) || (n.length >= 8 && kn.length >= 6 && n.includes(kn))) hits.push(k);
         else next.push(k);
       }
     }
-    if (hits.length) return hits.slice(0, 3);
+    if (hits.length) return hits.slice(0, 2);
     level = next;
   }
   return [];
 }
 
+/* A search across a whole branch, for "find the checklists across the ODM
+   management folder" — no single project in mind. Drive searches by name
+   globally, so ask it once and keep only what actually lives under our chain,
+   using the cached parent-chain walk to decide.                             */
+async function searchUnder(token: string, rootName: string, term: string, limit = 10): Promise<GFile[]> {
+  const t = term.trim();
+  if (t.length < 3) return [];
+  const q = encodeURIComponent(`name contains '${t.replace(/'/g, "\\'")}' and trashed = false`);
+  let data: any;
+  try {
+    data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,parents,webViewLink)&pageSize=40&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
+  } catch { return []; }
+  const files: GFile[] = (data.files ?? []).filter((f: GFile) => !isFolder(f));
+  const under = await inParallel(files.slice(0, 16), 6, async (f: GFile) => {
+    const path = await folderPath(token, f).catch(() => "");
+    return norm(path).includes(norm(rootName)) ? { ...f, _path: path } as GFile & { _path: string } : null;
+  });
+  return under.filter(Boolean).slice(0, limit) as GFile[];
+}
+
 type Entry = { f: GFile; path: string };
 /* Everything inside the folder, all the way down — not just the first level.
-   Bounded so a huge folder can't run the function out of time.              */
-async function walkTree(token: string, root: GFile, basePath: string, maxDepth = 5, maxEntries = 250) {
+   Level by level and in parallel, bounded by both a listing cap and the wall
+   clock so a huge folder returns a partial tree instead of nothing at all.  */
+async function walkTree(token: string, root: GFile, basePath: string, maxDepth = 4, maxEntries = 200, maxLists = 30) {
   const entries: Entry[] = [];
-  const queue: { f: GFile; path: string; d: number }[] = [{ f: root, path: basePath, d: 0 }];
-  let listed = 0;
-  while (queue.length && entries.length < maxEntries && listed < 70) {
-    const cur = queue.shift()!;
-    let kids: GFile[];
-    try { kids = await listChildren(token, cur.f.id); listed++; } catch { continue; }
-    for (const k of kids) {
-      entries.push({ f: k, path: cur.path });
-      if (isFolder(k) && cur.d + 1 < maxDepth) queue.push({ f: k, path: `${cur.path}${k.name}/`, d: cur.d + 1 });
-    }
+  let level: { f: GFile; path: string }[] = [{ f: root, path: basePath }];
+  let listed = 0, truncated = false;
+  for (let d = 0; d < maxDepth && level.length; d++) {
+    if (outOfTime() || listed >= maxLists || entries.length >= maxEntries) { truncated = true; break; }
+    const batch = level.slice(0, maxLists - listed);
+    if (batch.length < level.length) truncated = true;
+    listed += batch.length;
+    const lists = await inParallel(batch, 8, (nd: { f: GFile; path: string }) => listSafe(token, nd.f.id));
+    const next: { f: GFile; path: string }[] = [];
+    lists.forEach((kids, i) => {
+      const cur = batch[i];
+      for (const k of kids) {
+        if (entries.length >= maxEntries) { truncated = true; break; }
+        entries.push({ f: k, path: cur.path });
+        if (isFolder(k)) next.push({ f: k, path: `${cur.path}${k.name}/` });
+      }
+    });
+    level = next;
   }
-  return { entries, truncated: queue.length > 0 || entries.length >= maxEntries };
+  return { entries, truncated: truncated || level.length > 0 };
 }
 
 /* Walk up the parent chain so the AI can quote the REAL Drive path
@@ -347,7 +405,16 @@ Deno.serve(async (req) => {
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
   const needles = [body.projectId, ...(body.linkedIds ?? [])].filter(Boolean) as string[];
-  if (!needles.length) return json({ error: "projectId required" }, 400);
+  // No project named is a legitimate question ("find the checklists across the
+  // ODM folder") as long as there is something to search for — it used to be a
+  // flat 400.
+  if (!needles.length && !String(body.search || "").trim() && body.action !== "write") {
+    return json({ ok: true, digest: "", note: "no project or search term given" });
+  }
+
+  // Fresh listings and a fresh clock for every request.
+  kidsCache = new Map();
+  deadline = Date.now() + BUDGET_MS;
 
   try {
     const token = await getAccessToken();
@@ -383,7 +450,23 @@ Deno.serve(async (req) => {
 
     if (branches.ok) lines.push(`Everything below lives under ${ROOT_PATH}${order[0] === "pcb" ? BRANCH.pcb : BRANCH.pm}/.`);
 
-    for (const needle of needles.slice(0, 6)) {
+    // No project named — search the whole chain for what they asked about.
+    if (!needles.length) {
+      const hits = await searchUnder(token, ROOT_CHAIN[0], search);
+      if (!hits.length) {
+        lines.push(`Nothing named like "${search}" turned up anywhere under ${ROOT_PATH}.`);
+      } else {
+        lines.push(`Searched the whole of ${ROOT_PATH} for "${search}" — ${hits.length} file(s) match by name:`);
+        for (const f of hits) {
+          const path = (f as GFile & { _path?: string })._path || "";
+          lines.push(`  ${path || f.name} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
+          candidates.push({ f, path: path.replace(new RegExp(`${f.name}/$`), "") });
+        }
+      }
+    }
+
+    for (const needle of needles.slice(0, 4)) {
+      if (outOfTime()) { lines.push(`(stopped early — ${needle} and anything after it were not opened this time)`); break; }
       // 1. the proper address, 2. the other branch, 3. anywhere in Drive.
       let folders: GFile[] = [];
       let where = "";
@@ -428,14 +511,18 @@ Deno.serve(async (req) => {
         : `Looking for "${search}": nothing matches by name, so the most relevant files' contents are below — read them and answer from what is actually in them.`);
     }
 
-    let extracts = 0, tries = 0;
-    const budget = search ? 10 : 8;
-    for (const { f, path } of candidates) {
-      if (extracts >= budget || tries >= 18) break;   // keep well inside the function timeout
-      tries++;
-      const txt = await extractText(token, f);
-      if (txt) { lines.push(`  CONTENTS OF ${path}${f.name}: """${txt}"""`); extracts++; }
+    // Reading a file costs up to three round trips (Office and PDF are copied,
+    // exported and deleted), so the best candidates go out together and the
+    // clock stops the rest.
+    const shortlist = candidates.slice(0, search ? 10 : 8);
+    const texts = await inParallel(shortlist, 4, async (e: Entry) => ({ e, txt: await extractText(token, e.f) }));
+    let extracts = 0;
+    for (const { e, txt } of texts) {
+      if (!txt) continue;
+      lines.push(`  CONTENTS OF ${e.path}${e.f.name}: """${txt}"""`);
+      extracts++;
     }
+    if (outOfTime() && extracts < shortlist.length) lines.push(`(a few more files were not opened this time — ask again about a specific one and I'll read it)`);
 
     return json({ ok: true, digest: lines.join("\n").slice(0, 24000), root: branches.ok ? ROOT_PATH : "" });
   } catch (e) {
