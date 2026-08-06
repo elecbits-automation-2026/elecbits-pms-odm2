@@ -187,6 +187,9 @@ const listSafe = (token: string, id: string) => listChildren(token, id).catch(()
    PMs work out of the first branch, engineers out of the second; both are
    reachable either way, only the order of looking changes.                  */
 const ROOT_CHAIN = ["Eb-02-ODM", "Eb-ODM Execution", "Engineering Services"];
+/* Preferred starting points, by who is asking. These are hints for the ORDER
+   of looking, not the whole list — real work also sits in sibling folders like
+   Eb-Hardware, so every child of Engineering Services is searched. */
 const BRANCH: Record<string, string> = { pm: "Project Management", pcb: "PCB & Firmware" };
 const ROOT_PATH = "/" + ROOT_CHAIN.join("/") + "/";
 
@@ -202,44 +205,80 @@ async function childFolder(token: string, parentId: string, name: string): Promi
     || null;
 }
 
-/* Resolved once per warm instance — the IDs don't move. */
-let branchCache: { pm: GFile | null; pcb: GFile | null; ok: boolean } | null = null;
+/* Resolved once per warm instance — the IDs don't move.
+   `all` is every folder directly under Engineering Services, because project
+   work is not only in the two obvious ones: board folders live under
+   Eb-Hardware, firmware under its own, and new ones appear over time. Naming
+   two branches and hoping was why boards came back empty.                    */
+let branchCache: { pm: GFile | null; pcb: GFile | null; all: GFile[]; ok: boolean } | null = null;
 async function resolveBranches(token: string) {
   if (branchCache) return branchCache;
   const top = await searchFolders(token, ROOT_CHAIN[0]);
   let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
   for (let i = 1; node && i < ROOT_CHAIN.length; i++) node = await childFolder(token, node.id, ROOT_CHAIN[i]);
-  const out = { pm: null as GFile | null, pcb: null as GFile | null, ok: !!node };
+  const out = { pm: null as GFile | null, pcb: null as GFile | null, all: [] as GFile[], ok: !!node };
   if (node) {
-    out.pm = await childFolder(token, node.id, BRANCH.pm);
-    out.pcb = await childFolder(token, node.id, BRANCH.pcb);
+    out.all = (await listSafe(token, node.id)).filter(isFolder);
+    const pick = (name: string) => {
+      const n = norm(name);
+      return out.all.find((k) => norm(k.name) === n) || out.all.find((k) => norm(k.name).includes(n)) || null;
+    };
+    out.pm = pick(BRANCH.pm);
+    out.pcb = pick(BRANCH.pcb);
   }
   if (out.ok) branchCache = out;   // never cache a lookup that failed or ran out of time
+  return out;
+}
+/* Where to look, in order: the asker's usual branch, then the other named one,
+   then every other branch under Engineering Services. */
+function searchOrder(branches: { pm: GFile | null; pcb: GFile | null; all: GFile[] }, scope: string): GFile[] {
+  const first = scope === "pcb" ? [branches.pcb, branches.pm] : [branches.pm, branches.pcb];
+  const seen = new Set<string>();
+  const out: GFile[] = [];
+  for (const f of [...first, ...branches.all]) {
+    if (f && !seen.has(f.id)) { seen.add(f.id); out.push(f); }
+  }
   return out;
 }
 
 /* Find the folder for an ID somewhere under a branch. A level at a time, so a
    folder nested one deeper than expected is still found — but each level goes
    out in parallel and the breadth is capped, or a wide branch costs minutes. */
-async function findFolderUnder(token: string, root: GFile, needle: string, maxDepth = 2): Promise<GFile[]> {
+/* How well a folder name answers to an ID. Lower is better:
+     0 the same name          1 the folder name contains the ID
+     2 the ID contains the folder name — a last resort, because a board ID like
+       <project>-PCB "contains" its parent project folder's name and would
+       otherwise swallow the search before the real board folder is reached. */
+function matchRank(folderName: string, n: string): number {
+  const kn = norm(folderName);
+  if (kn === n) return 0;
+  if (kn.includes(n)) return 1;
+  if (n.length >= 8 && kn.length >= 6 && n.includes(kn)) return 2;
+  return 9;
+}
+
+async function findFolderUnder(token: string, root: GFile, needle: string, maxDepth = 2): Promise<{ hits: GFile[]; rank: number }> {
   const n = norm(needle);
-  if (!n || n.length < 3) return [];
+  if (!n || n.length < 3) return { hits: [], rank: 9 };
   let level: GFile[] = [root];
   for (let d = 0; d < maxDepth && level.length && !outOfTime(); d++) {
     const lists = await inParallel(level.slice(0, 12), 8, (f: GFile) => listSafe(token, f.id));
-    const hits: GFile[] = [], next: GFile[] = [];
+    const scored: { f: GFile; r: number }[] = [], next: GFile[] = [];
     for (const kids of lists) {
       for (const k of kids) {
         if (!isFolder(k)) continue;
-        const kn = norm(k.name);
-        if (kn === n || kn.includes(n) || (n.length >= 8 && kn.length >= 6 && n.includes(kn))) hits.push(k);
+        const r = matchRank(k.name, n);
+        if (r < 9) scored.push({ f: k, r });
         else next.push(k);
       }
     }
-    if (hits.length) return hits.slice(0, 2);
+    if (scored.length) {
+      scored.sort((a, b) => a.r - b.r);
+      return { hits: scored.slice(0, 2).map((x) => x.f), rank: scored[0].r };
+    }
     level = next;
   }
-  return [];
+  return { hits: [], rank: 9 };
 }
 
 /* A search across a whole branch, for "find the checklists across the ODM
@@ -422,25 +461,29 @@ Deno.serve(async (req) => {
     // ── write action: { action:"write", projectId, fileName, content } ──
     if (body.action === "write") {
       if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
-      // Same address as the read side, so writes land in the real project folder.
+      // Same address, and the same best-match rule, as the read side — so a
+      // file lands in the folder the reader is actually looking at.
       const br = await resolveBranches(token);
       let folders: GFile[] = [];
-      for (const key of (body.scope === "pcb" ? ["pcb", "pm"] : ["pm", "pcb"])) {
-        const root = br[key as "pm" | "pcb"];
-        if (!root) continue;
-        folders = await findFolderUnder(token, root, String(body.projectId));
-        if (folders.length) break;
+      let best = 9;
+      for (const root of searchOrder(br, String(body.scope || "pm"))) {
+        if (outOfTime()) break;
+        const { hits, rank } = await findFolderUnder(token, root, String(body.projectId));
+        if (hits.length && rank < best) { best = rank; folders = hits; }
+        if (best === 0) break;
       }
       if (!folders.length) folders = await findFolders(token, String(body.projectId));
-      if (!folders.length) return json({ error: `no Drive folder found for ${body.projectId}` }, 404);
+      if (!folders.length) {
+        return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — check the folder is shared with the service account` }, 404);
+      }
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name });
     }
 
     // PMs look in Project Management first, engineers in PCB & Firmware —
     // but both branches are searched either way.
-    const order = body.scope === "pcb" ? ["pcb", "pm"] : ["pm", "pcb"];
     const branches = await resolveBranches(token);
+    const order = searchOrder(branches, String(body.scope || "pm"));
     const search = String(body.search || "").trim();
 
     const lines: string[] = [];
@@ -448,7 +491,7 @@ Deno.serve(async (req) => {
     // useful ones after the whole tree is mapped (not just the first folder's).
     const candidates: Entry[] = [];
 
-    if (branches.ok) lines.push(`Everything below lives under ${ROOT_PATH}${order[0] === "pcb" ? BRANCH.pcb : BRANCH.pm}/.`);
+    if (branches.ok) lines.push(`Looked under ${ROOT_PATH} — across ${order.map((f) => f.name).join(", ") || "its folders"}.`);
 
     // No project named — search the whole chain for what they asked about.
     if (!needles.length) {
@@ -465,32 +508,44 @@ Deno.serve(async (req) => {
       }
     }
 
-    for (const needle of needles.slice(0, 4)) {
+    // Each ID gets its own section with its own share of the digest, so a big
+    // project folder can never crowd the linked boards out of the answer.
+    const wanted = needles.slice(0, 4);
+    const perSection = Math.floor(13000 / Math.max(1, wanted.length));
+
+    for (const needle of wanted) {
       if (outOfTime()) { lines.push(`(stopped early — ${needle} and anything after it were not opened this time)`); break; }
-      // 1. the proper address, 2. the other branch, 3. anywhere in Drive.
+      // The asker's branch, then the others, then anywhere in Drive.
+      // Search every branch and keep the BEST match, not the first one found.
+      // A board ID loosely resembles its parent project folder, so stopping at
+      // the first branch used to hand back the project instead of the board.
       let folders: GFile[] = [];
       let where = "";
-      for (const key of order) {
-        const root = branches[key as "pm" | "pcb"];
-        if (!root) continue;
-        folders = await findFolderUnder(token, root, needle);
-        if (folders.length) { where = `${ROOT_PATH}${root.name}/`; break; }
+      let best = 9;
+      for (const root of order) {
+        if (outOfTime()) break;
+        const { hits, rank } = await findFolderUnder(token, root, needle);
+        if (hits.length && rank < best) { best = rank; folders = hits; where = `${ROOT_PATH}${root.name}/`; }
+        if (best === 0) break;                       // an exact name; nothing will beat it
       }
       if (!folders.length) { folders = await findFolders(token, needle); where = ""; }
       if (!folders.length) { lines.push(`Nothing found in Drive for ${needle} yet.`); continue; }
 
+      const section: string[] = [];
       for (const folder of folders.slice(0, 2)) {
         const base = where || await folderPath(token, folder).then((p) => p.replace(new RegExp(`${folder.name}/$`), ""));
         const path = `${base}${folder.name}/`;
         const { entries, truncated } = await walkTree(token, folder, path);
         const fileCount = entries.filter((e) => !isFolder(e.f)).length;
-        lines.push(`FOLDER ${folder.name} — real Drive path: ${path} · ${fileCount} file(s) in ${entries.filter((e) => isFolder(e.f)).length + 1} folder(s), listed in full below${folder.webViewLink ? ` · link: ${folder.webViewLink}` : ""}`);
-        if (truncated) lines.push(`  (very large folder — the listing below is the first ${entries.length} items)`);
+        section.push(`FOLDER ${folder.name} — real Drive path: ${path} · ${fileCount} file(s) in ${entries.filter((e) => isFolder(e.f)).length + 1} folder(s), listed in full below${folder.webViewLink ? ` · link: ${folder.webViewLink}` : ""}`);
+        if (truncated) section.push(`  (very large folder — the listing below is the first ${entries.length} items)`);
         for (const e of entries) {
-          lines.push(`  ${e.path}${e.f.name}${isFolder(e.f) ? "/" : ""} · ${isFolder(e.f) ? "folder" : (e.f.mimeType || "").split(".").pop()} · modified ${String(e.f.modifiedTime || "").slice(0, 10)}`);
+          section.push(`  ${e.path}${e.f.name}${isFolder(e.f) ? "/" : ""} · ${isFolder(e.f) ? "folder" : (e.f.mimeType || "").split(".").pop()} · modified ${String(e.f.modifiedTime || "").slice(0, 10)}`);
           if (!isFolder(e.f)) candidates.push(e);
         }
       }
+      const text = section.join("\n");
+      lines.push(text.length > perSection ? `${text.slice(0, perSection)}\n  (…rest of this folder's listing trimmed to leave room for the others)` : text);
     }
 
     // Read what is INSIDE the files, not just their names. Whatever the person
@@ -514,7 +569,23 @@ Deno.serve(async (req) => {
     // Reading a file costs up to three round trips (Office and PDF are copied,
     // exported and deleted), so the best candidates go out together and the
     // clock stops the rest.
-    const shortlist = candidates.slice(0, search ? 10 : 8);
+    // Round-robin by folder so every ID gets at least one file read — sorting
+    // alone let one busy project take every slot.
+    const byFolder = new Map<string, Entry[]>();
+    for (const e of candidates) {
+      const key = e.path.split("/").slice(0, 6).join("/");
+      byFolder.set(key, [...(byFolder.get(key) || []), e]);
+    }
+    const shortlist: Entry[] = [];
+    const budget = search ? 10 : 8;
+    for (let round = 0; shortlist.length < budget; round++) {
+      let added = false;
+      for (const list of byFolder.values()) {
+        if (shortlist.length >= budget) break;
+        if (list[round]) { shortlist.push(list[round]); added = true; }
+      }
+      if (!added) break;
+    }
     const texts = await inParallel(shortlist, 4, async (e: Entry) => ({ e, txt: await extractText(token, e.f) }));
     let extracts = 0;
     for (const { e, txt } of texts) {

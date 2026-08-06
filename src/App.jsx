@@ -231,9 +231,10 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
       return { digest: "", error: `Drive read failed (${res.status}): ${String(hint).slice(0, 220)}` };
     }
     if (data.error) return { digest: "", error: `Drive read: ${data.error}` };
-    // Generous cap: the digest now carries the text inside the documents, not
-    // just the file list, and that is the whole point of reading Drive.
-    return { digest: String(data.digest || "").slice(0, 16000), error: "" };
+    // No second truncation here — the reader already budgets the digest per
+    // folder. Cutting it again dropped whatever came last, which is why linked
+    // board folders kept looking empty.
+    return { digest: String(data.digest || ""), error: "" };
   } catch (e) {
     if (e?.name === "AbortError") return { digest: "", error: "Drive took too long to answer — try again, or ask about one project at a time." };
     return { digest: "", error: `Drive unreachable: ${e.message || e}` };
@@ -245,18 +246,33 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
    the service account as Editor). Plain text by default; pass base64 + a mime
    type to push a real binary — a PDF, a spec sheet, a photo of a board.
    Returns true on success. */
+/* Returns true on success, or a short human reason on failure — a blanket
+   "Drive isn't reachable" hid real causes like a folder that isn't shared. */
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
-  if (!DRIVE_READ_URL || !projectId || !fileName) return false;
+  if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
+  if (!projectId || !fileName) return "I need a project and a file name to save it.";
+  const ctrl = new AbortController();
+  const bail = setTimeout(() => ctrl.abort(), 40000);
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
+      signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
-    const data = await res.json();
-    return !!(res.ok && data.ok);
-  } catch { return false; }
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) return true;
+    const why = data.error || data.message || `${res.status} ${res.statusText || ""}`.trim();
+    return String(why).slice(0, 180);
+  } catch (e) {
+    return e?.name === "AbortError" ? "Drive took too long to answer." : `Drive unreachable: ${e.message || e}`;
+  } finally {
+    clearTimeout(bail);
+  }
 }
+/* Every caller wants the same shape: did it save, and if not, why. */
+const saveResult = (r, fileName, where) =>
+  r === true ? `Saved ${fileName} into the ${where} folder in Drive.` : `Couldn't save ${fileName} — ${r}`;
 
 /* ── ATTACHMENTS ───────────────────────────────────────────────────────────
    Anything the user drops into a chat. Text-ish files are read straight in so
@@ -274,12 +290,34 @@ const readAttachment = (file) => new Promise((resolve) => {
     r.onerror = () => resolve({ ...base, failed: true });
     r.readAsText(file);
   } else {
-    r.onload = () => resolve({ ...base, b64: String(r.result).split(",")[1] || "" });
+    r.onload = () => {
+      const url = String(r.result);
+      resolve({ ...base, b64: url.split(",")[1] || "", ...(/^image\//.test(base.mime) ? { preview: url } : {}) });
+    };
     r.onerror = () => resolve({ ...base, failed: true });
     r.readAsDataURL(file);
   }
 });
 const kb = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+/* A screenshot pasted straight into a chat arrives as a nameless blob — give
+   it a real name so it can be filed in Drive like any other attachment. */
+const filesFromPaste = (e) => {
+  const items = [...(e.clipboardData?.items || [])];
+  const out = [];
+  let n = 0;
+  for (const it of items) {
+    if (it.kind !== "file") continue;
+    const f = it.getAsFile();
+    if (!f) continue;
+    // Chrome hands every pasted screenshot the same name ("image.png"), so a
+    // second one would quietly replace the first in Drive. Stamp them instead.
+    if (/^image\//.test(f.type)) {
+      const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg").replace("svg+xml", "svg");
+      out.push(new File([f], `pasted-image-${todayStr()}-${nowHM().replace(":", "")}${n++ ? `-${n}` : ""}.${ext}`, { type: f.type }));
+    } else out.push(f);
+  }
+  return out;
+};
 /* Shared by every chat's paperclip button and drop zone. */
 const pickAttachments = async (fileList, setAtts, toast) => {
   const files = [...(fileList || [])].slice(0, 5);
@@ -311,7 +349,9 @@ const attachCtx = (atts, fresh = true) => !atts?.length ? "" : `\n${fresh ? "FIL
   ? `- ${a.name} (${kb(a.size)}) — too big to open here; ask them to put it in the project folder instead.`
   : a.text != null
     ? `- ${a.name} (${kb(a.size)}), contents:\n"""${a.text}"""`
-    : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. You have not stored it anywhere yet. If it belongs in a project folder, use save_attachment with that project's ID, and after it is saved you can read what is inside it.`).join("\n")}\n`;
+    : /^image\//.test(a.mime)
+      ? `- ${a.name} (${kb(a.size)}) — an image or screenshot they pasted in. You cannot see the picture itself, so do not describe or guess at what is in it. Ask them in one short line what it shows, or file it where they want with save_attachment. Never pretend to have read it.`
+      : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. You have not stored it anywhere yet. If it belongs in a project folder, use save_attachment with that project's ID, and after it is saved you can read what is inside it.`).join("\n")}\n`;
 /* Tries the proxy first (key stays server-side), then the direct browser key —
    so a configured-but-undeployed proxy no longer silently kills live AI. */
 async function claude(prompt, { json = true } = {}) {
@@ -562,6 +602,8 @@ const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers an
 - You CAN read what is inside the files, including Word documents, PDFs, spreadsheets and presentations. Their text is given to you below whenever it was available. Use it.
 - If something you need genuinely is not in front of you, just do the most useful thing you can with what you have, and if you must, ask one short ordinary question ("Which board are you asking about?"). Never turn it into an explanation of the system.
 - Never use the words: metadata, capability, limitation, access, permission, integration, API, fetch, index, schema, structure convention.
+- NEVER speculate about why you don't see something. No "they might be empty", no "they might not have loaded yet", no "want me to check again?". If a folder's contents are not in front of you, look again yourself with a search term for what they asked about — that is your job, not theirs.
+- Never ask the user to confirm that you should go and look. Just look.
 - If you searched and found things, simply say what you found, in normal words: "I looked in the FMS-200 folder and found 12 files. The latest is..."
 - If you truly could not find something, say it kindly in one line and offer the closest thing you did find, or ask one simple question. Never blame the user or their naming.
 - Answer the question first, in the first sentence. Details after. Under 150 words unless asked for more.
@@ -1362,7 +1404,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       if (digest) toast("Analysed with live Drive contents", "green");
       // Push the analysis back into the project folder so the team sees it in Drive.
       const wrote = await driveWriteFile(p.projectId, `${todayStr()}_AI-status-analysis.txt`, `Elecbits ODM — AI status analysis\nProject ${p.projectId} · ${p.name || ""}\nGenerated ${new Date().toISOString()}\n\n${txt}\n`);
-      if (wrote) sheetSync(`${pmPath(p.projectId)}`, `AI status analysis written to Drive`);
+      if (wrote === true) sheetSync(`${pmPath(p.projectId)}`, `AI status analysis written to Drive`);
     }
     catch { setIntel(fallbackIntel(p)); toast("AI offline — showing what we have", "amber"); }
     setIntelBusy(false);
@@ -1410,10 +1452,10 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     const results = []; const docs = [];
     for (const [, rawName, content] of writes) {
       const fileName = rawName.trim().replace(/[\\/:*?"<>|]/g, "-");
-      const ok = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
-      results.push(ok ? `Saved ${fileName} to the project folder in Drive.` : `Couldn't save ${fileName} — Drive isn't connected right now.`);
-      docs.push({ title: fileName, fileName, content: String(content).slice(0, 12000), savedTo: ok ? p.projectId : "" });
-      if (ok) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from project chat`);
+      const r = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
+      results.push(saveResult(r, fileName, p.projectId));
+      docs.push({ title: fileName, fileName, content: String(content).slice(0, 12000), savedTo: r === true ? p.projectId : "" });
+      if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from project chat`);
     }
     for (const [, rawName] of saves) {
       const want = normId(rawName);
@@ -1424,9 +1466,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
         || (pool.length === 1 ? pool[0] : null);
       if (!f) { results.push(`I'm not sure which file you meant — attach it again and I'll keep it.`); continue; }
       if (f.tooBig || f.failed) { results.push(`Couldn't save ${f.name} — attach it again and I'll keep it.`); continue; }
-      const ok = await saveAttachmentToDrive(f, p.projectId, driveScope(my?.role));
-      results.push(ok ? `Saved ${f.name} to the project folder in Drive.` : `Couldn't save ${f.name} — Drive isn't connected right now.`);
-      if (ok) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from project chat`);
+      const r = await saveAttachmentToDrive(f, p.projectId, driveScope(my?.role));
+      results.push(saveResult(r, f.name, p.projectId));
+      if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from project chat`);
     }
     if (results.length) {
       clean = [clean, results.join("\n")].filter(Boolean).join("\n\n");
@@ -1604,7 +1646,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => { e.preventDefault(); pickAttachments(e.dataTransfer?.files, setChatAtts, toast); }}>
               <ClipButton fileRef={chatFileRef} onPick={(fs) => pickAttachments(fs, setChatAtts, toast)} />
-              <input className="inp" style={{ flex: 1 }} placeholder={chatAtts.length ? "What should I do with it?" : "Ask about deep details — deadlines, load, risks, next moves…"} value={chatVal} onChange={(e) => setChatVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendChat()} />
+              <input className="inp" style={{ flex: 1 }} placeholder={chatAtts.length ? "What should I do with it?" : "Ask about deep details — or paste a screenshot"} value={chatVal} onChange={(e) => setChatVal(e.target.value)} onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setChatAtts, toast); } }} onKeyDown={(e) => e.key === "Enter" && sendChat()} />
               <Btn title="Send" icon={chatBusy ? Loader2 : Send} disabled={chatBusy || (!chatVal.trim() && !chatAtts.length)} onClick={sendChat} style={{ width: 44, padding: 0 }}> </Btn>
             </div>
           </Section>
@@ -2137,7 +2179,7 @@ function CompleteFlow({ t, onClose }) {
       // Write the closure record into the project's Drive folder as evidence.
       driveWriteFile(t.projectId, `${todayStr()}_closure_${String(t.title).slice(0, 40).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.txt`,
         `Elecbits ODM — task closure record\nProject: ${t.projectId}\nTask: ${t.title}\nClosed: ${new Date().toISOString()}\nAI verdict: ${verdict.verdict} (${verdict.score}/10)\nFeedback: ${verdict.feedback}\n\nWork log\n  What was done: ${work.whatDone || "—"}\n  File produced: ${work.fileName || "—"}\n  Stored at: ${work.fileLocation || "—"}\n\nVerification Q&A\n${qs.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}\n`
-      ).then((ok) => { if (ok) sheetSync(`${pmPath(t.projectId)}`, `Closure record written to Drive`); });
+      ).then((r) => { if (r === true) sheetSync(`${pmPath(t.projectId)}`, `Closure record written to Drive`); });
     }
     applyEsc();
     toast(`Task closed — ${verdict.score}/10`, "green");
@@ -2956,14 +2998,17 @@ function DocCard({ doc }) {
   );
 }
 
-/* The chips row above a chat input showing what is about to be sent. */
+/* The chips row above a chat input showing what is about to be sent.
+   Images get a thumbnail so a pasted screenshot is recognisable. */
 function AttachStrip({ atts, setAtts }) {
   if (!atts.length) return null;
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 0 0" }}>
       {atts.map((a) => (
-        <span key={a.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 7px 4px 10px", borderRadius: 8, border: `1px solid ${a.tooBig ? "var(--amber)" : "var(--bdr2)"}`, background: "var(--s2)", fontSize: 11.5 }}>
-          <FileText size={11} style={{ color: a.tooBig ? "var(--amber)" : "var(--acc)" }} />
+        <span key={a.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 7px 4px 6px", borderRadius: 8, border: `1px solid ${a.tooBig ? "var(--amber)" : "var(--bdr2)"}`, background: "var(--s2)", fontSize: 11.5 }}>
+          {a.preview
+            ? <img src={a.preview} alt="" style={{ width: 26, height: 26, borderRadius: 5, objectFit: "cover", display: "block" }} />
+            : <FileText size={11} style={{ color: a.tooBig ? "var(--amber)" : "var(--acc)", marginLeft: 4 }} />}
           <span style={{ fontWeight: 600, maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.name}</span>
           <span style={{ color: "var(--txt3)", fontSize: 10.5 }}>{a.tooBig ? "too big" : a.text != null ? "readable" : kb(a.size)}</span>
           <button onClick={() => setAtts((x) => x.filter((y) => y.id !== a.id))} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 1 }}><X size={12} /></button>
@@ -3056,8 +3101,8 @@ function WorkspaceChat() {
         const f = (want && (usable.find((x) => normId(x.name) === want) || usable.find((x) => normId(x.name).includes(want) || want.includes(normId(x.name)))))
           || (usable.length === 1 ? usable[0] : null);
         if (!f) { results.push(`You have ${usable.length} files here — tell me which one goes into ${proj.projectId} and I'll file it.`); continue; }
-        const ok = await saveAttachmentToDrive(f, proj.projectId, driveScope(my?.role));
-        results.push(ok ? `Saved ${f.name} into the ${proj.projectId} folder in Drive.` : `Couldn't save ${f.name} — Drive isn't reachable right now.`);
+        const r = await saveAttachmentToDrive(f, proj.projectId, driveScope(my?.role));
+        results.push(saveResult(r, f.name, proj.projectId));
       }
       clean = [clean, results.join("\n")].filter(Boolean).join("\n\n");
       if (results.some((r) => r.startsWith("Saved"))) toast("Saved to Drive", "green");
@@ -3108,7 +3153,7 @@ function WorkspaceChat() {
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => { e.preventDefault(); pickAttachments(e.dataTransfer?.files, setAtts, toast); }}>
         <ClipButton fileRef={fileRef} onPick={(fs) => pickAttachments(fs, setAtts, toast)} />
-        <input className="inp" style={{ flex: 1 }} placeholder={atts.length ? "What should I do with it?" : "Ask anything…"} value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+        <input className="inp" style={{ flex: 1 }} placeholder={atts.length ? "What should I do with it?" : "Ask anything, or paste a screenshot…"} value={val} onChange={(e) => setVal(e.target.value)} onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setAtts, toast); } }} onKeyDown={(e) => e.key === "Enter" && send()} />
         <Btn icon={busy ? Loader2 : Send} disabled={busy || (!val.trim() && !atts.length)} onClick={() => send()} style={{ width: 42, padding: 0 }} title="Send"> </Btn>
       </div>
     </div>
@@ -3322,33 +3367,36 @@ function AssistantModule() {
         if (f.tooBig || f.failed) return { line: `${f.name} is too big for me to handle here.` };
         const p = proj(a.projectId);
         if (!p) return { line: `I couldn't find a project called ${a.projectId} to put ${f.name} in.` };
-        const ok = await saveAttachmentToDrive(f, p.projectId, driveScope(my?.role));
-        if (ok) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from the assistant`);
-        return { line: ok ? `Saved ${f.name} into the ${p.projectId} folder in Drive.` : `Couldn't save ${f.name} — Drive isn't reachable right now.` };
+        const r = await saveAttachmentToDrive(f, p.projectId, driveScope(my?.role));
+        if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from the assistant`);
+        return { line: saveResult(r, f.name, p.projectId) };
       }
       case "write_drive_file": {
         const p = proj(a.projectId);
         const fileName = String(a.fileName || "note.md").replace(/[\\/:*?"<>|]/g, "-");
         const content = String(a.content || "");
-        const ok = await driveWriteFile(p?.projectId || a.projectId, fileName, content, { scope: driveScope(my?.role) });
-        if (ok && p) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from the assistant`);
+        const r = await driveWriteFile(p?.projectId || a.projectId, fileName, content, { scope: driveScope(my?.role) });
+        if (r === true && p) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from the assistant`);
         return {
-          line: ok ? `Saved ${fileName} into the ${p?.projectId || a.projectId} folder in Drive.` : `Couldn't save ${fileName} — Drive isn't reachable right now.`,
-          doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: ok ? (p?.projectId || a.projectId) : "" },
+          line: saveResult(r, fileName, p?.projectId || a.projectId),
+          doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: r === true ? (p?.projectId || a.projectId) : "" },
         };
       }
       case "create_doc": {
         const fileName = String(a.fileName || (a.title ? `${String(a.title).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.md` : "document.md")).replace(/[\\/:*?"<>|]/g, "-");
         const content = String(a.content || "");
         if (!content.trim()) return { line: "" };
-        let savedTo = "";
+        let savedTo = "", why = "";
         const p = a.projectId ? proj(a.projectId) : null;
         if (p) {
-          const ok = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
-          if (ok) { savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} created from the assistant`); }
+          const r = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
+          if (r === true) { savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} created from the assistant`); }
+          else why = String(r);
         }
         return {
-          line: savedTo ? `Created ${fileName} — it's below, and filed in ${savedTo}'s Drive folder.` : `Created ${fileName} — it's below. Open it or download it.`,
+          line: savedTo ? `Created ${fileName} — it's below, and filed in ${savedTo}'s Drive folder.`
+            : why ? `Created ${fileName} — it's below. It didn't reach Drive though: ${why}`
+            : `Created ${fileName} — it's below. Open it or download it.`,
           doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo },
         };
       }
@@ -3503,7 +3551,7 @@ function AssistantModule() {
           onDrop={(e) => { e.preventDefault(); pickFiles(e.dataTransfer?.files); }}
           style={{ padding: 13, borderTop: "1px solid var(--bdr)", display: "flex", gap: 9, alignItems: "center" }}>
           <ClipButton fileRef={fileRef} onPick={pickFiles} />
-          <input className="inp" style={{ flex: 1 }} placeholder={atts.length ? "What should I do with it?" : "e.g. create project EB-26-014 for Acme, due 30 Sep, Saurav as PM"} value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
+          <input className="inp" style={{ flex: 1 }} placeholder={atts.length ? "What should I do with it?" : "Type, or paste a screenshot — e.g. create project EB-26-014 for Acme, due 30 Sep"} value={val} onChange={(e) => setVal(e.target.value)} onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickFiles(fs); } }} onKeyDown={(e) => e.key === "Enter" && send()} />
           <Btn icon={busy ? Loader2 : Send} disabled={busy || (!val.trim() && !atts.length)} onClick={() => send()}>{busy ? "Working…" : "Send"}</Btn>
         </div>
       </div>
