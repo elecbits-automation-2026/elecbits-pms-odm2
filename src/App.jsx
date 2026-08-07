@@ -33,7 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
-import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, signInWithProvider, oauthReturnError, fetchProfiles } from "./lib/auth.js";
+import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -5048,16 +5048,6 @@ const Shell = ({ dark, children }) => (
    login (any credentials, or pick a role) when it isn't. Always the front door. */
 const SAMPLE_LOGIN = { email: "saurav@elecbits.in", pw: "Elecbits@2026" };
 
-/* Google's mark, inline — the login page must not reach out to a CDN for it. */
-const GoogleMark = () => (
-  <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true" style={{ flexShrink: 0 }}>
-    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.6 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6.1C12.3 13.2 17.7 9.5 24 9.5z" />
-    <path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.1 5.5c4.2-3.8 6.6-9.5 6.6-16.2z" />
-    <path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-2.9-.8-4.5s.3-3.1.8-4.5l-7.8-6.1C1 16.7 0 20.2 0 24s1 7.3 2.6 10.4l7.8-5.7z" />
-    <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.6 2.1-8.8 2.1-6.3 0-11.7-3.7-13.6-9.1l-7.8 5.7C6.5 42.6 14.6 48 24 48z" />
-  </svg>
-);
-
 /* One door, not two.
    Asking somebody to know in advance whether they are "signing in" or
    "creating an account" is asking them a question only the database can
@@ -5079,22 +5069,6 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
   const [msg, setMsg] = useState("");
   const [wrongPw, setWrongPw] = useState(false);   // offer the reset only once it is the likely problem
   const [sent, setSent] = useState(false);
-  const [oauthBusy, setOauthBusy] = useState(false);
-
-  // If Google bounced us, say why instead of showing a blank login screen.
-  useEffect(() => { const e = oauthReturnError(); if (e) setErr(e); }, []);
-
-  const withGoogle = async () => {
-    setErr(""); setMsg(""); setOauthBusy(true);
-    try { await signInWithProvider("google"); }   // leaves the page
-    catch (e) {
-      setOauthBusy(false);
-      const m = e?.message || "";
-      setErr(/provider is not enabled|unsupported/i.test(m)
-        ? "Google sign-in isn't switched on for this workspace yet — an admin enables it in Supabase → Authentication → Providers."
-        : m || "Couldn't start Google sign-in.");
-    }
-  };
 
   const netErr = (m) => /failed to fetch|networkerror|load failed|fetch/i.test(m);
 
@@ -5186,23 +5160,11 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 24 }}>
           <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 38), marginBottom: 10 }} />
           <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 3 }}>{demo ? "Sign in to continue" : "Sign in, or sign up — same box"}</div>
         </div>
 
-        {!demo && (<>
-          <button onClick={withGoogle} disabled={oauthBusy || busy}
-            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "11px 14px", borderRadius: 10, border: "1px solid var(--bdr2)", background: "var(--s1)", color: "var(--txt)", fontSize: 13.5, fontWeight: 600, cursor: oauthBusy || busy ? "default" : "pointer", opacity: oauthBusy || busy ? 0.6 : 1 }}>
-            {oauthBusy ? <Loader2 size={17} className="spin" /> : <GoogleMark />}
-            {oauthBusy ? "Taking you to Google…" : "Continue with Google"}
-          </button>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0" }}>
-            <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
-            <span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or with your email</span>
-            <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
-          </div>
-        </>)}
-
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <Field label="Work email"><input className="inp" type="email" autoFocus={demo} autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
+          <Field label="Work email"><input className="inp" type="email" autoFocus autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
           <Field label="Password"><input className="inp" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
           {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, lineHeight: 1.5 }}>{err}</div>}
           {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600, lineHeight: 1.5 }}>{msg}</div>}
