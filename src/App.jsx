@@ -37,6 +37,14 @@ import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
+/* Roster ids go into a uuid column in Postgres, so they have to BE uuids —
+   a short generated id was silently rejected and the resource never saved. */
+const uuid = () => (globalThis.crypto?.randomUUID
+  ? globalThis.crypto.randomUUID()
+  : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+    }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const nowHM = () => new Date().toTimeString().slice(0, 5);
@@ -744,6 +752,21 @@ const planPatchResult = (plan, patch) => {
     touched.push(`${before.name}: ${bits.join(", ") || "updated"}`);
   }
   return { stages, touched };
+};
+
+/* Why a roster write bounced, in words a PM can act on. The two that actually
+   happen are the schema not being migrated yet and RLS refusing the insert. */
+const rosterFailure = (err) => {
+  const m = String(err?.message || err || "");
+  if (/foreign key|auth\.users|profiles_id_fkey/i.test(m))
+    return "Saved here only — the database still requires everyone to have a login first. Run supabase/fix-resource-creation.sql and add them again.";
+  if (/invalid input syntax for type uuid/i.test(m))
+    return "Saved here only — the database rejected the id format. Run supabase/fix-resource-creation.sql, then add them again.";
+  if (/row-level security|permission denied|violates row-level/i.test(m))
+    return "Saved here only — the database would not accept a new person from this account. Run supabase/RUN-THIS-FIX-ALL.sql, or ask an admin to add them.";
+  if (/duplicate key|already exists/i.test(m))
+    return "Somebody with that email is already on the roster.";
+  return `Saved here only — the database refused it: ${m.slice(0, 140)}`;
 };
 
 /* ── TO-DOS UNDER STAGES ───────────────────────────────────────────────────
@@ -1670,7 +1693,7 @@ const PROJ_TABS = [
   ["overview", "Overview", Gauge, ""],
   ["plan", "Plan", ListChecks, "plan"],
   ["tasks", "To-dos", CheckCircle2, "tasks"],
-  ["mom", "Internal MoM", Lightbulb, "mom"],
+  ["mom", "Brainstorming", Lightbulb, "mom"],
   ["files", "Files & details", FileText, ""],
   ["chat", "Ask the AI", Bot, ""],
 ];
@@ -2294,7 +2317,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
 
           {tab === "mom" && (
           <Section>
-            <CardLabel right={<Pill color="var(--purple)"><Lightbulb size={11} /> ideas · challenges · lessons</Pill>}>Internal MoM</CardLabel>
+            <CardLabel right={<Pill color="var(--purple)"><Lightbulb size={11} /> ideas · challenges · lessons</Pill>}>Brainstorming session</CardLabel>
             <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 10 }}>
               Type up what was discussed — a design argument, a supplier problem, a review that went badly. The AI pulls out what the challenge really was and how it was beaten, whose idea helped, what was decided, and what has to happen next. Actions become tasks, lessons go into system memory so the next project inherits them, and the write-up is filed in this project's folder.
             </div>
@@ -2307,7 +2330,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             {(p.moms || []).length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 9, marginTop: 13 }}>
                 {(p.moms || []).slice(0, 4).map((m) => <MomCard key={m.id} m={m} />)}
-                {(p.moms || []).length > 4 && <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>Older sessions are on the Internal MoM page.</div>}
+                {(p.moms || []).length > 4 && <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>Older sessions are on the Brainstorming Sessions page.</div>}
               </div>
             )}
           </Section>
@@ -3083,8 +3106,18 @@ function ResourcesModule() {
   const th = { textAlign: "left", padding: "11px 14px", fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", whiteSpace: "nowrap" };
   const td = { padding: "12px 14px", fontSize: 12.5, verticalAlign: "middle" };
   const NameCell = ({ u }) => (
-    <button onClick={() => setPerson(u)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt)", display: "flex", alignItems: "center", gap: 9, padding: 0, fontSize: 13, fontWeight: 600 }}>
-      <AvatarDot user={u} size={30} /> {u.name}
+    <button onClick={() => setPerson(u)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt)", display: "flex", alignItems: "center", gap: 9, padding: 0, fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+      <AvatarDot user={u} size={30} />
+      <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <span>{u.name}</span>
+        {/* Somebody a PM added who has not made their login yet. Saying so here
+            is the difference between "it didn't save" and "they haven't joined". */}
+        {supabaseEnabled && !u.authId && (
+          <span style={{ fontSize: 10, color: "var(--amber)", fontWeight: 600 }}>
+            {u.email ? `awaiting sign-up · ${u.email}` : "awaiting sign-up — no email on file"}
+          </span>
+        )}
+      </span>
     </button>
   );
   const ProjCell = ({ uid, rangeFrom, rangeTo }) => {
@@ -3293,7 +3326,7 @@ function ResourceModal({ mode, user, onClose }) {
   const save = () => {
     if (!name.trim()) return;
     const u = {
-      id: user?.id || uid(), name: name.trim(), email: email.trim(),
+      id: user?.id || uuid(), name: name.trim(), email: email.trim(),
       role: login, title: info?.label ? (ROLE_TITLE[rr] || info.label) : "Team",
       resourceRole: rr, dept: dept || info?.dept || "", skills, projectTags: [ptype],
       maxProjects: info?.cap || 3, color: user?.color || _PALETTE[users.length % _PALETTE.length],
@@ -3388,7 +3421,7 @@ function IdeasTab({ projects, users, me, isMgr, viewUserId, setViewUserId }) {
           </select>
         )}>{who?.name || "Contribution"}</SectionTitle>
         {!mine ? (
-          <Empty icon={Lightbulb} title="No ideas credited yet" sub="Ideas are credited when a discussion is written up in Internal MoM on a project — and only when the suggestion actually changed the approach, saved time or money, caught a risk, or lifted quality." />
+          <Empty icon={Lightbulb} title="No ideas credited yet" sub="Ideas are credited when a discussion is written up in a brainstorming session on a project — and only when the suggestion actually changed the approach, saved time or money, caught a risk, or lifted quality." />
         ) : (
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 14 }}>
@@ -4537,7 +4570,7 @@ function AssistantModule() {
         if (!a.name) return { line: "I need a name to add someone." };
         if (findPerson(users, a.name)) return { line: `${a.name} is already in the team.` };
         const rr = rrInfo(a.resourceRole);
-        const u = { id: uid(), name: a.name, email: a.email || "", title: a.title || rr?.label || "Engineer",
+        const u = { id: uuid(), name: a.name, email: a.email || "", title: a.title || rr?.label || "Engineer",
           role: ["superadmin", "dept_head", "pm", "engineer"].includes(a.role) ? a.role : "engineer",
           dept: a.dept || rr?.dept || "", resourceRole: a.resourceRole || "", skills: a.skills || rr?.skills || [],
           maxProjects: a.maxProjects || rr?.cap || 3, projectTags: [], color: "#2563eb" };
@@ -4842,7 +4875,7 @@ function MomModule() {
           {shown.length === 0 ? (
             <Section>
               <Empty icon={Lightbulb} title={sessions.length ? "Nothing matches that" : "No discussions written up yet"}
-                sub={sessions.length ? "Try a different word, or clear the project filter." : "Open a project and use Internal MoM to type up a brainstorm. The AI keeps the challenge, how it was beaten, whose idea helped and what to do next — so the same argument never has to happen twice."} />
+                sub={sessions.length ? "Try a different word, or clear the project filter." : "Open a project and use its Brainstorming tab to type up a session. The AI keeps the challenge, how it was beaten, whose idea helped and what to do next — so the same argument never has to happen twice."} />
               {!sessions.length && <div style={{ marginTop: 10 }}><Btn small kind="ghost" icon={ArrowRight} onClick={() => setView("projects")}>Open a project</Btn></div>}
             </Section>
           ) : (
@@ -4897,20 +4930,32 @@ function MomModule() {
 }
 
 /* ═══ SHELL — SIDEBAR, HEADER, TOASTS, APP ROOT ══════════════════════════ */
-const NAV = [
-  { id: "assistant", label: "Assistant", icon: Bot },
-  { id: "projects", label: "Projects", icon: FolderPlus, admin: true },
-  { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
-  { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
-  { id: "mom", label: "Internal MoM", icon: Lightbulb },
-  { id: "resources", label: "Resources", icon: Users },
-  { id: "perf", label: "Performance & Training", icon: Gauge },
-  { id: "memory", label: "System Memory", icon: Database, admin: true },
+/* The menu is grouped by what you came here to do — the work of a project,
+   the people, your own week, and the AI — rather than by one flat list where
+   everything looked equally important. */
+const NAV_GROUPS = [
+  ["Projects", [
+    { id: "projects", label: "Projects", icon: FolderPlus, admin: true },
+    { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
+    { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
+  ]],
+  ["Resources", [
+    { id: "resources", label: "Resources", icon: Users },
+  ]],
+  ["Personal", [
+    { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
+    { id: "perf", label: "Performance & Training", icon: Gauge },
+  ]],
+  ["AI", [
+    { id: "assistant", label: "Assistant", icon: Bot },
+    { id: "memory", label: "System Memory", icon: Database, admin: true },
+  ]],
 ];
+const NAV = NAV_GROUPS.flatMap(([, items]) => items);
 const TITLES = {
   assistant: ["Assistant", "Say it in plain words — it creates projects, staffs them, raises tasks, writes the scrum, remembers, and reads & writes Drive"],
   projects: ["Projects", "Add or create a project · hard gates on Project ID + both LLDs · open one for its plan, files and chat"],
-  mom: ["Internal MoM", "Brainstorms, challenges and how they were beaten — kept so the same mistake is never made twice, and so good ideas get credited"],
+  mom: ["Brainstorming Sessions", "Brainstorms, challenges and how they were beaten — kept so the same mistake is never made twice, and so good ideas get credited"],
   scrum: ["Daily Scrum", "Write it as it comes — AI turns it into assigned, time-boxed, if/else-aware tasks"],
   tasks: ["My Projects & Tasks", "Start → work window → AI-gated closure · branch stuck work back to scrum"],
   resources: ["Resources", "Team roster, availability, deployment & efficiency"],
@@ -4944,7 +4989,18 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
     setBusy(true); setErr(""); setMsg("");
     try {
       if (mode === "signin") await signIn(email.trim(), pw);
-      else { await signUp(email.trim(), pw, name.trim()); setMsg("Account created. If email confirmation is enabled, confirm via the link we sent, then sign in."); setMode("signin"); setPw(""); }
+      else {
+        const d = await signUp(email.trim(), pw, name.trim());
+        // With confirmation switched off Supabase hands back a session and we
+        // are already in — onAuthChange takes it from here. Otherwise keep the
+        // password they just typed so Sign in is one click, not a retype.
+        if (!d?.session) {
+          setMsg(d?.user?.identities?.length === 0
+            ? "That email already has an account — sign in with it below."
+            : "Account created. If your workspace asks for email confirmation, click the link we sent, then sign in below — your password is still filled in.");
+          setMode("signin");
+        }
+      }
     } catch (e) {
       const m = e?.message || "Authentication failed";
       if (/failed to fetch|networkerror|load failed|fetch/i.test(m))
@@ -5094,7 +5150,12 @@ export default function App() {
     if (!session) { setProfiles(null); return; }
     fetchProfiles().then((ps) => {
       setProfiles(ps);
-      const mine = ps.find((u) => u.id === session.user?.id);
+      // A person's roster id and their login are two different things once a
+      // resource can exist before its account does — match on the login.
+      const authId = session.user?.id;
+      const mine = ps.find((u) => u.authId === authId)
+        || ps.find((u) => u.id === authId)
+        || (session.user?.email ? ps.find((u) => (u.email || "").toLowerCase() === session.user.email.toLowerCase()) : null);
       if (mine) setMe(mine.id);
     }).catch(() => setProfiles([]));
   }, [session]);
@@ -5117,26 +5178,33 @@ export default function App() {
     if (!supabaseEnabled) return null;
     // Persist the FULL resource record — dept, role/function, skills and
     // capacity, not just the display fields, or they vanish on refresh.
-    const { error } = await supabase.from("profiles").upsert({
+    const row = {
       id: u.id, email: u.email || null, name: u.name, role: u.role, title: u.title, color: u.color,
       dept: u.dept || null,
       resource_role: u.resourceRole || null,
       skills: u.skills || [],
       max_projects: u.maxProjects || null,
       project_tags: u.projectTags || [],
-    });
+    };
+    // auth_id is only there once the workspace has run fix-resource-creation.sql.
+    // Send it when we know it, and drop it if the column does not exist yet, so
+    // an un-migrated workspace still saves the rest of the record.
+    let { error } = await supabase.from("profiles").upsert({ ...row, auth_id: u.authId || null });
+    if (error && /auth_id/.test(error.message || "")) {
+      ({ error } = await supabase.from("profiles").upsert(row));
+    }
     return error;
   };
   const addUser = useCallback(async (u) => {
     applyRoster((rs) => [...rs, u]);
     const err = await dbProfileUpsert(u);
-    if (err) toast("Added to the roster — a real login account still needs sign-up or the setup script", "amber");
-    else toast(`${u.name} added to the team`, "green");
+    if (err) toast(rosterFailure(err), "amber");
+    else toast(`${u.name} added to the team${u.email ? ` — they get in by signing up with ${u.email}` : ""}`, "green");
   }, [applyRoster, toast]);
   const updateUser = useCallback(async (u) => {
     applyRoster((rs) => rs.map((x) => (x.id === u.id ? { ...x, ...u } : x)));
     const err = await dbProfileUpsert(u);
-    if (err) toast(`Updated in the app — DB write failed: ${err.message}`, "amber");
+    if (err) toast(rosterFailure(err), "amber");
     else toast(`${u.name} updated`, "green");
   }, [applyRoster, toast]);
   const removeUser = useCallback(async (id, nameLabel) => {
@@ -5147,7 +5215,9 @@ export default function App() {
   }, [applyRoster, toast]);
 
   const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser };
-  const visNav = NAV.filter((n) => !n.admin || isAdmin);
+  const visGroups = NAV_GROUPS
+    .map(([title, items]) => [title, items.filter((n) => !n.admin || isAdmin)])
+    .filter(([, items]) => items.length);
   const [t1, t2] = TITLES[view] || ["", ""];
 
   if (supabaseConfigured && !supabaseEnabled) return <SupabaseConfigError dark={dark} onToggleTheme={() => setDark(!dark)} />;
@@ -5170,11 +5240,18 @@ export default function App() {
             <img src={elecbitsLogo} alt="Elecbits" style={logoChip(dark, 26)} />
             <div style={{ fontSize: 10.5, color: "var(--txt2)", marginTop: 7, fontWeight: 600, letterSpacing: ".03em", textTransform: "uppercase" }}>ODM · Project Management</div>
           </div>
-          <nav style={{ padding: 10, display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
-            {visNav.map((n) => (
-              <div key={n.id} className={`navItem${view === n.id ? " on" : ""}`} onClick={() => setView(n.id)}>
-                <n.icon size={16} /> {n.label}
-                {n.admin && <Shield size={11} style={{ marginLeft: "auto", opacity: 0.5 }} />}
+          <nav style={{ padding: 10, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
+            {visGroups.map(([title, items], gi) => (
+              <div key={title} style={{ marginTop: gi ? 12 : 2 }}>
+                <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".09em", padding: "0 10px 6px" }}>{title}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {items.map((n) => (
+                    <div key={n.id} data-nav={n.id} className={`navItem${view === n.id ? " on" : ""}`} onClick={() => setView(n.id)}>
+                      <n.icon size={16} /> {n.label}
+                      {n.admin && <Shield size={11} style={{ marginLeft: "auto", opacity: 0.5 }} />}
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </nav>
@@ -5190,7 +5267,11 @@ export default function App() {
               <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 1 }}>{t2}</div>
             </div>
             <select className="inp eb-sideM" style={{ width: 170, display: "none" }} value={view} onChange={(e) => setView(e.target.value)}>
-              {visNav.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
+              {visGroups.map(([title, items]) => (
+                <optgroup key={title} label={title}>
+                  {items.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
+                </optgroup>
+              ))}
             </select>
             <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
               {(!supabaseEnabled || isAdmin) && users.length > 0 && (<>

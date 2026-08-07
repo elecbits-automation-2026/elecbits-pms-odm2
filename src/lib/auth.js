@@ -71,6 +71,9 @@ export async function fetchProfiles() {
     const role = p.role === "developer" ? "engineer" : (p.role || "engineer");
     return {
       id: p.id,
+      // The login behind this person, once they have one. Null while a PM has
+      // added them as a resource but they have not signed up yet.
+      authId: p.auth_id || null,
       name: p.name || (p.email || "").split("@")[0] || "User",
       role,
       title: p.title || RESOURCE_TITLES[p.resource_role] || ROLE_TITLES[role] || "Team",
