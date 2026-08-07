@@ -27,7 +27,7 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -1065,6 +1065,26 @@ const Field = ({ label, children, req, hint }) => (
     {children}
   </div>
 );
+/* A password field you can look at. Typing a password you cannot see is how
+   "wrong password" happens; the eye is a peek, not a setting, so it starts
+   hidden every time and never persists. */
+const PasswordInput = ({ value, onChange, onEnter, placeholder = "••••••••", autoComplete = "current-password", autoFocus }) => {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{ position: "relative" }}>
+      <input className="inp" type={show ? "text" : "password"} value={value} autoFocus={autoFocus}
+        autoComplete={autoComplete} placeholder={placeholder} style={{ paddingRight: 42 }}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onEnter?.()} />
+      <button type="button" tabIndex={-1} onClick={() => setShow((x) => !x)}
+        title={show ? "Hide password" : "Show password"} aria-label={show ? "Hide password" : "Show password"}
+        style={{ position: "absolute", top: "50%", right: 6, transform: "translateY(-50%)", width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", borderRadius: 7, color: show ? "var(--acc)" : "var(--txt3)", cursor: "pointer" }}>
+        {show ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+    </div>
+  );
+};
+
 const Seg = ({ options, value, onChange }) => (
   <div style={{ display: "inline-flex", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 9, padding: 3, gap: 2 }}>
     {options.map((o) => (
@@ -5146,7 +5166,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
           <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 34), marginBottom: 14 }} />
           <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>Choose a new password</div>
           <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 16 }}>You came in from a reset link. Set it once and you're straight into the workspace.</div>
-          <Field label="New password"><input className="inp" type="password" value={np} onChange={(e) => setNp(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveNew()} placeholder="at least 6 characters" autoFocus /></Field>
+          <Field label="New password"><PasswordInput value={np} onChange={setNp} onEnter={saveNew} placeholder="at least 6 characters" autoComplete="new-password" autoFocus /></Field>
           {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, marginTop: 10 }}>{err}</div>}
           <div style={{ marginTop: 14 }}><Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || np.length < 6} onClick={saveNew} style={{ width: "100%" }}>{busy ? "Saving…" : "Save and continue"}</Btn></div>
         </div>
@@ -5165,7 +5185,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <Field label="Work email"><input className="inp" type="email" autoFocus autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
-          <Field label="Password"><input className="inp" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
+          <Field label="Password"><PasswordInput value={pw} onChange={setPw} onEnter={submit} /></Field>
           {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, lineHeight: 1.5 }}>{err}</div>}
           {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600, lineHeight: 1.5 }}>{msg}</div>}
           <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : demo ? "Sign in" : "Continue"}</Btn>
