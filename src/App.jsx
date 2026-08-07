@@ -746,6 +746,96 @@ const planPatchResult = (plan, patch) => {
   return { stages, touched };
 };
 
+/* ── TO-DOS UNDER STAGES ───────────────────────────────────────────────────
+   Every to-do on a project belongs to exactly one stage of that project's
+   plan. The link lives on the task as `stageId`, so it survives a stage being
+   renamed, re-ordered or re-dated — and so a person can move a to-do to the
+   right stage by hand and have it stay there.
+
+   Everything below is only for filling that link in the first time: a keyword
+   pass that runs the instant a task is created, and an AI pass that reads the
+   whole list at once and does the semantic work the keywords cannot ("Create
+   MCMA quote" belongs under Design review, and no word in it says so). */
+const STAGE_WORDS = {
+  kickoff: ["kickoff", "kick off", "scope", "objective", "charter", "brief", "onboard", "assign owner", "reviewer", "start"],
+  requirement: ["requirement", "spec", "study", "research", "market", "define", "scope", "objective", "success criteria", "deliverable format", "target market"],
+  design: ["design", "schematic", "quote", "quotation", "costing", "bom", "bill of material", "alternate", "component", "review comment", "layout comment", "stackup", "architecture", "concept", "enclosure design"],
+  pcb: ["pcb", "layout", "routing", "gerber", "fab", "fabrication", "assembly", "smt", "stencil", "board", "hardware build", "enclosure"],
+  firmware: ["firmware", "code", "driver", "bootloader", "flash", "embedded", "software"],
+  procurement: ["procure", "purchase", "order", "vendor", "supplier", "lead time", "sourcing", "quote from", "po ", "inventory", "stock"],
+  testing: ["test", "testing", "validate", "validation", "thermal", "emi", "emc", "qa", "bring up", "bringup", "debug", "measurement", "report", "verification"],
+  compliance: ["compliance", "certification", "certify", "safety", "regulatory", "ce ", "fcc", "rohs", "audit"],
+  client: ["client", "customer", "demo", "presentation", "deck", "sign-off", "signoff", "sign off", "acceptance", "delivery", "deliver", "handover", "handoff", "recording", "session"],
+  documentation: ["document", "documentation", "manual", "datasheet", "write up", "writeup", "record", "proof", "timestamp", "filename", "rename", "store", "upload", "folder", "drive path"],
+  production: ["production", "mass", "volume", "manufactur", "pilot", "ramp", "dfm"],
+  closure: ["closure", "close", "retrospective", "lessons", "invoice", "final", "archive", "wrap"],
+};
+const stageBuckets = (name) => {
+  const n = String(name || "").toLowerCase();
+  return Object.keys(STAGE_WORDS).filter((k) => n.includes(k) || (k === "pcb" && /\bboard|layout\b/.test(n)) || (k === "client" && /\bcustomer|demo|handover\b/.test(n)) || (k === "requirement" && /\brequirements?\b/.test(n)));
+};
+const WEAK = new Set(["the", "and", "for", "with", "from", "into", "this", "that", "task", "project", "update", "complete", "check", "review", "create", "make", "add", "per", "all", "new", "its", "our"]);
+const words = (s) => String(s || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !WEAK.has(w));
+
+/* How well one to-do fits one stage. Higher is better; 0 means no evidence. */
+const stageMatchScore = (stage, task) => {
+  const title = `${task.title || ""} ${(task.steps || []).join(" ")}`.toLowerCase();
+  const tw = new Set(words(title));
+  let score = 0;
+  for (const w of words(stage.name)) if (tw.has(w)) score += 4;           // shared words in the stage name
+  for (const b of stageBuckets(stage.name)) {                              // the stage's subject area
+    for (const kw of STAGE_WORDS[b]) if (title.includes(kw)) score += 2;
+  }
+  if (stage.owner && task.assigneeName && normId(stage.owner) === normId(task.assigneeName)) score += 1;
+  if (stage.start && stage.end && task.date && task.date >= stage.start && task.date <= stage.end) score += 1;
+  return score;
+};
+const guessStageId = (stages, task) => {
+  if (!stages?.length) return "";
+  let best = null, bestScore = 0;
+  for (const s of stages) {
+    const sc = stageMatchScore(s, task);
+    if (sc > bestScore) { best = s; bestScore = sc; }
+  }
+  return bestScore >= 4 ? best.id : "";   // below that it is a coin toss, so leave it unfiled
+};
+/* Fill in the link on any task that has not got one yet. Used everywhere a
+   task is born and every time a plan is (re)built. A stageId pointing at a
+   stage that no longer exists counts as unfiled — rebuilding a plan renames
+   every stage, and a dead link would strand the to-do for ever. */
+const withStages = (stages, tasks) => {
+  const ids = new Set((stages || []).map((s) => s.id));
+  return tasks.map((t) => (t.stageId && ids.has(t.stageId) ? t : { ...t, stageId: guessStageId(stages, t) }));
+};
+const needsFiling = (stages, tasks) => {
+  const ids = new Set((stages || []).map((s) => s.id));
+  return tasks.filter((t) => !t.stageId || !ids.has(t.stageId));
+};
+
+/* Stage order first, then whatever is still unfiled. Stages with nothing in
+   them still appear — an empty stage is information too. */
+const groupTasksByStage = (stages, tasks) => {
+  const rows = (stages || []).map((s) => [s, tasks.filter((t) => t.stageId === s.id)]);
+  const ids = new Set((stages || []).map((s) => s.id));
+  const loose = tasks.filter((t) => !t.stageId || !ids.has(t.stageId));
+  if (loose.length) rows.push([null, loose]);
+  return rows;
+};
+
+const groupPrompt = (p, stages, tasks) => `You are filing the open to-dos of hardware project ${p.projectId} (${p.name || ""}) under the stages of its delivery plan. Every to-do belongs under exactly one stage — the stage whose work it is part of.
+
+THE STAGES, in order:
+${stages.map((s, i) => `${i + 1}. [${s.id}] ${s.name}${s.track ? ` · ${s.track}` : ""}${s.start ? ` · ${s.start} → ${s.end}` : ""}${s.note ? ` — ${s.note}` : ""}`).join("\n")}
+
+THE TO-DOS:
+${tasks.map((t) => `[${t.id}] ${t.title}${t.assigneeName ? ` · ${t.assigneeName}` : ""}${t.date ? ` · ${t.date}` : ""}`).join("\n")}
+
+Think about what the work actually IS, not which words it shares with a stage name. Writing a quote for a customer is design-stage work. Renaming a delivered file and storing proof of delivery belongs with the thing that was delivered. Chasing a supplier belongs with the stage that is waiting on the part. A vague to-do like "update on task completion" belongs with whatever stage is running at its date.
+
+File every single to-do. Do not invent stages and do not invent to-dos.
+
+Reply with JSON only: {"filed":[{"task":"<task id>","stage":"<stage id>"}]}`;
+
 /* ── INTERNAL MoM ──────────────────────────────────────────────────────────
    The room where the thinking happens. Somebody types up a brainstorm — a
    design argument, a supplier problem, a review that went badly — and the AI
@@ -851,9 +941,9 @@ The whole project folder and every linked board folder are searched for that, th
 
 YOU CAN UPDATE THE PLAN. The project's plan — its stages, dates, owners and status — is below. When something they tell you changes it (a customer's feedback on a review, a vendor slipping, a test failing, work finishing early, a mail they forwarded or attached), work out the knock-on effect and end your reply with:
 <<<PLAN>>>
-{"reason":"customer asked for a 4-layer stackup after the schematic review","summary":"one plain sentence on where the project stands now","changes":[{"id":"design-review","status":"blocked","note":"waiting on the stackup decision"},{"id":"pcb-development","start":"2026-09-02","end":"2026-09-20"},{"name":"Rework schematic for 4-layer","status":"active","start":"2026-08-20","end":"2026-08-27","owner":"Ravi","after":2}],"tasks":[{"title":"Rework the schematic for a 4-layer stackup","assignee":"Ravi","date":"2026-08-20","endTime":"18:00"}]}
+{"reason":"customer asked for a 4-layer stackup after the schematic review","summary":"one plain sentence on where the project stands now","changes":[{"id":"design-review","status":"blocked","note":"waiting on the stackup decision"},{"id":"pcb-development","start":"2026-09-02","end":"2026-09-20"},{"name":"Rework schematic for 4-layer","status":"active","start":"2026-08-20","end":"2026-08-27","owner":"Ravi","after":2}],"tasks":[{"title":"Rework the schematic for a 4-layer stackup","assignee":"Ravi","date":"2026-08-20","endTime":"18:00","stage":"design-review"}]}
 <<<END>>>
-Rules for the plan: only include stages that genuinely change; keep every date realistic against the deadline; push the later stages out when an earlier one slips, do not silently leave them overlapping; "after" is where a new stage slots in, counting from 0; "tasks" is optional and raises real work for real people. Always fill in "reason" in the person's own terms — it is written into the change log with their name and the time. Never invent a change nobody asked for.
+Rules for the plan: only include stages that genuinely change; keep every date realistic against the deadline; push the later stages out when an earlier one slips, do not silently leave them overlapping; "after" is where a new stage slots in, counting from 0; "tasks" is optional and raises real work for real people — give each one a "stage" naming the stage id it belongs under, so it files itself in the right place. Always fill in "reason" in the person's own terms — it is written into the change log with their name and the time. Never invent a change nobody asked for.
 ${atts?.length ? `They can also hand you files right here — including on an earlier message. To keep one in this project's folder, end your reply with a line of exactly this shape, one line per file, naming the file exactly as it is listed below:
 <<<SAVE the-file-name.pdf>>>
 It is saved exactly as they sent it. Never say you cannot take or store a file.` : ""}
@@ -871,7 +961,7 @@ THE PLAN RIGHT NOW: ${(p.plan?.stages || []).length
   ? (p.plan.stages || []).map((s, i) => `${i}. [${s.id}] ${s.name} · ${s.status} · ${s.start || "?"} → ${s.end || "?"}${s.owner ? ` · ${s.owner}` : ""}${s.note ? ` · ${s.note}` : ""}`).join("\n")
   : "no plan built yet — if they ask about steps or timing, say the plan hasn't been built and that the Build plan button on this page will read Drive and lay it out."}
 RECENT PLAN CHANGES: ${(p.plan?.log || []).slice(0, 4).map((l) => `${String(l.at).slice(0, 16).replace("T", " ")} ${l.byName}: ${l.what}`).join(" | ") || "none"}
-TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
+TASKS (${projTasks.length}), each with the stage it is filed under: ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""} · stage ${t.stageId || "not filed"}`).join("; ") || "none yet"}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
 QUESTION: """${String(q).slice(0, 600)}"""`;
 
@@ -1584,6 +1674,46 @@ const PROJ_TABS = [
   ["files", "Files & details", FileText, ""],
   ["chat", "Ask the AI", Bot, ""],
 ];
+/* Is this to-do past its own clock? Module scope so both the project page and
+   the card below can ask, without either owning the answer. */
+const isOverdue = (t, nowMs) => !!(t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < (nowMs || Date.now()));
+const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
+  : isOverdue(t, nowMs) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
+  : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
+  : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
+
+/* One open to-do on the project page. Given the plan's stages it also carries
+   the control to move itself to a different one — the AI's filing is a first
+   pass, and the person looking at it always gets the last word. */
+function TodoCard({ t, users, stages, onMove, nowMs }) {
+  const { Ic, label, color } = todoMeta(t, nowMs);
+  const u = users.find((x) => x.id === t.assigneeId);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)" }}>
+      <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
+          {u ? <span style={{ display: "flex", alignItems: "center", gap: 5 }}><AvatarDot user={u} size={18} /><span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>}
+          {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
+          <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}</span>
+          {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length} if/else</Pill>}
+          {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
+          {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
+        </div>
+      </div>
+      {stages?.length > 0 && onMove && (
+        <select className="inp" title="Move this to-do to another stage" value={t.stageId || ""} onChange={(e) => onMove(t.id, e.target.value)}
+          style={{ width: 150, padding: "5px 8px", fontSize: 11.5, flexShrink: 0, background: "var(--s2)" }}>
+          <option value="">— no stage —</option>
+          {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      )}
+      <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+    </div>
+  );
+}
+
 /* Defined at module scope, NOT inside ProjectDetail: components declared inside
    a component get a new identity on every render, so React unmounts and
    remounts their whole subtree — which made inputs lose focus on each
@@ -1611,6 +1741,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [momVal, setMomVal] = useState("");
   const [momWho, setMomWho] = useState("");
   const [momBusy, setMomBusy] = useState(false);
+  const [filing, setFiling] = useState(false);
+  const [grouped, setGrouped] = useState(true);
+  const [closedStages, setClosedStages] = useState([]);
   const [tab, setTab] = useState("overview");
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
@@ -1635,9 +1768,23 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     ["Done", done.length, "var(--green)"],
   ];
   const dl = daysLeft(p.deadline);
-  const overdue = (t) => t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < nowMs;
+  const overdue = (t) => isOverdue(t, nowMs);
   const rank = (t) => (t.status === "blocked" ? 0 : overdue(t) ? 1 : t.status === "in-progress" ? 2 : 3);
   const todos = [...openTasks].sort((a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
+  const planStages = p.plan?.stages || [];
+  const unfiled = needsFiling(planStages, todos);
+  /* A project with a plan should never show a flat list of to-dos. The first
+     time anyone looks at the plan or the to-dos, whatever is loose gets filed
+     — no button to find, no project left behind. */
+  const autoFiled = useRef(false);
+  useEffect(() => {
+    if (autoFiled.current || filing) return;
+    if (tab !== "tasks" && tab !== "plan") return;
+    if (!planStages.length || !unfiled.length) return;
+    autoFiled.current = true;
+    fileTodos(planStages, { announce: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, planStages.length, unfiled.length]);
   const sanctioned = p.status !== "Planning";
   const timelineStart = p.startDate || (p.createdAt || "").slice(0, 10);
   const startMs = new Date((p.startDate || p.createdAt) + (p.startDate ? "T00:00:00" : "")).getTime();
@@ -1646,10 +1793,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const gates = p.origin === "existing"
     ? [["Project ID", !!p.projectId], ["PM assigned", !!pm], ["Timeline set", !!(p.startDate && p.deadline)], ["Known status", !!p.knownStatus], ["Linked IDs", (p.linkedIds || []).length > 0]]
     : [["Project ID", !!p.projectId], ["Customer LLD", !!p.lldCustomer], ["Designer LLD", !!p.lldDesigner], ["PM assigned", !!pm], ["Deadline set", !!p.deadline]];
-  const todoMeta = (t) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
-    : overdue(t) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
-    : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
-    : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
   const analyseDrive = async () => {
     setIntelBusy(true);
     const { digest, error: driveErr } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role) });
@@ -1679,6 +1822,36 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const slotUser = (slot) => teamDraft.find((t) => t.slot === slot)?.userId || "";
   const setSlot = (slot, userId) => setTeamDraft((td) => { const rest = td.filter((t) => t.slot !== slot); return userId ? [...rest, { slot, userId }] : rest; });
   const saveTeam = () => { upd({ team: teamDraft.filter((t) => t.userId) }); setEditTeam(false); toast("Team updated", "green"); };
+  /* Put every to-do under the stage it belongs to. The keyword pass files the
+     obvious ones on the spot; the AI does the rest, because most of the
+     judgement is about what the work IS rather than what it is called — a
+     customer quote is design-stage work however it is worded. Runs by itself
+     whenever the plan is built or rebuilt, so no project is ever left flat. */
+  const fileTodos = async (stagesIn, { announce = true } = {}) => {
+    const st = stagesIn || pRef.current.plan?.stages || [];
+    if (!st.length) { if (announce) toast("Build the plan first — to-dos are filed under its stages", "amber"); return; }
+    const mine = tasks.filter((t) => t.projectId === p.projectId)
+      .map((t) => ({ ...t, assigneeName: users.find((u) => u.id === t.assigneeId)?.name || "" }));
+    const loose = needsFiling(st, mine);
+    if (!loose.length) { if (announce) toast("Every to-do is already under a stage", "green"); return; }
+
+    setFiling(true);
+    const filed = new Map(withStages(st, loose).filter((t) => t.stageId).map((t) => [t.id, t.stageId]));
+    try {
+      const r = await claude(groupPrompt(p, st, loose), { maxTokens: 3000 });
+      for (const f of r?.filed || []) {
+        const s = st.find((x) => x.id === f.stage || normId(x.name) === normId(f.stage));
+        if (s && loose.some((t) => t.id === f.task)) filed.set(f.task, s.id);
+      }
+    } catch { /* the keyword pass stands on its own */ }
+    setFiling(false);
+
+    if (!filed.size) { if (announce) toast("Couldn't work out where those to-dos belong — file them by hand", "amber"); return; }
+    setTasks((ts) => ts.map((t) => (filed.has(t.id) ? { ...t, stageId: filed.get(t.id) } : t)));
+    if (announce) toast(`${filed.size} to-do${filed.size === 1 ? "" : "s"} filed under the plan`, "green");
+  };
+  const moveTodo = (taskId, stageId) => setTasks((ts) => ts.map((t) => (t.id === taskId ? { ...t, stageId } : t)));
+
   /* Build (or rebuild) the plan from the project's real Drive contents. */
   const buildPlan = async () => {
     if (planBusy) return;
@@ -1714,6 +1887,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       };
       upd((cur) => ({ plan: { ...built, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
       toast(digest ? "Plan built from the project's files" : "Plan built — Drive had nothing to add", digest ? "green" : "amber");
+      await fileTodos(built.stages, { announce: false });
     } finally {
       setPlanBusy(false);
     }
@@ -1749,6 +1923,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     };
     upd((cur) => ({ plan: { ...built, source: file.name, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
     toast(`Plan built from ${file.name}`, "green");
+    await fileTodos(built.stages, { announce: false });
     // Keep their checklist with the project, so the next Drive read sees it too.
     const att = await readAttachment(file);
     if (!att.tooBig && !att.failed) {
@@ -1791,6 +1966,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           date: a.due || todayStr(), startTime: nowHM(),
           endTime: new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
           steps: [], conditions: [], status: "pending", origin: "mom", createdBy: me, createdAt: at, work: {},
+          stageId: guessStageId(pRef.current.plan?.stages || [], { title: a.title, date: a.due || todayStr() }),
         });
       }
       if (raised.length) setTasks((ts) => [...raised, ...ts]);
@@ -1887,6 +2063,10 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       let patch = null;
       try { patch = JSON.parse(planBlock[1]); } catch { /* malformed — ignore */ }
       if (patch && (patch.changes?.length || patch.tasks?.length)) {
+        // What the stage list will look like once this patch lands, worked out
+        // here so any task the same patch raises can be filed under a stage
+        // the patch itself added.
+        const nextStages = patch.changes?.length ? planPatchResult(pRef.current.plan, patch).stages : (pRef.current.plan?.stages || []);
         if (patch.changes?.length) {
           const { touched } = planPatchResult(pRef.current.plan, patch);
           const entry = {
@@ -1910,6 +2090,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             date: t.date || todayStr(), startTime: t.startTime || nowHM(),
             endTime: t.endTime || new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
             steps: [], conditions: [], status: "pending", origin: "plan", createdBy: me, createdAt: new Date().toISOString(), work: {},
+            stageId: (nextStages.find((s) => s.id === t.stage || normId(s.name) === normId(t.stage))?.id)
+              || guessStageId(nextStages, { title: t.title, date: t.date || todayStr() }),
           });
         }
         if (raised.length) {
@@ -2024,36 +2206,51 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {(tab === "overview" || tab === "tasks") && (
           <Section>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>{tab === "tasks" ? "Every open to-do" : "Next to-dos"}</span>
               {todos.length > 0 && <Pill color="var(--purple)">{todos.length} open</Pill>}
-              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>
+              {tab === "tasks" && planStages.length > 0 && (
+                <span style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                  <button onClick={() => setGrouped((g) => !g)} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{grouped ? "Show as a flat list" : "Group under the plan"}</button>
+                  {grouped && unfiled.length > 0 && <Btn small kind="ghost" icon={filing ? Loader2 : Sparkles} disabled={filing} onClick={() => fileTodos()}>{filing ? "Filing…" : `File the ${unfiled.length} loose`}</Btn>}
+                </span>
+              )}
+              {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
             {todos.length === 0 ? (
               <Empty icon={ListChecks} title="No open to-dos" sub="Every open task for this project shows here, most urgent first. Add them in Daily Scrum — organise a note and push the tasks." />
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => {
-                  const { Ic, label, color } = todoMeta(t);
-                  const u = users.find((x) => x.id === t.assigneeId);
+            ) : tab === "tasks" && grouped && planStages.length > 0 ? (
+              /* Nested under the plan: a stage, then the work that belongs to
+                 it. Click a stage to open or shut it. */
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {groupTasksByStage(planStages, todos).map(([stage, list]) => {
+                  const key = stage?.id || "__loose__";
+                  const shut = closedStages.includes(key);
                   return (
-                    <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)" }}>
-                      <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
-                        <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
-                          {u ? <span style={{ display: "flex", alignItems: "center", gap: 5 }}><AvatarDot user={u} size={18} /><span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>}
-                          {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
-                          <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}</span>
-                          {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length} if/else</Pill>}
-                          {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
-                          {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
+                    <div key={key} style={{ border: "1px solid var(--bdr)", borderRadius: 11, background: "var(--s1)", overflow: "hidden" }}>
+                      <button onClick={() => setClosedStages((c) => (c.includes(key) ? c.filter((x) => x !== key) : [...c, key]))}
+                        style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "10px 13px", background: "none", border: "none", borderBottom: shut || !list.length ? "none" : "1px solid var(--bdr)", cursor: "pointer", textAlign: "left" }}>
+                        <ChevronDown size={14} style={{ color: "var(--txt3)", flexShrink: 0, transform: shut ? "rotate(-90deg)" : "none", transition: "transform .15s" }} />
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: stage ? planColor(stage.status) : "var(--amber)", flexShrink: 0 }} />
+                        <span style={{ fontWeight: 700, fontSize: 13, flex: 1, minWidth: 0 }}>{stage ? stage.name : "Not filed under a stage yet"}</span>
+                        {stage?.track && <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{stage.track}</span>}
+                        <Pill color={list.length ? "var(--purple)" : "var(--txt3)"}>{list.length} open</Pill>
+                        {stage && <Pill color={planColor(stage.status)}>{planLabel(stage.status)}</Pill>}
+                      </button>
+                      {!shut && list.length > 0 && (
+                        <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 7, padding: 11 }}>
+                          {list.map((t) => (
+                            <TodoCard key={t.id} t={t} users={users} stages={planStages} onMove={moveTodo} nowMs={nowMs} />
+                          ))}
                         </div>
-                      </div>
-                      <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+                      )}
                     </div>
                   );
                 })}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs} />)}
                 {tab === "overview" && todos.length > 5 && (
                   <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
                     See all {todos.length} to-dos →
@@ -2093,7 +2290,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
-          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} myName={my?.name} />}
+          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onFile={fileTodos} filing={filing} myName={my?.name} />}
 
           {tab === "mom" && (
           <Section>
@@ -2360,6 +2557,8 @@ function ScrumModule() {
         id: uid(), projectId: t.projectId, linked: t.linked, title: t.title, assigneeId: t.assigneeId, assigneeName: t.assignee || "",
         date, startTime: t.startTime || "", endTime: t.endTime || "", steps: t.steps || [], conditions: t.conditions || [],
         status: "pending", origin: "scrum", noteId: note.id, createdBy: me, createdAt: new Date().toISOString(), work: {},
+        // filed straight under the right stage of that project's plan
+        stageId: guessStageId(projects.find((x) => x.projectId === t.projectId)?.plan?.stages || [], { title: t.title, date, assigneeName: t.assignee || "" }),
       }));
       created = newTasks.length;
       setTasks((x) => [...newTasks, ...x]);
@@ -2717,7 +2916,7 @@ function CompleteFlow({ t, onClose }) {
     const subs = rows.filter((r) => r.title.trim());
     if (!subs.length) { toast("Add at least one sub-task", "amber"); return; }
     const dt = todayStr(); const startHM = nowHM();
-    const newTasks = subs.map((r) => ({ id: uid(), projectId: t.projectId, linked: t.linked !== false && !!t.projectId, title: r.title.trim(), assigneeId: r.assigneeId, date: dt, startTime: startHM, endTime: new Date(Date.now() + (r.timebox || 60) * 60000).toTimeString().slice(0, 5), steps: [], conditions: [], status: "pending", origin: "branch", parentTaskId: t.id, createdBy: me, createdAt: new Date().toISOString(), work: {} }));
+    const newTasks = subs.map((r) => ({ id: uid(), projectId: t.projectId, linked: t.linked !== false && !!t.projectId, title: r.title.trim(), assigneeId: r.assigneeId, date: dt, startTime: startHM, endTime: new Date(Date.now() + (r.timebox || 60) * 60000).toTimeString().slice(0, 5), steps: [], conditions: [], status: "pending", origin: "branch", stageId: t.stageId || "", parentTaskId: t.id, createdBy: me, createdAt: new Date().toISOString(), work: {} }));
     setTasks((ts) => [...newTasks, ...ts.map((x) => (x.id === t.id ? { ...x, status: "blocked", blockNote: blocker, work } : x))]);
     const dayN = notes.filter((n) => n.date === dt).length;
     const story = `Task "${t.title}"${t.projectId ? ` on ${t.projectId}` : ""} could not be closed${blocker ? ` — ${blocker}` : ""}. Branched into: ${subs.map((r, i) => `${i + 1}) ${r.title} → ${users.find((u) => u.id === r.assigneeId)?.name || "unassigned"} (${r.timebox || 60}m)`).join("; ")}. Clock started ${startHM}.`;
@@ -3721,9 +3920,23 @@ function StageEditRow({ s, i, count, onChange, onMove, onDelete, trackList }) {
   );
 }
 
+/* One to-do as it reads underneath its stage. */
+function StageTaskRow({ t, users }) {
+  const u = users.find((x) => x.id === t.assigneeId);
+  const c = t.status === "done" ? "var(--green)" : t.status === "blocked" ? "var(--red)" : t.status === "in-progress" ? "var(--blue)" : "var(--txt3)";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "2px 0" }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: c, flexShrink: 0 }} />
+      <span style={{ flex: 1, minWidth: 0, textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt3)" : "var(--txt)" }}>{t.title}</span>
+      {t.date && <span style={{ fontSize: 10.5, color: "var(--txt3)", fontFamily: MONO, flexShrink: 0 }}>{fmtDate(t.date)}</span>}
+      <span style={{ color: "var(--txt3)", fontSize: 11, flexShrink: 0 }}>{u?.name || "unassigned"}</span>
+    </div>
+  );
+}
+
 function StageDetail({ stage, tasks, users, onClose }) {
   if (!stage) return null;
-  const mine = tasks.filter((t) => normId(t.title).includes(normId(stage.name).slice(0, 10)) || (stage.tasks || []).includes(t.id));
+  const mine = tasks.filter((t) => t.stageId === stage.id || (stage.tasks || []).includes(t.id));
   return (
     <div className="fade" style={{ marginTop: 12, border: `1px solid ${planColor(stage.status)}`, borderRadius: 12, padding: 14, background: "var(--s1)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 9 }}>
@@ -3759,7 +3972,7 @@ function StageDetail({ stage, tasks, users, onClose }) {
   );
 }
 
-function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName }) {
+function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, filing, myName }) {
   const [view, setView] = useState("steps");
   const [openId, setOpenId] = useState("");
   const [editing, setEditing] = useState(false);
@@ -3830,6 +4043,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName })
             <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.md" style={{ display: "none" }}
               onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onSheet(f); }} />
             <Btn small kind="ghost" icon={busy ? Loader2 : Upload} disabled={busy} title="Build the plan from your own checklist" onClick={() => sheetRef.current?.click()}>Upload checklist</Btn>
+            {stages.length > 0 && <Btn small kind="ghost" icon={filing ? Loader2 : ListChecks} disabled={filing} title="Put every open to-do under the stage it belongs to" onClick={() => onFile()}>{filing ? "Filing…" : "File the to-dos"}</Btn>}
             {stages.length > 0 && <Btn small kind="ghost" icon={Pencil} onClick={startEdit}>Edit steps</Btn>}
             <Btn small kind={stages.length ? "ghost" : "primary"} icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={onBuild}>
               {busy ? "Working…" : stages.length ? "Refresh from Drive" : "Build from Drive"}
@@ -3926,9 +4140,13 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName })
                   // workstream is being worked on at the same time.
                   const alongside = stages.filter((o) => o.id !== s.id && (o.track || "") !== (s.track || "")
                     && s.start && s.end && o.start && o.end && o.start <= s.end && o.end >= s.start).map((o) => o.name);
+                  const mine = projTasks.filter((t) => t.stageId === s.id);
+                  const openN = mine.filter((t) => t.status !== "done").length;
+                  const isOpen = openId === s.id;
                   return (
-                    <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
-                      style={{ display: "flex", gap: 11, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                    <div key={s.id}>
+                    <button onClick={() => setOpenId(isOpen ? "" : s.id)}
+                      style={{ display: "flex", gap: 11, background: isOpen ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
                       <span style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
                         <span style={{ width: 15, height: 15, borderRadius: "50%", border: `2px solid ${planColor(s.status)}`, background: s.status === "done" ? planColor(s.status) : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
                           {s.status === "done" && <CheckCircle2 size={9} style={{ color: "#fff" }} />}
@@ -3937,8 +4155,10 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName })
                       </span>
                       <span style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
                         <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <ChevronDown size={13} style={{ color: "var(--txt3)", flexShrink: 0, transform: isOpen ? "none" : "rotate(-90deg)", transition: "transform .15s" }} />
                           <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
                           <Pill color={planColor(s.status)}>{planLabel(s.status)}</Pill>
+                          {mine.length > 0 && <Pill color="var(--purple)"><ListChecks size={10} /> {openN ? `${openN} open` : "all done"} · {mine.length}</Pill>}
                           {s.owner && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{s.owner}</span>}
                           <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(s.start)} → {fmtDate(s.end)}</span>
                         </span>
@@ -3950,6 +4170,23 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName })
                         )}
                       </span>
                     </button>
+                    {/* the to-dos of this stage, nested under it */}
+                    {isOpen && (
+                      <div className="fade" style={{ margin: "0 0 8px 26px", paddingLeft: 12, borderLeft: "2px solid var(--bdr2)", display: "flex", flexDirection: "column", gap: 5 }}>
+                        {mine.length === 0
+                          ? <div style={{ fontSize: 12, color: "var(--txt3)", padding: "3px 0" }}>No to-dos filed under this stage yet.</div>
+                          : mine.map((t) => <StageTaskRow key={t.id} t={t} users={users} />)}
+                        {(s.evidence || []).length > 0 && (
+                          <div style={{ marginTop: 5 }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>Proof in Drive</div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                              {s.evidence.map((f, k) => <Pill key={k} color="var(--acc)"><FileText size={10} /> {f}</Pill>)}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    </div>
                   );
                 })}
               </div>
@@ -3976,7 +4213,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName })
             )
         )}
 
-        {view !== "log" && <StageDetail stage={open} tasks={projTasks} users={users} onClose={() => setOpenId("")} />}
+        {view !== "log" && view !== "steps" && <StageDetail stage={open} tasks={projTasks} users={users} onClose={() => setOpenId("")} />}
       </>)}
     </Section>
   );
@@ -4314,7 +4551,8 @@ function AssistantModule() {
         const t = { id: uid(), projectId: p?.projectId || "", linked: !!p, title: a.title, assigneeId: u?.id || "",
           date: a.date || todayStr(), startTime: a.startTime || nowHM(),
           endTime: a.endTime || new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
-          steps: [], conditions: [], status: "pending", origin: "assistant", createdBy: me, createdAt: new Date().toISOString(), work: {} };
+          steps: [], conditions: [], status: "pending", origin: "assistant", createdBy: me, createdAt: new Date().toISOString(), work: {},
+          stageId: guessStageId(p?.plan?.stages || [], { title: a.title, date: a.date || todayStr(), assigneeName: u?.name || "" }) };
         live.tasks = [t, ...live.tasks];
         setTasks((ts) => [t, ...ts]);
         if (p) sheetSync(`${pmPath(p.projectId)}Checklist.xlsx`, `Task "${t.title}" raised from the assistant`);
