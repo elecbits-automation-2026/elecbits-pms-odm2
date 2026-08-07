@@ -33,7 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
-import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, fetchProfiles } from "./lib/auth.js";
+import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, signInWithProvider, oauthReturnError, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -5048,6 +5048,16 @@ const Shell = ({ dark, children }) => (
    login (any credentials, or pick a role) when it isn't. Always the front door. */
 const SAMPLE_LOGIN = { email: "saurav@elecbits.in", pw: "Elecbits@2026" };
 
+/* Google's mark, inline — the login page must not reach out to a CDN for it. */
+const GoogleMark = () => (
+  <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true" style={{ flexShrink: 0 }}>
+    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.6 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.8 6.1C12.3 13.2 17.7 9.5 24 9.5z" />
+    <path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9.1h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.1 5.5c4.2-3.8 6.6-9.5 6.6-16.2z" />
+    <path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-2.9-.8-4.5s.3-3.1.8-4.5l-7.8-6.1C1 16.7 0 20.2 0 24s1 7.3 2.6 10.4l7.8-5.7z" />
+    <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.6 2.1-8.8 2.1-6.3 0-11.7-3.7-13.6-9.1l-7.8 5.7C6.5 42.6 14.6 48 24 48z" />
+  </svg>
+);
+
 /* One door, not two.
    Asking somebody to know in advance whether they are "signing in" or
    "creating an account" is asking them a question only the database can
@@ -5061,14 +5071,30 @@ const SAMPLE_LOGIN = { email: "saurav@elecbits.in", pw: "Elecbits@2026" };
    the password was simply wrong — so we say that, and offer the reset. A
    password typo can never mint a stray account. */
 function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword }) {
-  const [email, setEmail] = useState(SAMPLE_LOGIN.email);
-  const [pw, setPw] = useState(SAMPLE_LOGIN.pw);
-  const [name, setName] = useState("");
+  const [email, setEmail] = useState(demo ? SAMPLE_LOGIN.email : "");
+  const [pw, setPw] = useState(demo ? SAMPLE_LOGIN.pw : "");
+  const [name] = useState("");   // the roster already knows who people are
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [wrongPw, setWrongPw] = useState(false);   // offer the reset only once it is the likely problem
   const [sent, setSent] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
+
+  // If Google bounced us, say why instead of showing a blank login screen.
+  useEffect(() => { const e = oauthReturnError(); if (e) setErr(e); }, []);
+
+  const withGoogle = async () => {
+    setErr(""); setMsg(""); setOauthBusy(true);
+    try { await signInWithProvider("google"); }   // leaves the page
+    catch (e) {
+      setOauthBusy(false);
+      const m = e?.message || "";
+      setErr(/provider is not enabled|unsupported/i.test(m)
+        ? "Google sign-in isn't switched on for this workspace yet — an admin enables it in Supabase → Authentication → Providers."
+        : m || "Couldn't start Google sign-in.");
+    }
+  };
 
   const netErr = (m) => /failed to fetch|networkerror|load failed|fetch/i.test(m);
 
@@ -5097,9 +5123,13 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
           }
         } catch (e2) {
           const m2 = e2?.message || m;
-          if (/password/i.test(m2) && /(6|short|weak|least)/i.test(m2)) setErr("Pick a longer password — at least 6 characters.");
+          // The workspace is invite-only and this email is not on the roster.
+          if (/not_invited|database error saving new user|unexpected_failure/i.test(m2))
+            setErr(`${addr} isn't on the team roster, so there's no account to make. Ask a project manager to add you under Resources, then sign in with this same email.`);
+          else if (/password/i.test(m2) && /(6|short|weak|least)/i.test(m2)) setErr("Pick a longer password — at least 6 characters.");
           else if (/valid email|invalid/i.test(m2)) setErr("That doesn't look like an email address.");
           else if (/rate|too many/i.test(m2)) setErr("Too many attempts just now. Wait a minute and try again.");
+          else if (/signups? not allowed|disabled/i.test(m2)) setErr("New accounts are switched off for this workspace. Ask an admin to add you.");
           else { setWrongPw(true); setErr(m2); }
         }
       } else if (/rate|too many/i.test(m)) {
@@ -5151,50 +5181,61 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
   }
   return (
     <Shell dark={dark}>
-      <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
+      <div className="fade card" style={{ width: "100%", maxWidth: 380, padding: 32, position: "relative" }}>
         <button onClick={onToggleTheme} title="Toggle theme" style={{ position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: 8, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt2)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 20 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 24 }}>
           <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 38), marginBottom: 10 }} />
           <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
-          <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{demo ? "Sign in to continue" : "Sign in — or create your account, same box"}</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--soft)", border: "1px solid var(--bdr)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
-          <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
-          <div style={{ fontSize: 11.5, lineHeight: 1.5, flex: 1 }}>
-            <b>Sample login</b> — <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.email}</span> · <span style={{ fontFamily: MONO }}>{SAMPLE_LOGIN.pw}</span><br />
-            <span style={{ color: "var(--txt2)" }}>{demo ? "Prefilled below — press Sign in. Any credentials work in demo." : "Prefilled below — press Sign in. Shared password for all team accounts (from the setup script)."}</span>
+
+        {!demo && (<>
+          <button onClick={withGoogle} disabled={oauthBusy || busy}
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "11px 14px", borderRadius: 10, border: "1px solid var(--bdr2)", background: "var(--s1)", color: "var(--txt)", fontSize: 13.5, fontWeight: 600, cursor: oauthBusy || busy ? "default" : "pointer", opacity: oauthBusy || busy ? 0.6 : 1 }}>
+            {oauthBusy ? <Loader2 size={17} className="spin" /> : <GoogleMark />}
+            {oauthBusy ? "Taking you to Google…" : "Continue with Google"}
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0" }}>
+            <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
+            <span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or with your email</span>
+            <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
           </div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-          {!demo && <Field label="Full name" hint="only used if this is your first time"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Your name" /></Field>}
-          <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
-          <Field label="Password"><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
+        </>)}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <Field label="Work email"><input className="inp" type="email" autoFocus={demo} autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
+          <Field label="Password"><input className="inp" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
           {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, lineHeight: 1.5 }}>{err}</div>}
           {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600, lineHeight: 1.5 }}>{msg}</div>}
           <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : demo ? "Sign in" : "Continue"}</Btn>
-          {!demo && (wrongPw || sent) && (
-            <button onClick={sendReset} disabled={busy || sent} style={{ background: "none", border: "none", color: sent ? "var(--txt3)" : "var(--acc)", cursor: sent ? "default" : "pointer", fontSize: 12, fontWeight: 700, textAlign: "center" }}>
-              {sent ? "Reset link sent — check your inbox" : "Email me a reset link"}
+        </div>
+
+        {!demo && (
+          <div style={{ marginTop: 16, textAlign: "center" }}>
+            <button onClick={sendReset} disabled={busy || sent}
+              style={{ background: "none", border: "none", padding: 0, color: sent ? "var(--txt3)" : "var(--txt2)", cursor: sent ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}>
+              {sent ? "Reset link sent — check your inbox" : "Forgot your password?"}
             </button>
-          )}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
-          <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>{demo ? "or jump in as" : "quick fill a team member"}</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-          {SEED_USERS.filter((u) => u.role !== "engineer" && u.id !== "u-admin").slice(0, 8).map((u) => (
-            <button key={u.id} title={u.email} onClick={() => { if (demo) { onDemoLogin(u.id); } else { setEmail(u.email); setPw(SAMPLE_LOGIN.pw); setErr(""); } }} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
-              <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
-            </button>
-          ))}
-        </div>
-        {demo ? (
-          <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>The full team (25) is in the "View as" switcher once you're in. Demo mode — any credentials work; connect Supabase for real accounts.</div>
-        ) : (
-          <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", textAlign: "center", lineHeight: 1.6 }}>
-            New here? Use the work email your PM added you under and pick a password — the account is created on the spot and lands on your place in the team.
+            {/* No sign-up tab: the same button makes the account if there is
+                not one yet, so there is nothing here to choose between. */}
+            <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.55 }}>
+              First time? Use your work email and pick a password.
+            </div>
           </div>
         )}
+
+        {demo && (<>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "20px 0 12px" }}>
+            <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>or jump in as</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+            {SEED_USERS.filter((u) => u.role !== "engineer" && u.id !== "u-admin").slice(0, 8).map((u) => (
+              <button key={u.id} title={u.email} onClick={() => onDemoLogin(u.id)} style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 11px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s1)", cursor: "pointer" }}>
+                <AvatarDot user={u} size={20} /><span style={{ fontSize: 12, fontWeight: 600 }}>{u.name}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>Demo mode — any credentials work. Connect Supabase for real accounts.</div>
+        </>)}
       </div>
     </Shell>
   );

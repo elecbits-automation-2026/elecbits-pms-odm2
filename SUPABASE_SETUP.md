@@ -24,6 +24,15 @@ Takes ~10 minutes. Nothing here changes the code — it's all keys + one SQL run
 3. You should see “Success. No rows returned.” This creates all tables, enables
    **pgvector**, adds the semantic-memory function, sets up Row-Level Security,
    and installs the trigger that makes a profile for each new user.
+4. Then run these two, in this order, the same way:
+   - [`supabase/RUN-THIS-FIX-ALL.sql`](supabase/RUN-THIS-FIX-ALL.sql) — RLS
+     policies and grants, including the one that lets an admin add somebody.
+   - [`supabase/fix-resource-creation.sql`](supabase/fix-resource-creation.sql)
+     — lets a person exist on the roster **before** they have a login, and makes
+     their eventual sign-up attach to that entry instead of duplicating them.
+5. Any time you want to know where the database stands, paste
+   [`supabase/CHECK-SETUP.sql`](supabase/CHECK-SETUP.sql) and run it. It writes
+   nothing and prints one ✅/❌ line per requirement.
 
 ## 3. Copy your keys
 
@@ -62,9 +71,11 @@ npm run dev   # http://localhost:5173 — you'll now see the login screen
 
 ## 5. Make the first account (= admin)
 
-1. Open the app → **Create one** → sign up with your work email + password.
-2. The schema trigger makes the **first** registered user the **superadmin**;
-   everyone who signs up after is an `engineer`.
+1. Open the app, type your work email and a password, press **Continue**.
+   There is no separate sign-up tab — the same button signs you in if you have
+   an account and creates one if you don't.
+2. The trigger makes the **first** account in an empty workspace the
+   **superadmin**; everyone after is an `engineer`.
 3. Promote others later in Supabase: **Table editor → `profiles`** → set a row's
    `role` to `pm`, `dept_head`, or `superadmin`.
 
@@ -72,6 +83,43 @@ npm run dev   # http://localhost:5173 — you'll now see the login screen
 > default. For a fast internal rollout, disable it:
 > **Authentication → Providers → Email → turn off “Confirm email”**. Or just
 > click the confirmation link in the email Supabase sends.
+
+## 6. Sign in with Google (recommended)
+
+The team already lives in Google Workspace, so this is the login most people
+should use — no password to choose, lose or share.
+
+1. **Google Cloud console → APIs & Services → Credentials → Create credentials
+   → OAuth client ID → Web application.**
+2. Under **Authorised redirect URIs** add exactly:
+   `https://<project-ref>.supabase.co/auth/v1/callback`
+3. Copy the **Client ID** and **Client secret**.
+4. In Supabase: **Authentication → Providers → Google** → enable, paste both,
+   **Save**.
+5. In Supabase: **Authentication → URL Configuration** → set **Site URL** to
+   your app's address, and add it under **Redirect URLs** too. Add every
+   address you use — the production domain *and* any Vercel preview URLs —
+   or Google will refuse to come back.
+
+**Continue with Google** then appears at the top of the login page. It goes
+through the same door as an email sign-up: the account attaches to the roster
+entry with the same email, keeping that person's title, dept, skills and
+capacity — so add people under the email their Google account actually uses.
+
+## 7. Close the door (before you call it production)
+
+Out of the box, **anybody who finds the URL can create an account** and lands
+inside as an engineer. Once your team is in, run
+[`supabase/invite-only.sql`](supabase/invite-only.sql).
+
+After that an account can only be created for an email **already on the
+roster** — somebody a PM added under Resources, or the setup script created.
+Everyone else is turned away with a message telling them to ask a PM. Google
+sign-in goes through the same gate. Two doors stay open on purpose: the very
+first account in an empty workspace, and `create-users.sql`, which announces
+itself.
+
+Reversible with [`supabase/invite-only-off.sql`](supabase/invite-only-off.sql).
 
 ---
 

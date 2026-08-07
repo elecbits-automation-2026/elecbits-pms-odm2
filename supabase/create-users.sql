@@ -21,6 +21,9 @@ declare
   pid uuid;
   pw  text := 'Elecbits@2026';   -- change this if you like
 begin
+  -- This script IS the invitation, so it is allowed past the invite-only gate
+  -- in supabase/invite-only.sql. Transaction-local; nothing leaks out of here.
+  perform set_config('app.allow_new_signups', 'on', true);
   for rec in
     select * from (values
       ('shreya@elecbits.in','Shreya','superadmin','Dept Head — Project Management'),

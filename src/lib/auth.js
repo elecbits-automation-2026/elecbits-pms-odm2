@@ -33,6 +33,40 @@ export async function signUp(email, password, name) {
   return data;
 }
 
+/* Sign in with a provider — Google, for a team already living in Google
+   Workspace. Supabase redirects out and back; the session lands through
+   onAuthChange, and the sign-up trigger attaches it to the roster row with
+   the same email exactly as an email/password sign-up would. */
+export async function signInWithProvider(provider = "google") {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider,
+    options: {
+      redirectTo: typeof window !== "undefined" ? window.location.origin : undefined,
+      queryParams: provider === "google" ? { access_type: "offline", prompt: "select_account" } : undefined,
+    },
+  });
+  if (error) throw error;
+}
+
+/* Whatever the provider sent us back with, in plain words. Supabase puts it
+   in the URL fragment on the way back, where it would otherwise sit unread. */
+export function oauthReturnError() {
+  if (typeof window === "undefined") return "";
+  const read = (s) => new URLSearchParams(s.replace(/^[#?]/, ""));
+  const p = read(window.location.hash), q = read(window.location.search);
+  const code = p.get("error") || q.get("error");
+  if (!code) return "";
+  const desc = (p.get("error_description") || q.get("error_description") || "").replace(/\+/g, " ");
+  // don't leave it in the address bar to reappear on the next reload
+  try { window.history.replaceState({}, "", window.location.pathname); } catch { /* ignore */ }
+  if (/access_denied/i.test(code)) return "Google sign-in was cancelled.";
+  if (/not_invited|database error saving new user|server_error/i.test(desc)) return "That Google account isn't on the team roster. Ask a project manager to add you under Resources — using that exact address — then try again.";
+  if (/provider is not enabled|validation_failed/i.test(desc)) return "Google sign-in isn't switched on for this workspace yet — an admin enables it in Supabase → Authentication → Providers.";
+  if (/redirect/i.test(desc)) return "Google sent us back to an address this project doesn't allow. Add this site under Supabase → Authentication → URL Configuration.";
+  return desc || "Google sign-in didn't complete.";
+}
+
 /* Email them a link back into the app to choose a new password. The link
    lands on the same origin, where PASSWORD_RECOVERY switches the login card
    into "set a new password". */
