@@ -1,16 +1,24 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Create all Elecbits team members as Supabase Auth users + profiles.
 -- Run this in the Supabase SQL Editor (Dashboard → SQL Editor → New query → Run).
--- Prereq: run supabase/schema.sql first (creates profiles + pgcrypto).
+-- Prereqs: supabase/schema.sql, then supabase/fix-resource-creation.sql.
 --
 -- Every account is email-confirmed with the same password below, so people can
--- sign in immediately and change it later. Re-running is safe (existing users
--- are skipped; profiles are re-applied).
+-- sign in immediately and change it later. Re-running is safe: existing logins
+-- are left alone, and anybody a PM already added in Resources KEEPS their
+-- roster row — this script just hands them their login. It never creates a
+-- second row for the same person.
 -- ═══════════════════════════════════════════════════════════════════════════
+
+-- Defensive: if fix-resource-creation.sql has not run yet, at least the column
+-- exists so this script can record the login it creates.
+alter table public.profiles add column if not exists auth_id uuid;
+
 do $$
 declare
   rec record;
   uid uuid;
+  pid uuid;
   pw  text := 'Elecbits@2026';   -- change this if you like
 begin
   for rec in
@@ -71,13 +79,35 @@ begin
       );
     end if;
 
-    -- ensure the profile carries the right role/title (trigger may have made a default one)
-    insert into public.profiles (id, email, name, role, title, color)
-    values (uid, rec.email, rec.name, rec.role, rec.title, '#2563eb')
-    on conflict (id) do update
-      set role = excluded.role, title = excluded.title, name = excluded.name, email = excluded.email;
+    -- Find the person on the roster, in order of confidence: the login we just
+    -- made or found, then their email, then the old convention where the
+    -- roster id and the auth id were the same thing. A resource a PM added by
+    -- hand is matched on email — keeping THEIR row, and everything filled in
+    -- on it, rather than adding a second one.
+    select id into pid from public.profiles
+     where auth_id = uid
+        or (email is not null and lower(email) = lower(rec.email))
+        or id = uid
+     order by (auth_id = uid) desc,
+              (email is not null and lower(email) = lower(rec.email)) desc
+     limit 1;
+
+    if pid is null then
+      insert into public.profiles (id, auth_id, email, name, role, title, color)
+      values (uid, uid, rec.email, rec.name, rec.role, rec.title, '#2563eb');
+    else
+      update public.profiles
+         set auth_id = uid, email = rec.email, name = rec.name,
+             role = rec.role, title = rec.title
+       where id = pid;
+    end if;
   end loop;
 end $$;
 
--- Verify
-select email, role, title from public.profiles order by role, email;
+-- Verify. Everyone should have a login; "awaiting sign-up" here means the
+-- roster row never got matched to an account.
+select
+  email, role, title,
+  case when auth_id is null then 'awaiting sign-up' else 'can sign in' end as login
+from public.profiles
+order by role, email;
