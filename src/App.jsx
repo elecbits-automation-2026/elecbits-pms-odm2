@@ -583,6 +583,96 @@ TODAY'S CONVERSATION SO FAR — this is one shared thread the whole team writes 
 ${history.slice(-10).map((m) => `${m.who === "me" ? (m.byName || "Someone") : "You"}: ${m.text}`).join("\n") || "—"}
 WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
 
+/* ── PROJECT PLAN ──────────────────────────────────────────────────────────
+   One list of stages with dates, owners, status and the real files that prove
+   each one — drawn from the project's own Drive folders and its tasks. It is
+   what the Gantt, the flow chart and the step list all read from, and every
+   edit is stamped with who made it and when.                                 */
+const PLAN_STATUS = [
+  { k: "done", label: "Done", c: "var(--green)" },
+  { k: "active", label: "In progress", c: "var(--blue)" },
+  { k: "blocked", label: "Blocked", c: "var(--red)" },
+  { k: "pending", label: "Not started", c: "var(--txt3)" },
+];
+const planColor = (s) => PLAN_STATUS.find((x) => x.k === s)?.c || "var(--txt3)";
+const planLabel = (s) => PLAN_STATUS.find((x) => x.k === s)?.label || "Not started";
+/* The shape every AI reply must produce, described once. */
+const PLAN_SHAPE = `A stage looks like this:
+{"id":"kickoff","name":"Kickoff","status":"done","start":"2026-08-01","end":"2026-08-05","owner":"Ravi","note":"one plain line on where this stands","evidence":["the real file name that proves it"],"depends":"id of the stage before it"}
+status is exactly one of: done, active, blocked, pending. Dates are YYYY-MM-DD. owner is a person's name from the team, or "". evidence lists real file names you actually saw in Drive — never invent one. Give every stage an id in lower-case-with-dashes.`;
+
+const planBuildPrompt = (p, projTasks, users, memory, driveData) => `You are the Elecbits ODM planner. Build the delivery plan for this hardware project from what actually exists — its Drive folders, its files, its tasks and its written status. This is not a template exercise: the stages, the dates and the state of each one must reflect the real evidence in front of you.
+${memCtx(memory)}
+${DRIVE_FACTS}
+PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | started ${p.startDate || (p.createdAt || "").slice(0, 10)} | deadline ${p.deadline || "not set"}
+TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "nobody assigned yet"}
+LINKED BOARDS: ${(p.linkedIds || []).join(", ") || "none"}
+KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 900)}"""
+TASKS (${projTasks.length}): ${projTasks.slice(0, 40).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.date ? ` · ${t.date}` : ""}`).join("; ") || "none raised yet"}
+${driveData ? `THE PROJECT'S DRIVE — folders, files and the text inside them:\n"""${driveData}"""` : "No Drive contents came back this time — build the plan from the tasks and the written status."}
+
+HOW TO BUILD IT
+- If a checklist, tracker or audit sheet is in the files, follow ITS stages and ITS wording. That document is the source of truth for what this project's flow actually is — do not impose a generic one over it.
+- Mark a stage done only when something in Drive or a finished task shows it is done. Name that file in "evidence".
+- The stage being worked on now is "active". Anything waiting on a decision or a supplier is "blocked".
+- Spread the dates sensibly between the start and the deadline, keeping any real dates you can see.
+- Between 5 and 12 stages. Fewer, meaningful stages beat many trivial ones.
+${PLAN_SHAPE}
+Reply with JSON only: {"stages":[...],"summary":"one plain sentence on where the project stands overall"}`;
+
+/* An offline skeleton, so the panel is never blank when the AI is unreachable. */
+const fallbackPlan = (p) => {
+  const start = p.startDate || (p.createdAt || todayStr()).slice(0, 10);
+  const end = p.deadline || todayStr();
+  const names = ["Kickoff", "Requirements", "Schematic & design review", "PCB development", "Firmware development", "Testing", "Client handoff"];
+  const span = Math.max(1, Math.round((new Date(end) - new Date(start)) / 86400000));
+  return {
+    stages: names.map((name, i) => ({
+      id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      name,
+      status: i === 0 ? "active" : "pending",
+      start: new Date(new Date(start).getTime() + Math.round((span * i) / names.length) * 86400000).toISOString().slice(0, 10),
+      end: new Date(new Date(start).getTime() + Math.round((span * (i + 1)) / names.length) * 86400000).toISOString().slice(0, 10),
+      owner: "", note: i === 0 ? "Starting point — refresh the plan once the AI is reachable." : "", evidence: [],
+    })),
+    summary: "Outline plan — refresh it to read the real state from Drive.",
+  };
+};
+
+/* Applying a change the AI worked out from something the PM said. */
+const applyPlanPatch = (plan, patch, byName) => {
+  const stages = [...(plan?.stages || [])];
+  const touched = [];
+  for (const ch of patch.changes || []) {
+    const i = stages.findIndex((s) => s.id === ch.id || normId(s.name) === normId(ch.id || ch.name));
+    if (ch.remove && i >= 0) { touched.push(`removed ${stages[i].name}`); stages.splice(i, 1); continue; }
+    if (i < 0) {
+      if (!ch.name) continue;
+      const s = { id: ch.id || normId(ch.name) || uid(), name: ch.name, status: ch.status || "pending", start: ch.start || todayStr(), end: ch.end || ch.start || todayStr(), owner: ch.owner || "", note: ch.note || "", evidence: ch.evidence || [] };
+      const at = Number.isInteger(ch.after) ? ch.after : stages.length;
+      stages.splice(at, 0, s);
+      touched.push(`added ${s.name}`);
+      continue;
+    }
+    const before = stages[i];
+    const next = { ...before };
+    for (const k of ["name", "status", "start", "end", "owner", "note"]) if (ch[k] != null && ch[k] !== "") next[k] = ch[k];
+    if (Array.isArray(ch.evidence)) next.evidence = ch.evidence;
+    const bits = [];
+    if (next.status !== before.status) bits.push(`${before.status} → ${next.status}`);
+    if (next.start !== before.start || next.end !== before.end) bits.push(`${before.start}–${before.end} → ${next.start}–${next.end}`);
+    if (next.owner !== before.owner) bits.push(`owner ${before.owner || "nobody"} → ${next.owner || "nobody"}`);
+    stages[i] = next;
+    touched.push(`${before.name}: ${bits.join(", ") || "updated"}`);
+  }
+  const entry = {
+    id: uid(), at: new Date().toISOString(), byName: byName || "someone",
+    why: String(patch.reason || "").slice(0, 400),
+    what: touched.join(" · ").slice(0, 600) || "no stage changed",
+  };
+  return { plan: { ...(plan || {}), stages, summary: patch.summary || plan?.summary || "", updatedAt: entry.at, log: [entry, ...(plan?.log || [])].slice(0, 100) }, entry, touched };
+};
+
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
 const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
 ${memCtx(memory)}
@@ -620,6 +710,16 @@ YOU CAN ALSO WRITE TO DRIVE. You are not read-only. When the user asks you to cr
 the full file content here
 <<<END>>>
 Rules for writing: use one block per file; pick a clear filename with a sensible extension (.md for notes, checklists, plans, minutes; .csv for tables); write the real, complete content — never a placeholder; a file with the same name is replaced, so reuse the exact existing name when updating one. Before the block, say in one short line what you are saving. Never say you cannot create or modify files. Anything you write this way also appears in the chat as a document card the person can open and download.
+
+YOU CAN LOOK IN DRIVE AGAIN, YOURSELF. The Drive contents below were fetched for this question. If they do not cover what is being asked — a particular checklist, a BoM, a board folder, anything — end your reply with:
+<<<LOOK what to look for>>>
+The whole project folder and every linked board folder are searched for that, the text inside the matching files comes back, and you answer properly in the same breath. Use it instead of saying you cannot see something, and instead of asking whether you should check. Only ever use it once in a reply.
+
+YOU CAN UPDATE THE PLAN. The project's plan — its stages, dates, owners and status — is below. When something they tell you changes it (a customer's feedback on a review, a vendor slipping, a test failing, work finishing early, a mail they forwarded or attached), work out the knock-on effect and end your reply with:
+<<<PLAN>>>
+{"reason":"customer asked for a 4-layer stackup after the schematic review","summary":"one plain sentence on where the project stands now","changes":[{"id":"design-review","status":"blocked","note":"waiting on the stackup decision"},{"id":"pcb-development","start":"2026-09-02","end":"2026-09-20"},{"name":"Rework schematic for 4-layer","status":"active","start":"2026-08-20","end":"2026-08-27","owner":"Ravi","after":2}],"tasks":[{"title":"Rework the schematic for a 4-layer stackup","assignee":"Ravi","date":"2026-08-20","endTime":"18:00"}]}
+<<<END>>>
+Rules for the plan: only include stages that genuinely change; keep every date realistic against the deadline; push the later stages out when an earlier one slips, do not silently leave them overlapping; "after" is where a new stage slots in, counting from 0; "tasks" is optional and raises real work for real people. Always fill in "reason" in the person's own terms — it is written into the change log with their name and the time. Never invent a change nobody asked for.
 ${atts?.length ? `They can also hand you files right here — including on an earlier message. To keep one in this project's folder, end your reply with a line of exactly this shape, one line per file, naming the file exactly as it is listed below:
 <<<SAVE the-file-name.pdf>>>
 It is saved exactly as they sent it. Never say you cannot take or store a file.` : ""}
@@ -633,6 +733,10 @@ KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
 INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
 ${driveData ? `THE PROJECT'S DRIVE — the whole folder tree and the text inside the files, read just now:\n"""${driveData}"""` : "No Drive files came back this time. Answer from the project notes above without mentioning Drive at all."}
 LAST SAVED DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
+THE PLAN RIGHT NOW: ${(p.plan?.stages || []).length
+  ? (p.plan.stages || []).map((s, i) => `${i}. [${s.id}] ${s.name} · ${s.status} · ${s.start || "?"} → ${s.end || "?"}${s.owner ? ` · ${s.owner}` : ""}${s.note ? ` · ${s.note}` : ""}`).join("\n")
+  : "no plan built yet — if they ask about steps or timing, say the plan hasn't been built and that the Build plan button on this page will read Drive and lay it out."}
+RECENT PLAN CHANGES: ${(p.plan?.log || []).slice(0, 4).map((l) => `${String(l.at).slice(0, 16).replace("T", " ")} ${l.byName}: ${l.what}`).join(" | ") || "none"}
 TASKS (${projTasks.length}): ${projTasks.slice(0, 25).map((t) => `${t.title} · ${users.find((u) => u.id === t.assigneeId)?.name || "unassigned"} · ${t.status}${t.endTime ? ` · due ${t.endTime}` : ""}`).join("; ") || "none yet"}
 RECENT CHAT: ${history.slice(-6).map((m) => `${m.who === "me" ? "PM" : "AI"}: ${m.text}`).join(" | ") || "—"}
 QUESTION: """${String(q).slice(0, 600)}"""`;
@@ -1360,6 +1464,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [noteBusy, setNoteBusy] = useState(false);
   const [chatVal, setChatVal] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [planBusy, setPlanBusy] = useState(false);
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
   const chatLastAtts = useRef([]);      // so "save that here" still works next turn
@@ -1423,6 +1528,27 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const slotUser = (slot) => teamDraft.find((t) => t.slot === slot)?.userId || "";
   const setSlot = (slot, userId) => setTeamDraft((td) => { const rest = td.filter((t) => t.slot !== slot); return userId ? [...rest, { slot, userId }] : rest; });
   const saveTeam = () => { upd({ team: teamDraft.filter((t) => t.userId) }); setEditTeam(false); toast("Team updated", "green"); };
+  /* Build (or rebuild) the plan from the project's real Drive contents. */
+  const buildPlan = async () => {
+    if (planBusy) return;
+    setPlanBusy(true);
+    const { digest, error } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: "checklist tracker plan schedule milestones review" });
+    let built;
+    try {
+      const r = await claude(planBuildPrompt(p, projTasks, users, memory, digest));
+      built = Array.isArray(r?.stages) && r.stages.length ? r : null;
+    } catch { built = null; }
+    if (!built) { built = fallbackPlan(p); if (error) toast(error, "amber"); }
+    const entry = {
+      id: uid(), at: new Date().toISOString(), byName: my?.name || "someone",
+      why: p.plan?.stages?.length ? "Refreshed the plan from Drive" : "Built the plan from Drive",
+      what: `${built.stages.length} stages${digest ? " · read from the project's files" : " · outline only, Drive was quiet"}`,
+    };
+    upd({ plan: { ...built, updatedAt: entry.at, log: [entry, ...(p.plan?.log || [])].slice(0, 100) } });
+    toast(digest ? "Plan built from the project's files" : "Outline plan created", digest ? "green" : "amber");
+    setPlanBusy(false);
+  };
+
   const sendChat = async () => {
     const q = chatVal.trim();
     if ((!q && !chatAtts.length) || chatBusy) return;
@@ -1438,8 +1564,22 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     // Pull live Drive contents so the copilot answers from real files rather
     // than telling the PM to go and paste them in.
     const { digest: chatDigest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: q });
-    try { reply = await claude(projChatPrompt(p, projTasks, users, hist, q, memory, chatDigest, pool, sent.length > 0), { json: false }); }
-    catch {
+    const ask = (driveData) => claude(projChatPrompt(p, projTasks, users, hist, q, memory, driveData, pool, sent.length > 0), { json: false });
+    try {
+      reply = await ask(chatDigest);
+      // <<<LOOK term>>> — it decided the first read didn't cover the question.
+      // Fetch exactly what it asked for and let it finish, in the same turn.
+      const look = String(reply).match(/<<<LOOK\s+([^>\n]+?)\s*>>>/);
+      if (look) {
+        const { digest: again } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: look[1] });
+        if (again) {
+          const second = await ask(`${again}${chatDigest ? `\n\n(also read a moment ago)\n${chatDigest.slice(0, 6000)}` : ""}`);
+          reply = String(second).replace(/<<<LOOK[^>]*>>>/g, "").trim() || second;
+        } else {
+          reply = String(reply).replace(/<<<LOOK[^>]*>>>/g, "").trim();
+        }
+      }
+    } catch {
       const open = projTasks.filter((t) => t.status !== "done");
       reply = `AI is unreachable, so here's the data directly: ${p.projectId} is ${p.status}, deadline ${fmtDate(p.deadline)}, ${done.length}/${projTasks.length} tasks done.${open.length ? ` Open: ${open.slice(0, 5).map((t) => t.title).join("; ")}${open.length > 5 ? "…" : ""}.` : ""} Known status: ${p.knownStatus ? p.knownStatus.slice(0, 200) : "not written yet"}.`;
     }
@@ -1447,9 +1587,44 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     // an attached file with <<<SAVE name>>>. Execute both here; created files
     // also become document cards on the reply.
     const writes = [...String(reply).matchAll(/<<<WRITE\s+([^>\n]+?)\s*>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
-    const saves = [...String(reply).matchAll(/<<<SAVE\s+([^>\n]+?)\s*>>>/g)];
-    let clean = String(reply).replace(/<<<WRITE[\s\S]*?<<<END>>>/g, "").replace(/<<<SAVE[^>]*>>>/g, "").trim();
+    const planBlock = String(reply).match(/<<<PLAN>>>\s*([\s\S]*?)\s*<<<END>>>/);
+    const saves = [...String(reply).replace(/<<<PLAN>>>[\s\S]*?<<<END>>>/g, "").matchAll(/<<<SAVE\s+([^>\n]+?)\s*>>>/g)];
+    let clean = String(reply)
+      .replace(/<<<PLAN>>>[\s\S]*?<<<END>>>/g, "")
+      .replace(/<<<WRITE[\s\S]*?<<<END>>>/g, "")
+      .replace(/<<<SAVE[^>]*>>>/g, "").trim();
     const results = []; const docs = [];
+
+    // A plan change the AI worked out from what they just said — apply it,
+    // raise any tasks that come with it, and record who and when.
+    if (planBlock) {
+      let patch = null;
+      try { patch = JSON.parse(planBlock[1]); } catch { /* malformed — ignore */ }
+      if (patch && (patch.changes?.length || patch.tasks?.length)) {
+        if (patch.changes?.length) {
+          const { plan, touched } = applyPlanPatch(p.plan, patch, my?.name);
+          upd({ plan });
+          results.push(`Plan updated — ${touched.join(" · ")}. Logged against your name.`);
+          sheetSync(`${pmPath(p.projectId)}`, `Plan updated from project chat: ${patch.reason || "change"}`);
+        }
+        const raised = [];
+        for (const t of (patch.tasks || []).slice(0, 8)) {
+          if (!t.title) continue;
+          const u = findPerson(users, t.assignee);
+          raised.push({
+            id: uid(), projectId: p.projectId, linked: true, title: t.title, assigneeId: u?.id || "",
+            date: t.date || todayStr(), startTime: t.startTime || nowHM(),
+            endTime: t.endTime || new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
+            steps: [], conditions: [], status: "pending", origin: "plan", createdBy: me, createdAt: new Date().toISOString(), work: {},
+          });
+        }
+        if (raised.length) {
+          setTasks((ts) => [...raised, ...ts]);
+          results.push(`${raised.length} new task${raised.length === 1 ? "" : "s"}: ${raised.map((t) => t.title).join("; ")}.`);
+        }
+        if (patch.changes?.length || raised.length) toast("Plan and tasks updated", "green");
+      }
+    }
     for (const [, rawName, content] of writes) {
       const fileName = rawName.trim().replace(/[\\/:*?"<>|]/g, "-");
       const r = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
@@ -1570,6 +1745,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </div>
             )}
           </Section>
+
+          <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} />
 
           {(p.knownStatus || isPM) && (
             <Section>
@@ -2973,6 +3150,187 @@ function MemoryModule() {
 /* ═══ WORKSPACE ASSISTANT — the chat available on every page ═════════════ */
 /* ── SHARED CHAT PIECES (module scope — components declared inside another
    component get a new identity every render and remount their subtree) ──── */
+
+/* ═══ PLAN BOARD — one plan, four ways of looking at it ═══════════════════
+   Gantt for the shape of the schedule, Flow for the sequence, Steps for the
+   detail, Changes for who moved what and when. Clicking anything anywhere
+   opens the same stage detail.                                              */
+const PLAN_VIEWS = [["gantt", "Timeline"], ["flow", "Flow"], ["steps", "Steps"], ["log", "Changes"]];
+
+function StageDetail({ stage, tasks, users, onClose }) {
+  if (!stage) return null;
+  const mine = tasks.filter((t) => normId(t.title).includes(normId(stage.name).slice(0, 10)) || (stage.tasks || []).includes(t.id));
+  return (
+    <div className="fade" style={{ marginTop: 12, border: `1px solid ${planColor(stage.status)}`, borderRadius: 12, padding: 14, background: "var(--s1)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 9 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: planColor(stage.status), flexShrink: 0 }} />
+        <span style={{ fontWeight: 800, fontSize: 14 }}>{stage.name}</span>
+        <Pill color={planColor(stage.status)}>{planLabel(stage.status)}</Pill>
+        <Pill color="var(--txt2)"><Calendar size={10} /> {fmtDate(stage.start)} → {fmtDate(stage.end)}</Pill>
+        {stage.owner && <Pill color="var(--purple)">{stage.owner}</Pill>}
+        <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: "var(--txt2)", cursor: "pointer", display: "flex", padding: 2 }}><X size={16} /></button>
+      </div>
+      {stage.note && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 9 }}>{stage.note}</div>}
+      {(stage.evidence || []).length > 0 && (
+        <div style={{ marginBottom: 9 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 5 }}>Proof in Drive</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {stage.evidence.map((f, i) => <Pill key={i} color="var(--acc)"><FileText size={10} /> {f}</Pill>)}
+          </div>
+        </div>
+      )}
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 5 }}>Tasks on this stage</div>
+      {mine.length === 0 ? <div style={{ fontSize: 12, color: "var(--txt3)" }}>None raised yet.</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {mine.map((t) => (
+            <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: t.status === "done" ? "var(--green)" : t.status === "blocked" ? "var(--red)" : "var(--blue)", flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt3)" : "var(--txt)" }}>{t.title}</span>
+              <span style={{ color: "var(--txt3)", fontSize: 11 }}>{users.find((u) => u.id === t.assigneeId)?.name || "unassigned"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PlanBoard({ p, upd, projTasks, users, busy, onBuild }) {
+  const [view, setView] = useState("gantt");
+  const [openId, setOpenId] = useState("");
+  const plan = p.plan;
+  const stages = plan?.stages || [];
+  const open = stages.find((s) => s.id === openId) || null;
+
+  /* One shared date window for the bars. */
+  const dates = stages.flatMap((s) => [s.start, s.end]).filter(Boolean).map((d) => new Date(d).getTime()).filter((n) => !Number.isNaN(n));
+  const t0 = dates.length ? Math.min(...dates) : Date.now();
+  const t1 = dates.length ? Math.max(...dates) : Date.now() + 86400000;
+  const span = Math.max(1, t1 - t0);
+  const pctOf = (d) => Math.max(0, Math.min(100, ((new Date(d).getTime() - t0) / span) * 100));
+  const todayPct = pctOf(todayStr());
+  const doneN = stages.filter((s) => s.status === "done").length;
+  const activeStage = stages.find((s) => s.status === "active") || stages.find((s) => s.status === "blocked");
+
+  return (
+    <Section>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Project plan</span>
+        {stages.length > 0 && <Pill color="var(--green)">{doneN}/{stages.length} stages done</Pill>}
+        {activeStage && <Pill color={planColor(activeStage.status)}>Now: {activeStage.name}</Pill>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+          {stages.length > 0 && (
+            <div style={{ display: "flex", gap: 2, background: "var(--s2)", borderRadius: 8, padding: 2 }}>
+              {PLAN_VIEWS.map(([k, label]) => (
+                <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
+              ))}
+            </div>
+          )}
+          <Btn small kind={stages.length ? "ghost" : "primary"} icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={onBuild}>
+            {busy ? "Reading Drive…" : stages.length ? "Refresh from Drive" : "Build the plan"}
+          </Btn>
+        </div>
+      </div>
+
+      {stages.length === 0 ? (
+        <Empty icon={Gauge} title={busy ? "Reading the project's files…" : "No plan yet"} sub="Build it and the AI reads this project's Drive folders — the checklist, the reports, the board folders — and lays out the real stages, where you are now, and what proves each one. After that, tell the chat about a customer's feedback or a vendor delay and it moves the plan for you." />
+      ) : (<>
+        {plan?.summary && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.65, marginBottom: 12 }}>{plan.summary}</div>}
+
+        {view === "gantt" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--txt3)", fontWeight: 700, marginBottom: 6 }}>
+              <span>{fmtDate(new Date(t0).toISOString().slice(0, 10))}</span><span>{fmtDate(new Date(t1).toISOString().slice(0, 10))}</span>
+            </div>
+            <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>
+              {todayPct > 0 && todayPct < 100 && (
+                <div title="today" style={{ position: "absolute", left: `${todayPct}%`, top: -4, bottom: -4, width: 2, background: "var(--red)", opacity: 0.55, zIndex: 2, pointerEvents: "none" }} />
+              )}
+              {stages.map((s) => {
+                const a = pctOf(s.start), b = pctOf(s.end);
+                return (
+                  <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                    style={{ display: "flex", alignItems: "center", gap: 10, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 7, padding: "4px 6px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                    <span style={{ width: 132, flexShrink: 0, fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: s.status === "pending" ? "var(--txt2)" : "var(--txt)" }}>{s.name}</span>
+                    <span style={{ position: "relative", flex: 1, height: 16, background: "var(--s2)", borderRadius: 5, minWidth: 90 }}>
+                      <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, b - a)}%`, top: 0, bottom: 0, borderRadius: 5, background: planColor(s.status), opacity: s.status === "pending" ? 0.4 : 1 }} />
+                    </span>
+                    <span style={{ width: 74, flexShrink: 0, fontSize: 10.5, color: "var(--txt3)", fontFamily: MONO, textAlign: "right" }}>{String(s.end || "").slice(5)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {view === "flow" && (
+          <div style={{ display: "flex", gap: 0, overflowX: "auto", paddingBottom: 6 }}>
+            {stages.map((s, i) => (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+                <button onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                  style={{ width: 128, padding: "10px 11px", borderRadius: 10, cursor: "pointer", textAlign: "left", background: openId === s.id ? "var(--soft)" : "var(--s1)", border: `1.5px solid ${openId === s.id ? "var(--acc)" : planColor(s.status)}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(s.status), flexShrink: 0 }} />
+                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", fontFamily: MONO }}>{String(i + 1).padStart(2, "0")}</span>
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.35, marginBottom: 4 }}>{s.name}</div>
+                  <div style={{ fontSize: 10, color: "var(--txt3)" }}>{String(s.end || "").slice(5)}</div>
+                </button>
+                {i < stages.length - 1 && <span style={{ width: 16, height: 2, background: "var(--bdr2)", flexShrink: 0 }} />}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === "steps" && (
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {stages.map((s, i) => (
+              <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                style={{ display: "flex", gap: 11, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                <span style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                  <span style={{ width: 15, height: 15, borderRadius: "50%", border: `2px solid ${planColor(s.status)}`, background: s.status === "done" ? planColor(s.status) : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {s.status === "done" && <CheckCircle2 size={9} style={{ color: "#fff" }} />}
+                  </span>
+                  {i < stages.length - 1 && <span style={{ flex: 1, width: 2, minHeight: 16, background: "var(--bdr2)", marginTop: 3 }} />}
+                </span>
+                <span style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
+                    <Pill color={planColor(s.status)}>{planLabel(s.status)}</Pill>
+                    {s.owner && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{s.owner}</span>}
+                    <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(s.start)} → {fmtDate(s.end)}</span>
+                  </span>
+                  {s.note && <span style={{ display: "block", fontSize: 12, color: "var(--txt2)", marginTop: 3, lineHeight: 1.55 }}>{s.note}</span>}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {view === "log" && (
+          (plan?.log || []).length === 0
+            ? <Empty icon={Clock} title="No changes yet" sub="Every time the plan moves — a customer's feedback, a vendor delay, a stage finishing — it is recorded here with who did it and when." />
+            : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                {plan.log.map((l) => (
+                  <div key={l.id} style={{ borderLeft: "2px solid var(--acc)", paddingLeft: 11 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                      <span style={{ fontWeight: 700, fontSize: 12.5 }}>{l.byName}</span>
+                      <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(String(l.at).slice(0, 10))} · {String(l.at).slice(11, 16)}</span>
+                    </div>
+                    {l.why && <div style={{ fontSize: 12.5, color: "var(--txt)", marginTop: 2, lineHeight: 1.55 }}>{l.why}</div>}
+                    <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 2, lineHeight: 1.5 }}>{l.what}</div>
+                  </div>
+                ))}
+              </div>
+            )
+        )}
+
+        {view !== "log" && <StageDetail stage={open} tasks={projTasks} users={users} onClose={() => setOpenId("")} />}
+      </>)}
+    </Section>
+  );
+}
 
 /* A document the AI wrote, shown in the chat like a real artefact: name,
    preview, open/close, download, and where it went in Drive. */
