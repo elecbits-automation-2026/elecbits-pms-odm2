@@ -33,7 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
-import { getSession, onAuthChange, signIn, signUp, signOut, fetchProfiles } from "./lib/auth.js";
+import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -754,6 +754,34 @@ const planPatchResult = (plan, patch) => {
   return { stages, touched };
 };
 
+/* The email is how a sign-up finds the roster entry a PM filled in, so a typo
+   in it is not cosmetic — it silently strands the person as a stranger. These
+   catch the two ways it goes wrong: a stray shape, and a near-miss of a domain
+   everybody else on the roster uses. */
+const emailShapeOk = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e || "").trim());
+const domainOf = (e) => String(e || "").split("@")[1]?.toLowerCase() || "";
+/* How many single-character edits apart, up to a cap — cheap and enough. */
+const editsApart = (a, b, cap = 2) => {
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  let prev = [...Array(b.length + 1).keys()];
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+};
+const domainTypo = (email, users) => {
+  const d = domainOf(email);
+  if (!d) return "";
+  const known = [...new Set(users.map((u) => domainOf(u.email)).filter(Boolean))];
+  if (known.includes(d)) return "";
+  const near = known.find((k) => k !== d && editsApart(d, k) <= 2);
+  return near || "";
+};
+
 /* Why a roster write bounced, in words a PM can act on. The two that actually
    happen are the schema not being migrated yet and RLS refusing the insert. */
 const rosterFailure = (err) => {
@@ -1028,9 +1056,12 @@ const Btn = ({ children, onClick, kind = "primary", disabled, style, small, icon
 const AvatarDot = ({ user, size = 26 }) => (
   <span title={user?.name} style={{ width: size, height: size, borderRadius: "50%", background: user?.color || "var(--txt3)", color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.38, fontWeight: 700, flexShrink: 0, fontFamily: MONO }}>{initials(user?.name)}</span>
 );
-const Field = ({ label, children, req }) => (
+const Field = ({ label, children, req, hint }) => (
   <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-    <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{label}{req && <span style={{ color: "var(--red)" }}> *</span>}</span>
+    <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+      {label}{req && <span style={{ color: "var(--red)" }}> *</span>}
+      {hint && <span style={{ marginLeft: 6, textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--txt3)" }}>{hint}</span>}
+    </span>
     {children}
   </div>
 );
@@ -3079,7 +3110,7 @@ const PROJECT_TYPES = [["engineering", "Engineering Services"], ["elecbits_produ
 const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });
 
 function ResourcesModule() {
-  const { users, projects, tasks, me } = useCtx();
+  const { users, projects, tasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   const [tab, setTab] = useState("team");
@@ -3120,6 +3151,25 @@ function ResourcesModule() {
       </span>
     </button>
   );
+  /* Nobody is emailed automatically, so the admin has to tell them. Hand over
+     the exact words — with the exact address — rather than leaving them to
+     retype it and mistype it. */
+  const InviteBtn = ({ u }) => {
+    const [done, setDone] = useState(false);
+    if (!supabaseEnabled || u.authId || !u.email) return null;
+    const text = `You're set up on the Elecbits ODM PMS as ${u.title || "team"}.\n\n`
+      + `1. Open ${typeof window !== "undefined" ? window.location.origin : ""}\n`
+      + `2. Sign in with exactly this email: ${u.email}\n`
+      + `3. Pick any password — the account is created the first time you press Continue.\n\n`
+      + `Use that email exactly, or the app won't know it's you.`;
+    return (
+      <button title="Copy the joining instructions for this person"
+        onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(text).then(() => { setDone(true); toast(`Invite for ${u.name} copied — paste it to them`, "green"); setTimeout(() => setDone(false), 2500); }).catch(() => toast("Couldn't reach the clipboard", "amber")); }}
+        style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: done ? "var(--green)" : "var(--acc)", cursor: "pointer", padding: "6px 9px", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600 }}>
+        {done ? <CheckCircle2 size={13} /> : <Send size={13} />} {done ? "Copied" : "Invite"}
+      </button>
+    );
+  };
   const ProjCell = ({ uid, rangeFrom, rangeTo }) => {
     let list = assignedProjs(uid);
     if (rangeFrom) list = list.filter((p) => { const w = projWindow(p); return w.start <= rangeTo && w.end >= rangeFrom; });
@@ -3180,7 +3230,7 @@ function ResourcesModule() {
                       <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 600, color: open ? "var(--blue)" : "var(--txt3)" }}>{open}</td>
                       <td style={{ ...td, textAlign: "center", fontFamily: MONO, fontWeight: 700, color: act >= cap ? "var(--red)" : "var(--green)" }}>{act}/{cap}</td>
                       <td style={td}><Pill color={sc}>{sl}</Pill></td>
-                      {isAdmin && <td style={td}><button title="Edit resource" onClick={() => setResModal({ mode: "edit", user: u })} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--acc)", cursor: "pointer", padding: "6px 9px", display: "inline-flex" }}><Pencil size={13} /></button></td>}
+                      {isAdmin && <td style={{ ...td, whiteSpace: "nowrap" }}><InviteBtn u={u} /> <button title="Edit resource" onClick={() => setResModal({ mode: "edit", user: u })} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--acc)", cursor: "pointer", padding: "6px 9px", display: "inline-flex" }}><Pencil size={13} /></button></td>}
                     </tr>
                   );
                 })}
@@ -3323,10 +3373,19 @@ function ResourceModal({ mode, user, onClose }) {
   const pickRr = (k) => { setRr(k); setSkills(rrInfo(k)?.skills || []); };
   const toggleSkill = (s) => setSkills((x) => (x.includes(s) ? x.filter((y) => y !== s) : [...x, s]));
   const loginLabel = LOGIN_TYPES.find(([k]) => k === login)?.[1] || login;
+  /* The email is the join between this roster entry and the login the person
+     will make, so it has to be right and it has to be there. */
+  const addr = email.trim().toLowerCase();
+  const taken = users.find((u) => u.id !== user?.id && (u.email || "").toLowerCase() === addr && addr);
+  const nearMiss = addr && !taken ? domainTypo(addr, users.filter((u) => u.id !== user?.id)) : "";
+  const emailProblem = !addr ? "Needed — it is how they sign in and how the app knows this row is them."
+    : !emailShapeOk(addr) ? "That doesn't look like an email address."
+    : taken ? `${taken.name} is already on the roster with this email.` : "";
+
   const save = () => {
-    if (!name.trim()) return;
+    if (!name.trim() || emailProblem) return;
     const u = {
-      id: user?.id || uuid(), name: name.trim(), email: email.trim(),
+      id: user?.id || uuid(), name: name.trim(), email: addr,
       role: login, title: info?.label ? (ROLE_TITLE[rr] || info.label) : "Team",
       resourceRole: rr, dept: dept || info?.dept || "", skills, projectTags: [ptype],
       maxProjects: info?.cap || 3, color: user?.color || _PALETTE[users.length % _PALETTE.length],
@@ -3347,12 +3406,25 @@ function ResourceModal({ mode, user, onClose }) {
           <Btn small kind="ghost" icon={Trash2} style={{ marginRight: "auto", color: "var(--red)", borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }} onClick={() => setConfirmDel(true)}>Remove</Btn>
         ))}
         <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn kind="green" icon={CheckCircle2} disabled={!name.trim()} onClick={save}>{editing ? "Save changes" : "Add Resource"}</Btn>
+        <Btn kind="green" icon={CheckCircle2} disabled={!name.trim() || !!emailProblem} onClick={save}>{editing ? "Save changes" : "Add Resource"}</Btn>
       </>}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <Field label="Full name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Raj Patel" /></Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="Email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="raj@elecbits.in" /></Field>
+          <Field label="Email" req>
+            <input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="raj@elecbits.in"
+              style={emailProblem ? { borderColor: "var(--red)" } : undefined} />
+            {emailProblem && <span style={{ fontSize: 11, color: "var(--red)", fontWeight: 600, marginTop: 4, display: "block", lineHeight: 1.45 }}>{emailProblem}</span>}
+            {!emailProblem && nearMiss && (
+              <span style={{ fontSize: 11, color: "var(--amber)", fontWeight: 600, marginTop: 4, display: "block", lineHeight: 1.45 }}>
+                Nobody else uses <span style={{ fontFamily: MONO }}>@{domainOf(addr)}</span>.{" "}
+                <button type="button" onClick={() => setEmail(`${addr.split("@")[0]}@${nearMiss}`)}
+                  style={{ background: "none", border: "none", padding: 0, color: "var(--acc)", cursor: "pointer", font: "inherit", textDecoration: "underline" }}>
+                  Did you mean @{nearMiss}?
+                </button>
+              </span>
+            )}
+          </Field>
           <Field label="Department">
             <select className="inp" value={dept} onChange={(e) => pickDept(e.target.value)}>
               <option value="">— Select Department —</option>
@@ -4975,42 +5047,108 @@ const Shell = ({ dark, children }) => (
    Real Supabase email/password auth when Supabase is connected; a working demo
    login (any credentials, or pick a role) when it isn't. Always the front door. */
 const SAMPLE_LOGIN = { email: "saurav@elecbits.in", pw: "Elecbits@2026" };
-function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
-  const [mode, setMode] = useState("signin");
+
+/* One door, not two.
+   Asking somebody to know in advance whether they are "signing in" or
+   "creating an account" is asking them a question only the database can
+   answer — and getting it wrong is what produced "that email already has an
+   account" on a screen with no way forward. So: they type their work email
+   and a password and press Continue.
+
+   Sign-in is tried first. If the credentials are refused we try to create the
+   account; Supabase answers a sign-up for an existing email with an empty
+   identities array and creates nothing, which tells us the email is real and
+   the password was simply wrong — so we say that, and offer the reset. A
+   password typo can never mint a stray account. */
+function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword }) {
   const [email, setEmail] = useState(SAMPLE_LOGIN.email);
   const [pw, setPw] = useState(SAMPLE_LOGIN.pw);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const [wrongPw, setWrongPw] = useState(false);   // offer the reset only once it is the likely problem
+  const [sent, setSent] = useState(false);
+
+  const netErr = (m) => /failed to fetch|networkerror|load failed|fetch/i.test(m);
+
   const submit = async () => {
     if (demo) { onDemoLogin("u-admin"); return; }
-    if (!email.trim() || !pw) return;
-    setBusy(true); setErr(""); setMsg("");
+    const addr = email.trim().toLowerCase();
+    if (!addr || !pw) return;
+    setBusy(true); setErr(""); setMsg(""); setWrongPw(false);
     try {
-      if (mode === "signin") await signIn(email.trim(), pw);
-      else {
-        const d = await signUp(email.trim(), pw, name.trim());
-        // With confirmation switched off Supabase hands back a session and we
-        // are already in — onAuthChange takes it from here. Otherwise keep the
-        // password they just typed so Sign in is one click, not a retype.
-        if (!d?.session) {
-          setMsg(d?.user?.identities?.length === 0
-            ? "That email already has an account — sign in with it below."
-            : "Account created. If your workspace asks for email confirmation, click the link we sent, then sign in below — your password is still filled in.");
-          setMode("signin");
-        }
-      }
+      await signIn(addr, pw);                       // onAuthChange takes it from here
     } catch (e) {
-      const m = e?.message || "Authentication failed";
-      if (/failed to fetch|networkerror|load failed|fetch/i.test(m))
-        setErr("Can't reach Supabase. Check VITE_SUPABASE_URL is your exact project URL, the project isn't paused, and a VPN/ad-blocker isn't blocking supabase.co.");
-      else if (/invalid login credentials/i.test(m))
-        setErr("Wrong email or password — or no account yet. Use “Create one” to sign up first (first user becomes admin).");
-      else setErr(m);
+      const m = e?.message || "Sign-in failed";
+      if (netErr(m)) {
+        setErr("Can't reach Supabase. Check VITE_SUPABASE_URL is your exact project URL, the project isn't paused, and a VPN or ad-blocker isn't blocking supabase.co.");
+      } else if (/invalid login credentials|email not confirmed/i.test(m)) {
+        try {
+          const d = await signUp(addr, pw, name.trim());
+          if (d?.user?.identities?.length === 0) {
+            // The email exists. So this was the wrong password, not a new person.
+            setWrongPw(true);
+            setErr("That password doesn't match this email. Try again, or send yourself a reset link.");
+          } else if (d?.session) {
+            /* straight in */
+          } else {
+            setMsg(`Account created for ${addr}. Check that inbox for a confirmation link, then press Continue again — your password is still filled in.`);
+          }
+        } catch (e2) {
+          const m2 = e2?.message || m;
+          if (/password/i.test(m2) && /(6|short|weak|least)/i.test(m2)) setErr("Pick a longer password — at least 6 characters.");
+          else if (/valid email|invalid/i.test(m2)) setErr("That doesn't look like an email address.");
+          else if (/rate|too many/i.test(m2)) setErr("Too many attempts just now. Wait a minute and try again.");
+          else { setWrongPw(true); setErr(m2); }
+        }
+      } else if (/rate|too many/i.test(m)) {
+        setErr("Too many attempts just now. Wait a minute and try again.");
+      } else {
+        setErr(m);
+      }
     }
     setBusy(false);
   };
+
+  const sendReset = async () => {
+    const addr = email.trim().toLowerCase();
+    if (!addr) { setErr("Type your work email first."); return; }
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      await resetPassword(addr);
+      setSent(true);
+      setMsg(`Reset link sent to ${addr}. Open it on this device and you'll be asked to choose a new password.`);
+    } catch (e) {
+      const m = e?.message || "Couldn't send the reset link";
+      setErr(netErr(m) ? "Can't reach Supabase to send that." : m);
+    }
+    setBusy(false);
+  };
+
+  /* Back from the reset email — pick the new password and carry straight on. */
+  const [np, setNp] = useState("");
+  const saveNew = async () => {
+    if (np.length < 6) { setErr("At least 6 characters."); return; }
+    setBusy(true); setErr("");
+    try { await setPassword(np); onNewPassword?.(); }
+    catch (e) { setErr(e?.message || "Couldn't set that password"); }
+    setBusy(false);
+  };
+  if (recovery) {
+    return (
+      <Shell dark={dark}>
+        <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30 }}>
+          <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 34), marginBottom: 14 }} />
+          <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>Choose a new password</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 16 }}>You came in from a reset link. Set it once and you're straight into the workspace.</div>
+          <Field label="New password"><input className="inp" type="password" value={np} onChange={(e) => setNp(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveNew()} placeholder="at least 6 characters" autoFocus /></Field>
+          {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, marginTop: 10 }}>{err}</div>}
+          <div style={{ marginTop: 14 }}><Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || np.length < 6} onClick={saveNew} style={{ width: "100%" }}>{busy ? "Saving…" : "Save and continue"}</Btn></div>
+        </div>
+      </Shell>
+    );
+  }
   return (
     <Shell dark={dark}>
       <div className="fade card" style={{ width: "100%", maxWidth: 400, padding: 30, position: "relative" }}>
@@ -5018,7 +5156,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 20 }}>
           <img src={elecbitsLogo} alt="Elecbits" style={{ ...logoChip(dark, 38), marginBottom: 10 }} />
           <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>ODM · Project Management</div>
-          <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{mode === "signin" || demo ? "Sign in to continue" : "Create your account"}</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt3)", marginTop: 2 }}>{demo ? "Sign in to continue" : "Sign in — or create your account, same box"}</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--soft)", border: "1px solid var(--bdr)", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
           <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
@@ -5028,12 +5166,17 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
           </div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-          {mode === "signup" && !demo && <Field label="Full name"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Field>}
-          <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
+          {!demo && <Field label="Full name" hint="only used if this is your first time"><input className="inp" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Your name" /></Field>}
+          <Field label="Work email"><input className="inp" type="email" value={email} onChange={(e) => { setEmail(e.target.value); setWrongPw(false); setSent(false); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@elecbits.in" /></Field>
           <Field label="Password"><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="••••••••" /></Field>
-          {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600 }}>{err}</div>}
-          {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>{msg}</div>}
-          <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : mode === "signin" || demo ? "Sign in" : "Create account"}</Btn>
+          {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600, lineHeight: 1.5 }}>{err}</div>}
+          {msg && <div style={{ fontSize: 12, color: "var(--green)", fontWeight: 600, lineHeight: 1.5 }}>{msg}</div>}
+          <Btn icon={busy ? Loader2 : ArrowRight} disabled={busy || (!demo && (!email.trim() || !pw))} onClick={submit} style={{ width: "100%" }}>{busy ? "Please wait…" : demo ? "Sign in" : "Continue"}</Btn>
+          {!demo && (wrongPw || sent) && (
+            <button onClick={sendReset} disabled={busy || sent} style={{ background: "none", border: "none", color: sent ? "var(--txt3)" : "var(--acc)", cursor: sent ? "default" : "pointer", fontSize: 12, fontWeight: 700, textAlign: "center" }}>
+              {sent ? "Reset link sent — check your inbox" : "Email me a reset link"}
+            </button>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
           <div style={{ flex: 1, height: 1, background: "var(--bdr)" }} /><span style={{ fontSize: 11, color: "var(--txt3)", fontWeight: 600 }}>{demo ? "or jump in as" : "quick fill a team member"}</span><div style={{ flex: 1, height: 1, background: "var(--bdr)" }} />
@@ -5048,9 +5191,8 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin }) {
         {demo ? (
           <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6, textAlign: "center" }}>The full team (25) is in the "View as" switcher once you're in. Demo mode — any credentials work; connect Supabase for real accounts.</div>
         ) : (
-          <div style={{ marginTop: 16, fontSize: 12, color: "var(--txt2)", textAlign: "center" }}>
-            {mode === "signin" ? "New to the workspace? " : "Already have an account? "}
-            <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>{mode === "signin" ? "Create one" : "Sign in"}</button>
+          <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--txt3)", textAlign: "center", lineHeight: 1.6 }}>
+            New here? Use the work email your PM added you under and pick a password — the account is created on the spot and lands on your place in the team.
           </div>
         )}
       </div>
@@ -5091,6 +5233,7 @@ export default function App() {
   const [me, setMe] = useState("u-admin");
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(!supabaseEnabled);
+  const [recovery, setRecovery] = useState(false);
   const [profiles, setProfiles] = useState(null);
   const [demoUser, setDemoUser] = useState(() => { try { return localStorage.getItem("pms-demo-user") || ""; } catch { return ""; } });
   const demoLogin = useCallback((id) => { setDemoUser(id); setMe(id); try { localStorage.setItem("pms-demo-user", id); } catch { } }, []);
@@ -5140,7 +5283,13 @@ export default function App() {
     (async () => {
       try { setSession(await getSession()); } catch (e) { }
       setAuthChecked(true);
-      sub = onAuthChange((s) => setSession(s));
+      sub = onAuthChange((s, event) => {
+        setSession(s);
+        // Arriving from a reset email: Supabase signs them in, but the point
+        // of the visit is to choose a new password — so ask for it before
+        // dropping them into the workspace.
+        if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      });
     })();
     return () => sub?.unsubscribe?.();
   }, []);
@@ -5222,7 +5371,9 @@ export default function App() {
 
   if (supabaseConfigured && !supabaseEnabled) return <SupabaseConfigError dark={dark} onToggleTheme={() => setDark(!dark)} />;
   if (supabaseEnabled && !authChecked) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Checking your session…</div></Shell>;
-  if (supabaseEnabled && !session) return <Login dark={dark} onToggleTheme={() => setDark(!dark)} />;
+  if (supabaseEnabled && (!session || recovery)) {
+    return <Login dark={dark} onToggleTheme={() => setDark(!dark)} recovery={recovery && !!session} onNewPassword={() => setRecovery(false)} />;
+  }
   if (supabaseEnabled && !profiles) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Loading your workspace…</div></Shell>;
   if (!supabaseEnabled && !demoUser) return <Login dark={dark} demo onDemoLogin={demoLogin} onToggleTheme={() => setDark(!dark)} />;
   if (!booted) return (

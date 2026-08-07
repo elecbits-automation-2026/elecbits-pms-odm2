@@ -13,7 +13,7 @@ export async function getSession() {
 
 export function onAuthChange(cb) {
   if (!supabase) return { unsubscribe() {} };
-  const { data } = supabase.auth.onAuthStateChange((_event, session) => cb(session));
+  const { data } = supabase.auth.onAuthStateChange((event, session) => cb(session, event));
   return data.subscription;
 }
 
@@ -31,6 +31,22 @@ export async function signUp(email, password, name) {
   });
   if (error) throw error;
   return data;
+}
+
+/* Email them a link back into the app to choose a new password. The link
+   lands on the same origin, where PASSWORD_RECOVERY switches the login card
+   into "set a new password". */
+export async function resetPassword(email) {
+  if (!supabase) return;
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: typeof window !== "undefined" ? window.location.origin : undefined,
+  });
+  if (error) throw error;
+}
+
+export async function setPassword(password) {
+  const { error } = await supabase.auth.updateUser({ password });
+  if (error) throw error;
 }
 
 export async function signOut() {
