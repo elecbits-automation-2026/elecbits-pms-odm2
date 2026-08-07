@@ -1575,6 +1575,15 @@ function AddExistingProject({ onClose }) {
    Clickable from the projects list. Progress and to-dos are derived from the
    Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
 const projTasksCount = (tasks, pid) => tasks.filter((t) => t.projectId === pid).length;
+/* The project page, one job at a time. */
+const PROJ_TABS = [
+  ["overview", "Overview", Gauge, ""],
+  ["plan", "Plan", ListChecks, "plan"],
+  ["tasks", "To-dos", CheckCircle2, "tasks"],
+  ["mom", "Internal MoM", Lightbulb, "mom"],
+  ["files", "Files & details", FileText, ""],
+  ["chat", "Ask the AI", Bot, ""],
+];
 /* Defined at module scope, NOT inside ProjectDetail: components declared inside
    a component get a new identity on every render, so React unmounts and
    remounts their whole subtree — which made inputs lose focus on each
@@ -1602,6 +1611,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [momVal, setMomVal] = useState("");
   const [momWho, setMomWho] = useState("");
   const [momBusy, setMomBusy] = useState(false);
+  const [tab, setTab] = useState("overview");
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
   const chatLastAtts = useRef([]);      // so "save that here" still works next turn
@@ -1976,7 +1986,24 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
         )}
       </div>
 
+      {/* One page per job. Everything used to stack into one long scroll and
+          compete for the same attention; each of these is now the only thing
+          on screen when you are actually doing it. */}
+      <div className="card" style={{ padding: "0 14px", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", overflowX: "auto" }}>
+        {PROJ_TABS.map(([k, label, Ic, badge]) => {
+          const n = badge === "tasks" ? openTasks.length : badge === "mom" ? (p.moms || []).length : badge === "plan" ? (p.plan?.stages || []).length : 0;
+          return (
+            <button key={k} data-ptab={k} onClick={() => setTab(k)}
+              style={{ display: "flex", alignItems: "center", gap: 7, padding: "12px 14px", background: "none", border: "none", borderBottom: `2px solid ${tab === k ? "var(--acc)" : "transparent"}`, color: tab === k ? "var(--acc)" : "var(--txt2)", fontWeight: tab === k ? 700 : 600, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", transition: "all .15s" }}>
+              <Ic size={15} /> {label}
+              {n > 0 && <span style={{ fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 99, background: tab === k ? "var(--soft)" : "var(--s2)", color: tab === k ? "var(--acc)" : "var(--txt3)" }}>{n}</span>}
+            </button>
+          );
+        })}
+      </div>
+
       {/* overall progress */}
+      {tab === "overview" && (
       <Section>
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <div style={{ minWidth: 90 }}>
@@ -1991,13 +2018,14 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           </div>
         </div>
       </Section>
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,340px)", gap: 16 }}>
-        {/* LEFT — next to-dos + internal sheet */}
+      <div style={{ display: "grid", gridTemplateColumns: tab === "overview" ? "minmax(0,1fr) minmax(0,340px)" : "minmax(0,1fr)", gap: 16, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {(tab === "overview" || tab === "tasks") && (
           <Section>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Next to-dos</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>{tab === "tasks" ? "Every open to-do" : "Next to-dos"}</span>
               {todos.length > 0 && <Pill color="var(--purple)">{todos.length} open</Pill>}
               <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>
             </div>
@@ -2005,7 +2033,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               <Empty icon={ListChecks} title="No open to-dos" sub="Every open task for this project shows here, most urgent first. Add them in Daily Scrum — organise a note and push the tasks." />
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {todos.map((t) => {
+                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => {
                   const { Ic, label, color } = todoMeta(t);
                   const u = users.find((x) => x.id === t.assigneeId);
                   return (
@@ -2026,12 +2054,48 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                     </div>
                   );
                 })}
+                {tab === "overview" && todos.length > 5 && (
+                  <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
+                    See all {todos.length} to-dos →
+                  </button>
+                )}
               </div>
             )}
           </Section>
+          )}
 
-          <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} myName={my?.name} />
+          {/* a glance at the plan from the overview, without the whole board */}
+          {tab === "overview" && (p.plan?.stages || []).length > 0 && (
+            <Section>
+              <CardLabel right={<button onClick={() => setTab("plan")} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Open the plan →</button>}>Where the plan stands</CardLabel>
+              {(() => {
+                const st = p.plan.stages;
+                const doneN = st.filter((x) => x.status === "done").length;
+                const now = st.filter((x) => x.status === "active" || x.status === "blocked");
+                return (<>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: now.length ? 11 : 0 }}>
+                    <span style={{ fontSize: 22, fontWeight: 800, fontFamily: MONO, color: "var(--acc)" }}>{doneN}/{st.length}</span>
+                    <span style={{ flex: 1 }}><Progress pct={(doneN / st.length) * 100} color="var(--acc)" h={8} /></span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {now.slice(0, 4).map((x) => (
+                      <div key={x.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(x.status), flexShrink: 0 }} />
+                        <span style={{ flex: 1, minWidth: 0 }}>{x.name}</span>
+                        {x.track && <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{x.track}</span>}
+                        <Pill color={planColor(x.status)}>{planLabel(x.status)}</Pill>
+                      </div>
+                    ))}
+                    {!now.length && <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>Nothing marked in progress right now.</div>}
+                  </div>
+                </>);
+              })()}
+            </Section>
+          )}
 
+          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} myName={my?.name} />}
+
+          {tab === "mom" && (
           <Section>
             <CardLabel right={<Pill color="var(--purple)"><Lightbulb size={11} /> ideas · challenges · lessons</Pill>}>Internal MoM</CardLabel>
             <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 10 }}>
@@ -2050,8 +2114,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </div>
             )}
           </Section>
+          )}
 
-          {(p.knownStatus || isPM) && (
+          {tab === "overview" && (p.knownStatus || isPM) && (
             <Section>
               <CardLabel right={isPM && <button onClick={() => { if (!editStatus) setStatusDraft(p.knownStatus || ""); setEditStatus(!editStatus); }} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editStatus ? "Cancel" : "Edit"}</button>}>Known status</CardLabel>
               {editStatus ? (
@@ -2065,6 +2130,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
+          {tab === "files" && (
           <Section>
             <CardLabel right={<Pill color="var(--purple)"><Database size={11} /> PM + PCB folders</Pill>}>Drive intelligence</CardLabel>
             <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 4 }}>{pmPath(p.projectId)} → Checklist.xlsx · Reports/ · Client-Comms/</div>
@@ -2094,6 +2160,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </div>
           </Section>
 
+          )}
+
+          {tab === "chat" && (
           <Section>
             <CardLabel right={<Pill color="var(--acc)"><Bot size={11} /> knows tasks · status · Drive · memory</Pill>}>Project chat — ask the AI</CardLabel>
             <div ref={chatRef} style={{ maxHeight: 330, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, marginBottom: 11, paddingRight: 4 }}>
@@ -2131,6 +2200,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </div>
           </Section>
 
+          )}
+
+          {tab === "files" && (
           <Section style={{ background: "var(--s2)" }}>
             <CardLabel>Project internal sheet</CardLabel>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "9px 16px", fontSize: 12.5 }}>
@@ -2147,9 +2219,11 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               {(p.linkedIds || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><KV k="Linked IDs (GW / PCB)" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{p.linkedIds.join(", ")}</span>} /></div>}
             </div>
           </Section>
+          )}
         </div>
 
-        {/* RIGHT — sanction gates, team, timeline, LLDs */}
+        {/* RIGHT — the standing facts, alongside the overview only */}
+        {tab === "overview" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Section>
             <CardLabel>Sanction gates</CardLabel>
@@ -2240,6 +2314,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           </Section>
           )}
         </div>
+        )}
       </div>
     </div>
   );
