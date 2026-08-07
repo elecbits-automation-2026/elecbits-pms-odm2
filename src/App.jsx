@@ -362,7 +362,7 @@ const attachCtx = (atts, fresh = true) => !atts?.length ? "" : `\n${fresh ? "FIL
       : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. You have not stored it anywhere yet. If it belongs in a project folder, use save_attachment with that project's ID, and after it is saved you can read what is inside it.`).join("\n")}\n`;
 /* Tries the proxy first (key stays server-side), then the direct browser key —
    so a configured-but-undeployed proxy no longer silently kills live AI. */
-async function claude(prompt, { json = true } = {}) {
+async function claude(prompt, { json = true, maxTokens = 1000 } = {}) {
   const attempts = [];
   if (import.meta.env.VITE_CLAUDE_PROXY_URL) attempts.push({ url: import.meta.env.VITE_CLAUDE_PROXY_URL, direct: false });
   if (import.meta.env.VITE_ANTHROPIC_API_KEY || attempts.length === 0) attempts.push({ url: "https://api.anthropic.com/v1/messages", direct: true });
@@ -377,7 +377,7 @@ async function claude(prompt, { json = true } = {}) {
       }
       const res = await fetch(a.url, {
         method: "POST", headers,
-        body: JSON.stringify({ model: AI_MODEL, max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+        body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
       });
       const data = await res.json().catch(() => ({}));
       // Any non-2xx, or a body that isn't a real Anthropic response, is a
@@ -606,8 +606,9 @@ const planColor = (s) => PLAN_STATUS.find((x) => x.k === s)?.c || "var(--txt3)";
 const planLabel = (s) => PLAN_STATUS.find((x) => x.k === s)?.label || "Not started";
 /* The shape every AI reply must produce, described once. */
 const PLAN_SHAPE = `A stage looks like this:
-{"id":"kickoff","name":"Kickoff","status":"done","start":"2026-08-01","end":"2026-08-05","owner":"Ravi","note":"one plain line on where this stands","evidence":["the real file name that proves it"],"depends":"id of the stage before it"}
-status is exactly one of: done, active, blocked, pending. Dates are YYYY-MM-DD. owner is a person's name from the team, or "". evidence lists real file names you actually saw in Drive — never invent one. Give every stage an id in lower-case-with-dashes.`;
+{"id":"kickoff","name":"Kickoff","status":"done","track":"PM","start":"2026-08-01","end":"2026-08-05","owner":"Ravi","note":"one plain line on where this stands","evidence":["the real file name that proves it"]}
+status is exactly one of: done, active, blocked, pending. Dates are YYYY-MM-DD. owner is a person's name from the team, or "". evidence lists real file names you actually saw in Drive — never invent one. Give every stage an id in lower-case-with-dashes.
+"track" is the workstream the stage belongs to — Hardware, Firmware, Enclosure, Testing, Supply chain, PM, or whatever the project actually uses. Hardware work does not wait for firmware work: put things that genuinely run at the same time on DIFFERENT tracks with OVERLAPPING dates. Only stagger dates where one thing truly cannot start until another finishes. A plan where every stage runs one after another is almost always wrong for a hardware project.`;
 
 const planBuildPrompt = (p, projTasks, users, memory, driveData) => `You are the Elecbits ODM planner. Build the delivery plan for this hardware project from what actually exists — its Drive folders, its files, its tasks and its written status. This is not a template exercise: the stages, the dates and the state of each one must reflect the real evidence in front of you.
 ${memCtx(memory)}
@@ -624,31 +625,88 @@ HOW TO BUILD IT
 - Mark a stage done only when something in Drive or a finished task shows it is done. Name that file in "evidence".
 - The stage being worked on now is "active". Anything waiting on a decision or a supplier is "blocked".
 - Spread the dates sensibly between the start and the deadline, keeping any real dates you can see.
-- Between 5 and 12 stages. Fewer, meaningful stages beat many trivial ones.
+- Between 5 and 14 stages. Fewer, meaningful stages beat many trivial ones.
 ${PLAN_SHAPE}
 Reply with JSON only: {"stages":[...],"summary":"one plain sentence on where the project stands overall"}`;
 
+/* Building the plan from a checklist someone uploaded, rather than from Drive.
+   Their sheet is the authority — its wording, its order, its parallelism. */
+const planFromSheetPrompt = (p, users, sheetName, sheetText) => `You are the Elecbits ODM planner. Someone has uploaded their own checklist for project ${p.projectId} and wants the plan built from it. Their sheet is the authority: use ITS stage names, ITS order, ITS owners and ITS dates wherever they are given. Do not substitute a generic flow, and do not drop rows because they look unfamiliar.
+FILE: ${sheetName}
+CONTENTS (rows as they appear, sheet by sheet):
+"""${String(sheetText).slice(0, 14000)}"""
+PROJECT: ${p.projectId} — ${p.name || ""} | starts ${p.startDate || (p.createdAt || "").slice(0, 10)} | deadline ${p.deadline || "not set"}
+TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "nobody assigned yet"}
+
+HOW TO READ THEIR SHEET
+- Work out which column is the stage or task name, which is status, which is the owner, and which are dates. Headers vary and may not be on the first row — look at the data.
+- A status column might say Done / Complete / Yes / Pending / WIP / Blocked / N-A. Map it: done, active, blocked, pending. Anything empty or unrecognised is pending.
+- If the sheet has separate sections or sheets for hardware, firmware, testing and so on, those are the tracks. Otherwise infer the track from the row's wording.
+- Where the sheet gives no dates, spread them sensibly between the project start and the deadline — but keep genuinely parallel workstreams overlapping rather than queued.
+- Keep every row that is a real piece of work. Drop only headers, blank rows and totals.
+${PLAN_SHAPE}
+Reply with JSON only: {"stages":[...],"summary":"one plain sentence on what this checklist covers and where it stands"}`;
+
+/* Stages that share a track are one workstream; different tracks run side by
+   side. Everything without a track falls into one unnamed group. */
+const trackGroups = (stages) => {
+  const order = [];
+  const byTrack = new Map();
+  for (const s of stages) {
+    const t = (s.track || "").trim() || "Plan";
+    if (!byTrack.has(t)) { byTrack.set(t, []); order.push(t); }
+    byTrack.get(t).push(s);
+  }
+  return order.map((t) => [t, byTrack.get(t)]);
+};
+const hasTracks = (stages) => new Set(stages.map((s) => (s.track || "").trim() || "Plan")).size > 1;
+
+/* Read an uploaded checklist into plain rows the AI can follow. .xlsx and .xls
+   go through SheetJS, which is loaded only when someone actually uploads one;
+   .csv and text formats are already rows. */
+async function sheetToText(file) {
+  const name = (file.name || "").toLowerCase();
+  if (/\.(csv|tsv|txt|md)$/.test(name)) return (await file.text()).slice(0, 20000);
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  return wb.SheetNames.map((sheet) => {
+    const rows = XLSX.utils.sheet_to_csv(wb.Sheets[sheet], { blankrows: false });
+    return `--- SHEET: ${sheet} ---\n${rows}`;
+  }).join("\n\n").slice(0, 20000);
+}
+
 /* An offline skeleton, so the panel is never blank when the AI is unreachable. */
 const fallbackPlan = (p) => {
-  const start = p.startDate || (p.createdAt || todayStr()).slice(0, 10);
-  const end = p.deadline || todayStr();
+  // Dates typed by hand are not always dates. A bad one used to throw a
+  // RangeError out of toISOString and leave the button spinning for ever.
+  const day = (v, fallback) => {
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? t : fallback;
+  };
+  const startMs = day(p.startDate || (p.createdAt || "").slice(0, 10), day(todayStr(), Date.now()));
+  const endMs = Math.max(startMs + 86400000, day(p.deadline, startMs + 90 * 86400000));
   const names = ["Kickoff", "Requirements", "Schematic & design review", "PCB development", "Firmware development", "Testing", "Client handoff"];
-  const span = Math.max(1, Math.round((new Date(end) - new Date(start)) / 86400000));
+  const span = Math.max(1, Math.round((endMs - startMs) / 86400000));
+  const at = (i) => new Date(startMs + Math.round((span * i) / names.length) * 86400000).toISOString().slice(0, 10);
   return {
     stages: names.map((name, i) => ({
       id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
       name,
       status: i === 0 ? "active" : "pending",
-      start: new Date(new Date(start).getTime() + Math.round((span * i) / names.length) * 86400000).toISOString().slice(0, 10),
-      end: new Date(new Date(start).getTime() + Math.round((span * (i + 1)) / names.length) * 86400000).toISOString().slice(0, 10),
+      track: ["PM", "PM", "Hardware", "Hardware", "Firmware", "Testing", "PM"][i],
+      start: at(i),
+      end: at(i + 1),
       owner: "", note: i === 0 ? "Starting point — refresh the plan once the AI is reachable." : "", evidence: [],
     })),
     summary: "Outline plan — refresh it to read the real state from Drive.",
   };
 };
 
-/* Applying a change the AI worked out from something the PM said. */
-const applyPlanPatch = (plan, patch, byName) => {
+/* Applying a change the AI worked out from something the PM said.
+   Deliberately pure — no ids, no clock — so it can run inside a React state
+   updater, which may be invoked more than once for the same change. The
+   caller builds the log entry and merges it. */
+const planPatchResult = (plan, patch) => {
   const stages = [...(plan?.stages || [])];
   const touched = [];
   for (const ch of patch.changes || []) {
@@ -673,12 +731,7 @@ const applyPlanPatch = (plan, patch, byName) => {
     stages[i] = next;
     touched.push(`${before.name}: ${bits.join(", ") || "updated"}`);
   }
-  const entry = {
-    id: uid(), at: new Date().toISOString(), byName: byName || "someone",
-    why: String(patch.reason || "").slice(0, 400),
-    what: touched.join(" · ").slice(0, 600) || "no stage changed",
-  };
-  return { plan: { ...(plan || {}), stages, summary: patch.summary || plan?.summary || "", updatedAt: entry.at, log: [entry, ...(plan?.log || [])].slice(0, 100) }, entry, touched };
+  return { stages, touched };
 };
 
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
@@ -1478,7 +1531,11 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const chatLastAtts = useRef([]);      // so "save that here" still works next turn
   const chatRef = useRef(null);
   useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [(p.chat || []).length, chatBusy, chatAtts.length]);
-  const upd = (patch) => setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, ...patch } : x)));
+  // patch may be a function of the CURRENT project — a plan write that lands
+  // after a slow Drive read must not overwrite what happened meanwhile.
+  const upd = (patch) => setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, ...(typeof patch === "function" ? patch(x) : patch) } : x)));
+  const pRef = useRef(p);
+  useEffect(() => { pRef.current = p; });
   const nowMs = now || Date.now();
   const pm = p.team?.find((t) => t.slot.startsWith("PM"));
   const projTasks = tasks.filter((t) => t.projectId === p.projectId);
@@ -1540,21 +1597,78 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const buildPlan = async () => {
     if (planBusy) return;
     setPlanBusy(true);
-    const { digest, error } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: "checklist tracker plan schedule milestones review" });
-    let built;
     try {
-      const r = await claude(planBuildPrompt(p, projTasks, users, memory, digest));
+      const { digest, error } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: "checklist tracker plan schedule milestones review" });
+      let built = null;
+      try {
+        const r = await claude(planBuildPrompt(p, projTasks, users, memory, digest), { maxTokens: 6000 });
+        built = Array.isArray(r?.stages) && r.stages.length ? r : null;
+      } catch { built = null; }
+
+      // An existing plan carries things that live nowhere else — dates the PM
+      // shifted after a vendor call, notes, owners. Never trade that for the
+      // generic skeleton because the AI happened to be unreachable.
+      if (!built) {
+        if (p.plan?.stages?.length) {
+          toast(error || "Couldn't reach the AI — the plan is untouched. Try again in a moment.", "amber");
+          return;
+        }
+        built = fallbackPlan(p);
+        if (!built) { toast("Couldn't build a plan — check the project's start and deadline dates.", "amber"); return; }
+        const outlineEntry = { id: uid(), at: new Date().toISOString(), byName: my?.name || "someone", why: "Created an outline plan", what: `${built.stages.length} stages · the AI was unreachable, so this is a template to refresh later` };
+        upd((cur) => ({ plan: { ...built, updatedAt: outlineEntry.at, log: [outlineEntry, ...(cur.plan?.log || [])].slice(0, 100) } }));
+        toast(error || "Outline plan created — refresh it when the AI is back", "amber");
+        return;
+      }
+
+      const entry = {
+        id: uid(), at: new Date().toISOString(), byName: my?.name || "someone",
+        why: pRef.current.plan?.stages?.length ? "Refreshed the plan from Drive" : "Built the plan from Drive",
+        what: `${built.stages.length} stages${digest ? " · read from the project's files" : " · from the project's tasks and status, Drive was quiet"}`,
+      };
+      upd((cur) => ({ plan: { ...built, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
+      toast(digest ? "Plan built from the project's files" : "Plan built — Drive had nothing to add", digest ? "green" : "amber");
+    } finally {
+      setPlanBusy(false);
+    }
+  };
+
+  /* Build the plan from a checklist they uploaded — their sheet, their order,
+     their parallelism. Also filed into the project's Drive folder. */
+  const planFromSheet = async (file) => {
+    if (planBusy) return;
+    setPlanBusy(true);
+    try { await planFromSheetInner(file); } finally { setPlanBusy(false); }
+  };
+  const planFromSheetInner = async (file) => {
+    let text = "";
+    try { text = await sheetToText(file); } catch { text = ""; }
+    if (!text.trim()) {
+      toast(`Couldn't read ${file.name} — save it as .xlsx or .csv and try again`, "amber");
+      return;
+    }
+    let built = null;
+    try {
+      const r = await claude(planFromSheetPrompt(p, users, file.name, text), { maxTokens: 6000 });
       built = Array.isArray(r?.stages) && r.stages.length ? r : null;
     } catch { built = null; }
-    if (!built) { built = fallbackPlan(p); if (error) toast(error, "amber"); }
+    if (!built) {
+      toast("The AI couldn't turn that sheet into a plan — is it reachable?", "amber");
+      return;
+    }
     const entry = {
       id: uid(), at: new Date().toISOString(), byName: my?.name || "someone",
-      why: p.plan?.stages?.length ? "Refreshed the plan from Drive" : "Built the plan from Drive",
-      what: `${built.stages.length} stages${digest ? " · read from the project's files" : " · outline only, Drive was quiet"}`,
+      why: `Built the plan from the uploaded checklist ${file.name}`,
+      what: `${built.stages.length} stages across ${new Set(built.stages.map((s) => s.track || "Plan")).size} workstream(s)`,
     };
-    upd({ plan: { ...built, updatedAt: entry.at, log: [entry, ...(p.plan?.log || [])].slice(0, 100) } });
-    toast(digest ? "Plan built from the project's files" : "Outline plan created", digest ? "green" : "amber");
-    setPlanBusy(false);
+    upd((cur) => ({ plan: { ...built, source: file.name, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
+    toast(`Plan built from ${file.name}`, "green");
+    // Keep their checklist with the project, so the next Drive read sees it too.
+    const att = await readAttachment(file);
+    if (!att.tooBig && !att.failed) {
+      const r = await saveAttachmentToDrive(att, p.projectId, driveScope(my?.role));
+      if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${file.name} uploaded with the plan`);
+    }
   };
 
   const sendChat = async () => {
@@ -1610,8 +1724,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       try { patch = JSON.parse(planBlock[1]); } catch { /* malformed — ignore */ }
       if (patch && (patch.changes?.length || patch.tasks?.length)) {
         if (patch.changes?.length) {
-          const { plan, touched } = applyPlanPatch(p.plan, patch, my?.name);
-          upd({ plan });
+          const { touched } = planPatchResult(pRef.current.plan, patch);
+          const entry = {
+            id: uid(), at: new Date().toISOString(), byName: my?.name || "someone",
+            why: String(patch.reason || "").slice(0, 400),
+            what: touched.join(" · ").slice(0, 600) || "no stage changed",
+          };
+          upd((cur) => {
+            const r = planPatchResult(cur.plan, patch);
+            return { plan: { ...(cur.plan || {}), stages: r.stages, summary: patch.summary || cur.plan?.summary || "", updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } };
+          });
           results.push(`Plan updated — ${touched.join(" · ")}. Logged against your name.`);
           sheetSync(`${pmPath(p.projectId)}`, `Plan updated from project chat: ${patch.reason || "change"}`);
         }
@@ -1754,7 +1876,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             )}
           </Section>
 
-          <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} />
+          <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} myName={my?.name} />
 
           {(p.knownStatus || isPM) && (
             <Section>
@@ -3163,7 +3285,35 @@ function MemoryModule() {
    Gantt for the shape of the schedule, Flow for the sequence, Steps for the
    detail, Changes for who moved what and when. Clicking anything anywhere
    opens the same stage detail.                                              */
-const PLAN_VIEWS = [["gantt", "Timeline"], ["flow", "Flow"], ["steps", "Steps"], ["log", "Changes"]];
+const PLAN_VIEWS = [["steps", "Steps"], ["flow", "Flow"], ["gantt", "Timeline"], ["log", "Changes"]];
+
+/* One editable row in the Steps view. Module scope, or every keystroke would
+   remount the inputs and lose focus. */
+function StageEditRow({ s, i, count, onChange, onMove, onDelete, trackList }) {
+  const set = (k) => (e) => onChange(i, { [k]: e.target.value });
+  return (
+    <div style={{ border: "1px solid var(--bdr)", borderRadius: 10, padding: 10, background: "var(--s1)", display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", width: 18, flexShrink: 0 }}>{String(i + 1).padStart(2, "0")}</span>
+        <input className="inp" style={{ flex: 1, minWidth: 120, fontWeight: 600 }} value={s.name} onChange={set("name")} placeholder="Stage name" />
+        <button title="Move up" disabled={i === 0} onClick={() => onMove(i, -1)} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 6, width: 26, height: 30, cursor: i === 0 ? "not-allowed" : "pointer", color: "var(--txt2)", opacity: i === 0 ? 0.4 : 1 }}>↑</button>
+        <button title="Move down" disabled={i === count - 1} onClick={() => onMove(i, 1)} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 6, width: 26, height: 30, cursor: i === count - 1 ? "not-allowed" : "pointer", color: "var(--txt2)", opacity: i === count - 1 ? 0.4 : 1 }}>↓</button>
+        <button title="Remove this stage" onClick={() => onDelete(i)} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 6, width: 28, height: 30, cursor: "pointer", color: "var(--red)", display: "flex", alignItems: "center", justifyContent: "center" }}><Trash2 size={13} /></button>
+      </div>
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+        <select className="inp" style={{ width: 122, padding: "6px 8px" }} value={s.status} onChange={set("status")}>
+          {PLAN_STATUS.map((x) => <option key={x.k} value={x.k}>{x.label}</option>)}
+        </select>
+        <input className="inp" list="eb-tracks" style={{ width: 128, padding: "6px 8px" }} value={s.track || ""} onChange={set("track")} placeholder="Workstream" />
+        <datalist id="eb-tracks">{trackList.map((t) => <option key={t} value={t} />)}</datalist>
+        <input className="inp" type="date" style={{ width: 142, padding: "6px 8px", fontFamily: MONO }} value={s.start || ""} onChange={set("start")} />
+        <input className="inp" type="date" style={{ width: 142, padding: "6px 8px", fontFamily: MONO }} value={s.end || ""} onChange={set("end")} />
+        <input className="inp" style={{ flex: 1, minWidth: 110, padding: "6px 8px" }} value={s.owner || ""} onChange={set("owner")} placeholder="Owner" />
+      </div>
+      <input className="inp" style={{ padding: "6px 8px", fontSize: 12 }} value={s.note || ""} onChange={set("note")} placeholder="One line on where this stands (optional)" />
+    </div>
+  );
+}
 
 function StageDetail({ stage, tasks, users, onClose }) {
   if (!stage) return null;
@@ -3203,12 +3353,41 @@ function StageDetail({ stage, tasks, users, onClose }) {
   );
 }
 
-function PlanBoard({ p, upd, projTasks, users, busy, onBuild }) {
-  const [view, setView] = useState("gantt");
+function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, myName }) {
+  const [view, setView] = useState("steps");
   const [openId, setOpenId] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState([]);
+  const sheetRef = useRef(null);
   const plan = p.plan;
   const stages = plan?.stages || [];
   const open = stages.find((s) => s.id === openId) || null;
+  const knownTracks = [...new Set([...stages.map((s) => s.track).filter(Boolean), "Hardware", "Firmware", "Enclosure", "Testing", "Supply chain", "PM"])];
+
+  /* Editing works on a copy; nothing moves until Save, and Save writes one
+     log entry describing exactly what changed. */
+  const startEdit = () => { setDraft(stages.map((s) => ({ ...s }))); setEditing(true); setOpenId(""); };
+  const saveEdits = () => {
+    const kept = draft.filter((s) => String(s.name || "").trim()).map((s, i) => ({ ...s, name: s.name.trim(), id: s.id || `stage-${i}` }));
+    const before = stages;
+    const bits = [];
+    if (kept.length !== before.length) bits.push(`${before.length} → ${kept.length} stages`);
+    if (kept.map((s) => s.id).join() !== before.map((s) => s.id).join()) bits.push("order or membership changed");
+    for (const s of kept) {
+      const b = before.find((x) => x.id === s.id);
+      if (!b) { bits.push(`added ${s.name}`); continue; }
+      const d = [];
+      if (b.name !== s.name) d.push(`renamed from ${b.name}`);
+      if (b.status !== s.status) d.push(`${b.status} → ${s.status}`);
+      if (b.start !== s.start || b.end !== s.end) d.push(`dates ${b.start || "?"}–${b.end || "?"} → ${s.start || "?"}–${s.end || "?"}`);
+      if ((b.track || "") !== (s.track || "")) d.push(`workstream → ${s.track || "none"}`);
+      if ((b.owner || "") !== (s.owner || "")) d.push(`owner → ${s.owner || "nobody"}`);
+      if (d.length) bits.push(`${s.name}: ${d.join(", ")}`);
+    }
+    const entry = { id: uid(), at: new Date().toISOString(), byName: myName || "someone", why: "Edited the steps by hand", what: bits.join(" · ").slice(0, 600) || "no change" };
+    upd((cur) => ({ plan: { ...(cur.plan || {}), stages: kept, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
+    setEditing(false);
+  };
 
   /* One shared date window for the bars. */
   const dates = stages.flatMap((s) => [s.start, s.end]).filter(Boolean).map((d) => new Date(d).getTime()).filter((n) => !Number.isNaN(n));
@@ -3216,9 +3395,13 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild }) {
   const t1 = dates.length ? Math.max(...dates) : Date.now() + 86400000;
   const span = Math.max(1, t1 - t0);
   const pctOf = (d) => Math.max(0, Math.min(100, ((new Date(d).getTime() - t0) / span) * 100));
+  const todayMs = new Date(todayStr()).getTime();
+  const todayInRange = todayMs >= t0 && todayMs <= t1;
   const todayPct = pctOf(todayStr());
   const doneN = stages.filter((s) => s.status === "done").length;
   const activeStage = stages.find((s) => s.status === "active") || stages.find((s) => s.status === "blocked");
+  const groups = trackGroups(stages);
+  const showTracks = hasTracks(stages);
 
   return (
     <Section>
@@ -3227,21 +3410,43 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild }) {
         {stages.length > 0 && <Pill color="var(--green)">{doneN}/{stages.length} stages done</Pill>}
         {activeStage && <Pill color={planColor(activeStage.status)}>Now: {activeStage.name}</Pill>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          {stages.length > 0 && (
+          {stages.length > 0 && !editing && (
             <div style={{ display: "flex", gap: 2, background: "var(--s2)", borderRadius: 8, padding: 2 }}>
               {PLAN_VIEWS.map(([k, label]) => (
                 <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
               ))}
             </div>
           )}
-          <Btn small kind={stages.length ? "ghost" : "primary"} icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={onBuild}>
-            {busy ? "Reading Drive…" : stages.length ? "Refresh from Drive" : "Build the plan"}
-          </Btn>
+          {editing ? (<>
+            <Btn small kind="green" icon={CheckCircle2} onClick={saveEdits}>Save plan</Btn>
+            <Btn small kind="ghost" onClick={() => setEditing(false)}>Cancel</Btn>
+          </>) : (<>
+            <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.md" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onSheet(f); }} />
+            <Btn small kind="ghost" icon={busy ? Loader2 : Upload} disabled={busy} title="Build the plan from your own checklist" onClick={() => sheetRef.current?.click()}>Upload checklist</Btn>
+            {stages.length > 0 && <Btn small kind="ghost" icon={Pencil} onClick={startEdit}>Edit steps</Btn>}
+            <Btn small kind={stages.length ? "ghost" : "primary"} icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={onBuild}>
+              {busy ? "Working…" : stages.length ? "Refresh from Drive" : "Build from Drive"}
+            </Btn>
+          </>)}
         </div>
       </div>
 
-      {stages.length === 0 ? (
-        <Empty icon={Gauge} title={busy ? "Reading the project's files…" : "No plan yet"} sub="Build it and the AI reads this project's Drive folders — the checklist, the reports, the board folders — and lays out the real stages, where you are now, and what proves each one. After that, tell the chat about a customer's feedback or a vendor delay and it moves the plan for you." />
+      {stages.length === 0 && !editing ? (
+        <Empty icon={Gauge} title={busy ? "Reading the project's files…" : "No plan yet"} sub="Build it from Drive and the AI reads this project's folders — the checklist, the reports, the board folders — and lays out the real stages, what runs alongside what, and where you are now. Or upload your own checklist and it will follow that instead. After that, tell the chat about a customer's feedback or a vendor delay and it moves the plan for you." />
+      ) : editing ? (
+        <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6 }}>
+            Put things that run at the same time on the same dates with different workstreams — Hardware and Firmware side by side, for example. The order here is the order everywhere else.
+          </div>
+          {draft.map((s, i) => (
+            <StageEditRow key={s.id} s={s} i={i} count={draft.length} trackList={knownTracks}
+              onChange={(idx, patch) => setDraft((d) => d.map((x, j) => (j === idx ? { ...x, ...patch } : x)))}
+              onMove={(idx, dir) => setDraft((d) => { const n = [...d]; const [x] = n.splice(idx, 1); n.splice(Math.max(0, Math.min(n.length, idx + dir)), 0, x); return n; })}
+              onDelete={(idx) => setDraft((d) => d.filter((_, j) => j !== idx))} />
+          ))}
+          <Btn small kind="ghost" icon={Plus} onClick={() => setDraft((d) => [...d, { id: `stage-${uid()}`, name: "", status: "pending", track: d[d.length - 1]?.track || "", start: todayStr(), end: todayStr(), owner: "", note: "", evidence: [] }])}>Add a stage</Btn>
+        </div>
       ) : (<>
         {plan?.summary && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.65, marginBottom: 12 }}>{plan.summary}</div>}
 
@@ -3250,67 +3455,98 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild }) {
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--txt3)", fontWeight: 700, marginBottom: 6 }}>
               <span>{fmtDate(new Date(t0).toISOString().slice(0, 10))}</span><span>{fmtDate(new Date(t1).toISOString().slice(0, 10))}</span>
             </div>
-            <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>
-              {todayPct > 0 && todayPct < 100 && (
-                <div title="today" style={{ position: "absolute", left: `${todayPct}%`, top: -4, bottom: -4, width: 2, background: "var(--red)", opacity: 0.55, zIndex: 2, pointerEvents: "none" }} />
-              )}
-              {stages.map((s) => {
-                const a = pctOf(s.start), b = pctOf(s.end);
-                return (
-                  <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
-                    style={{ display: "flex", alignItems: "center", gap: 10, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 7, padding: "4px 6px", cursor: "pointer", textAlign: "left", width: "100%" }}>
-                    <span style={{ width: 132, flexShrink: 0, fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: s.status === "pending" ? "var(--txt2)" : "var(--txt)" }}>{s.name}</span>
-                    <span style={{ position: "relative", flex: 1, height: 16, background: "var(--s2)", borderRadius: 5, minWidth: 90 }}>
-                      <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, b - a)}%`, top: 0, bottom: 0, borderRadius: 5, background: planColor(s.status), opacity: s.status === "pending" ? 0.4 : 1 }} />
-                    </span>
-                    <span style={{ width: 74, flexShrink: 0, fontSize: 10.5, color: "var(--txt3)", fontFamily: MONO, textAlign: "right" }}>{String(s.end || "").slice(5)}</span>
-                  </button>
-                );
-              })}
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {/* One lane per workstream, so things running side by side look
+                  like they run side by side rather than one after another. */}
+              {groups.map(([track, list]) => (
+                <div key={track}>
+                  {showTracks && <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", margin: "7px 0 3px" }}>{track}</div>}
+                  {list.map((s) => {
+                    const a = pctOf(s.start), b = pctOf(s.end);
+                    return (
+                      <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                        style={{ display: "flex", alignItems: "center", gap: 10, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 7, padding: "4px 6px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                        <span style={{ width: 132, flexShrink: 0, fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: s.status === "pending" ? "var(--txt2)" : "var(--txt)" }}>{s.name}</span>
+                        {/* today's line belongs INSIDE the bar track — measured
+                            against the whole row it pointed at the wrong date */}
+                        <span style={{ position: "relative", flex: 1, height: 16, background: "var(--s2)", borderRadius: 5, minWidth: 90, overflow: "hidden" }}>
+                          <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, b - a)}%`, top: 0, bottom: 0, borderRadius: 5, background: planColor(s.status), opacity: s.status === "pending" ? 0.4 : 1 }} />
+                          {todayInRange && <span title="today" style={{ position: "absolute", left: `${todayPct}%`, top: 0, bottom: 0, width: 2, background: "var(--red)", opacity: 0.7, pointerEvents: "none" }} />}
+                        </span>
+                        <span style={{ width: 74, flexShrink: 0, fontSize: 10.5, color: "var(--txt3)", fontFamily: MONO, textAlign: "right" }}>{String(s.end || "").slice(5)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           </div>
         )}
 
         {view === "flow" && (
-          <div style={{ display: "flex", gap: 0, overflowX: "auto", paddingBottom: 6 }}>
-            {stages.map((s, i) => (
-              <div key={s.id} style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
-                <button onClick={() => setOpenId(openId === s.id ? "" : s.id)}
-                  style={{ width: 128, padding: "10px 11px", borderRadius: 10, cursor: "pointer", textAlign: "left", background: openId === s.id ? "var(--soft)" : "var(--s1)", border: `1.5px solid ${openId === s.id ? "var(--acc)" : planColor(s.status)}` }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(s.status), flexShrink: 0 }} />
-                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", fontFamily: MONO }}>{String(i + 1).padStart(2, "0")}</span>
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.35, marginBottom: 4 }}>{s.name}</div>
-                  <div style={{ fontSize: 10, color: "var(--txt3)" }}>{String(s.end || "").slice(5)}</div>
-                </button>
-                {i < stages.length - 1 && <span style={{ width: 16, height: 2, background: "var(--bdr2)", flexShrink: 0 }} />}
+          /* One row per workstream — parallel work reads as parallel rows. */
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {groups.map(([track, list]) => (
+              <div key={track}>
+                {showTracks && <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 5 }}>{track}</div>}
+                <div style={{ display: "flex", gap: 0, overflowX: "auto", paddingBottom: 4 }}>
+                  {list.map((s, i) => (
+                    <div key={s.id} style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+                      <button onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                        style={{ width: 128, padding: "10px 11px", borderRadius: 10, cursor: "pointer", textAlign: "left", background: openId === s.id ? "var(--soft)" : "var(--s1)", border: `1.5px solid ${openId === s.id ? "var(--acc)" : planColor(s.status)}` }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(s.status), flexShrink: 0 }} />
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", fontFamily: MONO }}>{String(stages.indexOf(s) + 1).padStart(2, "0")}</span>
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.35, marginBottom: 4 }}>{s.name}</div>
+                        <div style={{ fontSize: 10, color: "var(--txt3)" }}>{String(s.end || "").slice(5)}</div>
+                      </button>
+                      {i < list.length - 1 && <span style={{ width: 16, height: 2, background: "var(--bdr2)", flexShrink: 0 }} />}
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
         )}
 
         {view === "steps" && (
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            {stages.map((s, i) => (
-              <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
-                style={{ display: "flex", gap: 11, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
-                <span style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
-                  <span style={{ width: 15, height: 15, borderRadius: "50%", border: `2px solid ${planColor(s.status)}`, background: s.status === "done" ? planColor(s.status) : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {s.status === "done" && <CheckCircle2 size={9} style={{ color: "#fff" }} />}
-                  </span>
-                  {i < stages.length - 1 && <span style={{ flex: 1, width: 2, minHeight: 16, background: "var(--bdr2)", marginTop: 3 }} />}
-                </span>
-                <span style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
-                    <Pill color={planColor(s.status)}>{planLabel(s.status)}</Pill>
-                    {s.owner && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{s.owner}</span>}
-                    <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(s.start)} → {fmtDate(s.end)}</span>
-                  </span>
-                  {s.note && <span style={{ display: "block", fontSize: 12, color: "var(--txt2)", marginTop: 3, lineHeight: 1.55 }}>{s.note}</span>}
-                </span>
-              </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: showTracks ? 10 : 0 }}>
+            {groups.map(([track, list]) => (
+              <div key={track}>
+                {showTracks && <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 4 }}>{track}</div>}
+                {list.map((s, i) => {
+                  // Anything overlapping this stage's dates on a different
+                  // workstream is being worked on at the same time.
+                  const alongside = stages.filter((o) => o.id !== s.id && (o.track || "") !== (s.track || "")
+                    && s.start && s.end && o.start && o.end && o.start <= s.end && o.end >= s.start).map((o) => o.name);
+                  return (
+                    <button key={s.id} onClick={() => setOpenId(openId === s.id ? "" : s.id)}
+                      style={{ display: "flex", gap: 11, background: openId === s.id ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                      <span style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                        <span style={{ width: 15, height: 15, borderRadius: "50%", border: `2px solid ${planColor(s.status)}`, background: s.status === "done" ? planColor(s.status) : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          {s.status === "done" && <CheckCircle2 size={9} style={{ color: "#fff" }} />}
+                        </span>
+                        {i < list.length - 1 && <span style={{ flex: 1, width: 2, minHeight: 16, background: "var(--bdr2)", marginTop: 3 }} />}
+                      </span>
+                      <span style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
+                          <Pill color={planColor(s.status)}>{planLabel(s.status)}</Pill>
+                          {s.owner && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{s.owner}</span>}
+                          <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(s.start)} → {fmtDate(s.end)}</span>
+                        </span>
+                        {s.note && <span style={{ display: "block", fontSize: 12, color: "var(--txt2)", marginTop: 3, lineHeight: 1.55 }}>{s.note}</span>}
+                        {alongside.length > 0 && (
+                          <span style={{ display: "block", fontSize: 11, color: "var(--txt3)", marginTop: 3 }}>
+                            runs alongside {alongside.slice(0, 3).join(", ")}{alongside.length > 3 ? ` and ${alongside.length - 3} more` : ""}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             ))}
           </div>
         )}
