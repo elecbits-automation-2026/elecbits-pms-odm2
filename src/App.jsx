@@ -274,9 +274,21 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
     clearTimeout(bail);
   }
 }
-/* Every caller wants the same shape: did it save, and if not, why. */
+/* Every caller wants the same shape: did it save, and if not, why. Failures
+   are squeezed onto one plain line — a raw Google JSON blob in the middle of a
+   conversation helps nobody. */
+const tidyReason = (r) => {
+  let t = String(r || "").replace(/^Error:\s*/i, "").trim();
+  if (t.startsWith("{") || t.includes('"error"')) {
+    const m = t.match(/"message"\s*:\s*"([^"]+)"/);
+    t = m ? m[1] : "Drive refused it";
+  }
+  t = t.replace(/\s+/g, " ").trim();
+  if (t.length > 150) t = `${t.slice(0, 147)}…`;
+  return t || "Drive refused it";
+};
 const saveResult = (r, fileName, where) =>
-  r === true ? `Saved ${fileName} into the ${where} folder in Drive.` : `Couldn't save ${fileName} — ${r}`;
+  r === true ? `Saved ${fileName} into the ${where} folder in Drive.` : `Couldn't save ${fileName} — ${tidyReason(r)}`;
 
 /* ── ATTACHMENTS ───────────────────────────────────────────────────────────
    Anything the user drops into a chat. Text-ish files are read straight in so
@@ -770,7 +782,7 @@ YOU CAN ALSO WRITE TO DRIVE. You are not read-only. When the user asks you to cr
 <<<WRITE filename.md>>>
 the full file content here
 <<<END>>>
-Rules for writing: use one block per file; pick a clear filename with a sensible extension (.md for notes, checklists, plans, minutes; .csv for tables); write the real, complete content — never a placeholder; a file with the same name is replaced, so reuse the exact existing name when updating one. Before the block, say in one short line what you are saving. Never say you cannot create or modify files. Anything you write this way also appears in the chat as a document card the person can open and download.
+Rules for writing: use one block per file; pick a clear filename with a sensible extension (.md for notes, checklists, plans, minutes; .csv for tables); write the real, complete content — never a placeholder; a file with the same name is replaced, so reuse the exact existing name when updating one. Before the block, say in one short line what you are ABOUT to save — "Putting together the milestone sheet now." Never write "Done", "Saved" or "It's in the folder": whether it reached Drive is confirmed underneath your reply, and claiming it landed when it did not makes you a liar. Never say you cannot create or modify files. Anything you write this way also appears in the chat as a document card the person can open and download.
 
 YOU CAN LOOK IN DRIVE AGAIN, YOURSELF. The Drive contents below were fetched for this question. If they do not cover what is being asked — a particular checklist, a BoM, a board folder, anything — end your reply with:
 <<<LOOK what to look for>>>

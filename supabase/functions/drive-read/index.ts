@@ -76,11 +76,25 @@ async function importPrivateKey(pem: string): Promise<CryptoKey> {
 // with the service-account email as an EDITOR for writes to succeed.
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 
+/* ── WHO THE WRITES BELONG TO ──────────────────────────────────────────────
+   A service account owns no storage. Anything it creates in an ordinary My
+   Drive folder has no owner with quota, and Google answers 403 "Service
+   Accounts do not have storage quota" — reads are fine, writes are not.
+   Two ways out, and this supports both:
+     1. Put the ODM tree in a Shared Drive. The drive owns the files, so the
+        service account can write with no further setup.
+     2. Set GOOGLE_IMPERSONATE_USER to a real person in your Workspace (say
+        odm@elecbits.in). The service account then acts as them and files are
+        owned by them, on their quota. Needs domain-wide delegation switched
+        on for this service account, with the drive scope.                   */
+const IMPERSONATE = (Deno.env.get("GOOGLE_IMPERSONATE_USER") ?? "").trim();
+
 async function getAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = b64url(JSON.stringify({
     iss: SA_EMAIL,
+    ...(IMPERSONATE ? { sub: IMPERSONATE } : {}),
     scope: DRIVE_SCOPE,
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
@@ -419,6 +433,24 @@ function decodeBase64(b64: string): Uint8Array {
   return out.subarray(0, at);
 }
 
+/* Google's write failures are JSON blobs. Turn the ones that actually happen
+   into a sentence someone can act on, instead of pasting the blob into a chat. */
+async function writeFailureReason(res: Response): Promise<string> {
+  const raw = await res.text().catch(() => "");
+  let msg = "";
+  try { msg = JSON.parse(raw)?.error?.message || ""; } catch { msg = ""; }
+  const m = (msg || raw).toLowerCase();
+  if (m.includes("storage quota")) {
+    return IMPERSONATE
+      ? `Google won't let ${IMPERSONATE} own this file — check that account has Drive space and that domain-wide delegation is switched on for the service account.`
+      : "Drive won't accept files from the service account, because a service account has no storage of its own. Either move the ODM folders into a Shared Drive, or set GOOGLE_IMPERSONATE_USER on the function to a real person in your Workspace.";
+  }
+  if (res.status === 403) return "The service account can read this folder but not write to it — share it as an Editor rather than a Viewer.";
+  if (res.status === 404) return "That folder isn't reachable — check it is still shared with the service account.";
+  if (res.status === 413) return "The file is too large for Drive to take this way.";
+  return (msg || `Drive refused the write (${res.status})`).slice(0, 160);
+}
+
 async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
@@ -447,7 +479,7 @@ async function writeFile(token: string, folderId: string, name: string, content:
     headers: { authorization: `Bearer ${token}`, "content-type": `multipart/related; boundary=${boundary}` },
     body,
   });
-  if (!res.ok) throw new Error(`drive write failed: ${await res.text()}`);
+  if (!res.ok) throw new Error(await writeFailureReason(res));
   const data = await res.json();
   return data.id as string;
 }
@@ -620,6 +652,9 @@ Deno.serve(async (req) => {
     // Log it too, so the reason is visible in the function's Logs tab and not
     // only in the response body.
     console.error("drive-read failed:", String(e));
-    return json({ error: String(e) }, 500);
+    // The caller shows this to a person, so hand back the sentence, not the
+    // "Error: {json blob}" wrapper.
+    const clean = String((e as Error)?.message || e).replace(/^Error:\s*/, "").slice(0, 220);
+    return json({ error: clean }, 500);
   }
 });
