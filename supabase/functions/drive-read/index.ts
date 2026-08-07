@@ -404,6 +404,21 @@ async function extractText(token: string, f: GFile, limit = 1800): Promise<strin
    Create (or overwrite) a text/markdown file inside the project's Drive
    folder. Used to push closure evidence, status notes and AI analyses back to
    /ODM/PM/<ProjectID>/. Requires the folder shared as Editor.               */
+/* Base64 → bytes, a slice at a time. atob() on a 60 MB string would build a
+   60-million-character binary string first (twice that in memory) before we
+   ever got an array; decoding in chunks keeps the peak down. */
+function decodeBase64(b64: string): Uint8Array {
+  const clean = b64.replace(/[^A-Za-z0-9+/=]/g, "");
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  const CHUNK = 8192 * 4;                       // a multiple of 4 — never split a quad
+  let at = 0;
+  for (let i = 0; i < clean.length; i += CHUNK) {
+    const bin = atob(clean.slice(i, i + CHUNK));
+    for (let j = 0; j < bin.length; j++) out[at++] = bin.charCodeAt(j);
+  }
+  return out.subarray(0, at);
+}
+
 async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
@@ -412,12 +427,17 @@ async function writeFile(token: string, folderId: string, name: string, content:
 
   const boundary = "ebodm" + Math.random().toString(36).slice(2);
   const metadata: Record<string, unknown> = prevId ? { name } : { name, parents: [folderId] };
-  // encoding "base64" carries a real binary — a PDF, a spreadsheet, a photo.
-  // Drive accepts it verbatim in a multipart part with this header.
-  const b64 = encoding === "base64";
-  const body =
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: ${mimeType}\r\n${b64 ? "Content-Transfer-Encoding: base64\r\n" : ""}\r\n${content}\r\n--${boundary}--`;
+  const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`
+    + `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
+  const post = `\r\n--${boundary}--`;
+
+  // encoding "base64" carries a real binary — a PDF, a spreadsheet, a 40 MB
+  // photo. Decode it to bytes and send those: passing the base64 through in
+  // the body would be a third larger and would hold the whole file in a
+  // single JavaScript string, which a big upload cannot afford.
+  const body: BodyInit = encoding === "base64"
+    ? new Blob([pre, decodeBase64(content), post])
+    : `${pre}${content}${post}`;
 
   const url = prevId
     ? `https://www.googleapis.com/upload/drive/v3/files/${prevId}?uploadType=multipart&supportsAllDrives=true`

@@ -251,8 +251,11 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
   if (!projectId || !fileName) return "I need a project and a file name to save it.";
+  // A big file takes as long as it takes — roughly a second per megabyte on a
+  // modest connection, on top of the reader's own budget.
+  const mb = String(content || "").length / 1048576;
   const ctrl = new AbortController();
-  const bail = setTimeout(() => ctrl.abort(), 40000);
+  const bail = setTimeout(() => ctrl.abort(), Math.min(360000, 45000 + mb * 4000));
   try {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST",
@@ -262,10 +265,11 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.ok) return true;
+    if (res.status === 413) return `${fileName} is too large for the upload to accept. Put it in the Drive folder directly.`;
     const why = data.error || data.message || `${res.status} ${res.statusText || ""}`.trim();
     return String(why).slice(0, 180);
   } catch (e) {
-    return e?.name === "AbortError" ? "Drive took too long to answer." : `Drive unreachable: ${e.message || e}`;
+    return e?.name === "AbortError" ? `${fileName} took too long to upload — try a smaller file, or put it in the Drive folder directly.` : `Drive unreachable: ${e.message || e}`;
   } finally {
     clearTimeout(bail);
   }
@@ -280,12 +284,16 @@ const saveResult = (r, fileName, where) =>
    can be pushed into a project's Drive folder, where the Drive reader will
    pull the text back out of it on the next look. */
 const TEXTY = /\.(txt|md|markdown|csv|tsv|json|xml|ya?ml|log|html?|css|js|jsx|ts|tsx|py|c|h|cpp|ino|sh|sql|ini|cfg|conf|net|bom)$/i;
-const MAX_ATTACH = 6 * 1024 * 1024;
+const MAX_ATTACH = 50 * 1024 * 1024;
+/* Only worth reading a text file into the conversation if it is small — the
+   prompt takes the first 20k characters anyway, and a huge one just burns
+   memory. Anything bigger rides along as a file to be filed in Drive. */
+const MAX_INLINE_TEXT = 2 * 1024 * 1024;
 const readAttachment = (file) => new Promise((resolve) => {
   const base = { id: uid(), name: file.name, mime: file.type || "application/octet-stream", size: file.size };
   if (file.size > MAX_ATTACH) return resolve({ ...base, tooBig: true });
   const r = new FileReader();
-  if (TEXTY.test(file.name) || /^text\//.test(file.type)) {
+  if ((TEXTY.test(file.name) || /^text\//.test(file.type)) && file.size <= MAX_INLINE_TEXT) {
     r.onload = () => resolve({ ...base, text: String(r.result).slice(0, 20000) });
     r.onerror = () => resolve({ ...base, failed: true });
     r.readAsText(file);
@@ -325,7 +333,7 @@ const pickAttachments = async (fileList, setAtts, toast) => {
   const read = await Promise.all(files.map(readAttachment));
   setAtts((a) => [...a, ...read].slice(0, 5));
   const big = read.filter((r) => r.tooBig);
-  if (big.length) toast(`${big[0].name} is over 6 MB — too big to attach`, "amber");
+  if (big.length) toast(`${big[0].name} is over 50 MB — too big to attach`, "amber");
 };
 /* Push one read attachment into a project's Drive folder, as-is. */
 const saveAttachmentToDrive = (att, projectId, scope) =>
