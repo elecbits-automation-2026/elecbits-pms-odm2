@@ -27,7 +27,7 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -745,6 +745,67 @@ const planPatchResult = (plan, patch) => {
   }
   return { stages, touched };
 };
+
+/* ── INTERNAL MoM ──────────────────────────────────────────────────────────
+   The room where the thinking happens. Somebody types up a brainstorm — a
+   design argument, a supplier problem, a review that went badly — and the AI
+   pulls out what was actually decided, what the challenge was and how it was
+   beaten, whose idea moved the needle, and what has to happen next. The
+   lessons go into System Memory so the next project inherits them, the
+   actions become real tasks, and the whole note is filed into the project's
+   Internal MoM folder in Drive.                                             */
+const MOM_IMPACT = [
+  { k: "timeline", label: "Saved time", c: "var(--blue)" },
+  { k: "quality", label: "Better quality", c: "var(--green)" },
+  { k: "cost", label: "Saved cost", c: "var(--purple)" },
+  { k: "risk", label: "Avoided a risk", c: "var(--amber)" },
+  { k: "other", label: "Idea", c: "var(--txt2)" },
+];
+const impactOf = (k) => MOM_IMPACT.find((x) => x.k === k) || MOM_IMPACT[4];
+const MOM_STATUS = { solved: ["Overcome", "var(--green)"], open: ["Still open", "var(--red)"], watch: ["Watching", "var(--amber)"] };
+
+const momPrompt = (p, raw, attendees, users, memory) => `You are sitting in on an Elecbits engineering discussion and writing it up. This is not a transcript — it is the record the team will read in a year when the same problem comes round again.
+${memCtx(memory)}
+PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "?"}
+IN THE ROOM: ${attendees || "not listed"}
+TEAM (use these names, spelled this way): ${users.map((u) => u.name).join(", ")}
+WHAT WAS SAID: """${String(raw).slice(0, 8000)}"""
+
+PULL OUT
+- CHALLENGES. Every real problem raised, what was done about it, and whether it is actually beaten. If the discussion did not settle it, say so — a pretend solution is worse than an open one.
+- IDEAS, each credited to the person who had it. Only count a genuine contribution: a suggestion that changed the approach, saved time or money, caught a risk, or lifted quality. Rate it 1 to 5 on how much it actually helped, and say in one line why. Do not hand out credit for agreeing with someone or for restating the problem. If nobody contributed anything of substance, return no ideas at all.
+- DECISIONS, firmly, with whoever owns each one.
+- ACTIONS — the concrete next steps. These become real tasks for real people, so each needs a title someone can act on and a name from the team. Give a due date only if the discussion implied one.
+- LESSONS. The reusable rule, written so it makes sense on a different project a year from now. "Check the connector's lead time before freezing the BoM", not "we had a connector problem". Nothing generic — only what this discussion actually taught.
+
+Plain English throughout, no jargon, no markdown symbols.
+Reply with JSON only:
+{"title":"six words on what this was about","summary":"two or three plain sentences","challenges":[{"problem":"...","solution":"...","status":"solved|open|watch"}],"ideas":[{"by":"Ravi","idea":"...","impact":"timeline|quality|cost|risk|other","value":4,"why":"one line on what it actually saved"}],"decisions":[{"what":"...","owner":"Neha"}],"actions":[{"title":"...","assignee":"Ravi","due":"2026-08-20"}],"lessons":["..."]}`;
+
+/* Who has actually been contributing, across every project. Value is the AI's
+   1–5 judgement of how much an idea helped, so ten shrugs never outweigh one
+   idea that saved a fortnight. */
+const momCredit = (projects) => {
+  const by = new Map();
+  for (const p of projects) {
+    for (const m of p.moms || []) {
+      for (const i of m.ai?.ideas || []) {
+        const name = String(i.by || "").trim();
+        if (!name) continue;
+        const cur = by.get(name) || { name, count: 0, score: 0, impacts: {}, latest: "", examples: [] };
+        cur.count += 1;
+        cur.score += Math.max(1, Math.min(5, Number(i.value) || 1));
+        cur.impacts[i.impact || "other"] = (cur.impacts[i.impact || "other"] || 0) + 1;
+        if (m.date > cur.latest) cur.latest = m.date;
+        if (cur.examples.length < 3) cur.examples.push({ idea: i.idea, why: i.why, projectId: p.projectId, impact: i.impact, value: i.value });
+        by.set(name, cur);
+      }
+    }
+  }
+  return [...by.values()].sort((a, b) => b.score - a.score || b.count - a.count);
+};
+const allMoms = (projects) => projects.flatMap((p) => (p.moms || []).map((m) => ({ ...m, projectId: p.projectId, projectName: p.name })))
+  .sort((a, b) => `${b.date}${b.time}`.localeCompare(`${a.date}${a.time}`));
 
 /* Learn from Drive — distil the project + GW/PCB folders into a reusable memory note. */
 const driveLearnPrompt = (pid, linkedIds, knownStatus, memory, driveData) => `You are the Elecbits ODM knowledge engine. Learn everything inferable about project ${pid} from its Drive folders and write a compact knowledge note the OS will reuse when allocating and verifying tasks on this project.
@@ -1522,7 +1583,7 @@ const Section = ({ children, style }) => <div className="card" style={{ padding:
 const CardLabel = ({ children, right }) => <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 12 }}><span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{children}</span>{right}</div>;
 
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
-  const { tasks, setTasks, users, notes, me, now, setProjects, memory, toast, sheetSync } = useCtx();
+  const { tasks, setTasks, users, notes, me, now, setProjects, memory, setMemory, toast, sheetSync } = useCtx();
   const [confirmDel, setConfirmDel] = useState(false);
   const my = users.find((u) => u.id === me);
   const isPM = isAdmin || my?.role === "pm" || my?.role === "dept_head";
@@ -1538,6 +1599,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [chatVal, setChatVal] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [planBusy, setPlanBusy] = useState(false);
+  const [momVal, setMomVal] = useState("");
+  const [momWho, setMomWho] = useState("");
+  const [momBusy, setMomBusy] = useState(false);
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
   const chatLastAtts = useRef([]);      // so "save that here" still works next turn
@@ -1680,6 +1744,84 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     if (!att.tooBig && !att.failed) {
       const r = await saveAttachmentToDrive(att, p.projectId, driveScope(my?.role));
       if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${file.name} uploaded with the plan`);
+    }
+  };
+
+  /* Write up a brainstorm: the AI pulls out the challenges, whose ideas
+     helped, the decisions, the actions and the lessons — then the actions
+     become tasks, the lessons become memory, and the note goes to Drive. */
+  const saveMom = async () => {
+    const raw = momVal.trim();
+    if (!raw || momBusy) return;
+    setMomBusy(true);
+    try {
+      let ai = null;
+      try { ai = await claude(momPrompt(p, raw, momWho.trim(), users, memory), { maxTokens: 4000 }); } catch { ai = null; }
+      // Credit is only worth keeping if it points at a real person. The AI
+      // writes whatever name was said in the room ("Neha", "neha r"), so pin
+      // each one to the roster — that is what links an idea to its author's
+      // Performance page and keeps the leaderboard from splitting one person
+      // across three spellings.
+      if (ai?.ideas) ai.ideas = ai.ideas.map((i) => ({ ...i, by: findPerson(users, i.by)?.name || String(i.by || "").trim() }));
+      if (ai?.decisions) ai.decisions = ai.decisions.map((d) => ({ ...d, owner: findPerson(users, d.owner)?.name || d.owner || "" }));
+      const at = new Date().toISOString();
+      const entry = {
+        id: uid(), date: todayStr(), time: nowHM(), by: me, byName: my?.name || "someone",
+        attendees: momWho.trim(), raw, ai: ai || null, at,
+        title: ai?.title || raw.split("\n")[0].slice(0, 60),
+      };
+
+      // Actions become real tasks for real people.
+      const raised = [];
+      for (const a of (ai?.actions || []).slice(0, 10)) {
+        if (!a.title) continue;
+        const u = findPerson(users, a.assignee);
+        raised.push({
+          id: uid(), projectId: p.projectId, linked: true, title: a.title, assigneeId: u?.id || "",
+          date: a.due || todayStr(), startTime: nowHM(),
+          endTime: new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
+          steps: [], conditions: [], status: "pending", origin: "mom", createdBy: me, createdAt: at, work: {},
+        });
+      }
+      if (raised.length) setTasks((ts) => [...raised, ...ts]);
+
+      // Lessons become memory, so the next project inherits them.
+      const lessons = (ai?.lessons || []).filter(Boolean).slice(0, 6);
+      if (lessons.length) {
+        setMemory((mm) => [{
+          id: uid(), type: "instruction",
+          title: `Lessons — ${entry.title}`,
+          content: `From the ${fmtDate(entry.date)} discussion on ${p.projectId}:\n${lessons.map((l) => `- ${l}`).join("\n")}`,
+          createdAt: at,
+        }, ...mm]);
+      }
+
+      // And the write-up itself into the project's Internal MoM folder.
+      const fileName = `Internal MoM - ${entry.date} - ${String(entry.title).replace(/[^\w\- ]/g, "").trim().slice(0, 50) || "discussion"}.md`;
+      const body = [
+        `# ${entry.title}`, ``, `${p.projectId} · ${fmtDate(entry.date)} ${entry.time} · written up by ${entry.byName}`,
+        entry.attendees ? `In the room: ${entry.attendees}` : "", ``,
+        ai?.summary ? `${ai.summary}\n` : "",
+        (ai?.challenges || []).length ? `## Challenges\n${ai.challenges.map((c) => `- ${c.problem}\n  ${c.status === "solved" ? "Overcome" : c.status === "open" ? "Still open" : "Watching"}: ${c.solution || "—"}`).join("\n")}\n` : "",
+        (ai?.ideas || []).length ? `## Who moved it forward\n${ai.ideas.map((i) => `- ${i.by}: ${i.idea} (${impactOf(i.impact).label}, ${i.value}/5)${i.why ? ` — ${i.why}` : ""}`).join("\n")}\n` : "",
+        (ai?.decisions || []).length ? `## Decided\n${ai.decisions.map((d) => `- ${d.what}${d.owner ? ` — ${d.owner}` : ""}`).join("\n")}\n` : "",
+        (ai?.actions || []).length ? `## Actions\n${ai.actions.map((a) => `- ${a.title} — ${a.assignee || "unassigned"}${a.due ? ` by ${a.due}` : ""}`).join("\n")}\n` : "",
+        lessons.length ? `## Lessons\n${lessons.map((l) => `- ${l}`).join("\n")}\n` : "",
+        `## Notes as written\n${raw}`,
+      ].filter(Boolean).join("\n");
+      const r = await driveWriteFile(p.projectId, fileName, body, { scope: driveScope(my?.role) });
+      if (r === true) { entry.savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} filed from Internal MoM`); }
+
+      upd((cur) => ({ moms: [entry, ...(cur.moms || [])] }));
+      setMomVal(""); setMomWho("");
+      const bits = [];
+      if (raised.length) bits.push(`${raised.length} task${raised.length === 1 ? "" : "s"} raised`);
+      if (lessons.length) bits.push(`${lessons.length} lesson${lessons.length === 1 ? "" : "s"} remembered`);
+      if (r === true) bits.push("filed in Drive");
+      toast(ai ? `Written up${bits.length ? ` — ${bits.join(", ")}` : ""}` : "Saved — the AI was unreachable, so it's kept as written", ai ? "green" : "amber");
+      if (r !== true && DRIVE_READ_URL) toast(tidyReason(r), "amber");
+    } finally {
+      setMomBusy(false);
     }
   };
 
@@ -1889,6 +2031,25 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           </Section>
 
           <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} myName={my?.name} />
+
+          <Section>
+            <CardLabel right={<Pill color="var(--purple)"><Lightbulb size={11} /> ideas · challenges · lessons</Pill>}>Internal MoM</CardLabel>
+            <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 10 }}>
+              Type up what was discussed — a design argument, a supplier problem, a review that went badly. The AI pulls out what the challenge really was and how it was beaten, whose idea helped, what was decided, and what has to happen next. Actions become tasks, lessons go into system memory so the next project inherits them, and the write-up is filed in this project's folder.
+            </div>
+            <input className="inp" style={{ marginBottom: 8 }} placeholder="Who was in the room? (optional)" value={momWho} onChange={(e) => setMomWho(e.target.value)} />
+            <textarea className="inp" rows={5} placeholder="Ravi said the connector lead time is 6 weeks so the BoM freeze slips. Neha suggested the alternate from the approved list — same footprint, in stock. We agreed to switch and to check lead times before every freeze from now on…" value={momVal} onChange={(e) => setMomVal(e.target.value)} />
+            <div style={{ display: "flex", gap: 9, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
+              <Btn small icon={momBusy ? Loader2 : Sparkles} disabled={momBusy || !momVal.trim()} onClick={saveMom}>{momBusy ? "Writing it up…" : "Save and write it up"}</Btn>
+              <span style={{ fontSize: 11, color: "var(--txt3)" }}>{(p.moms || []).length} session{(p.moms || []).length === 1 ? "" : "s"} kept on this project</span>
+            </div>
+            {(p.moms || []).length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 9, marginTop: 13 }}>
+                {(p.moms || []).slice(0, 4).map((m) => <MomCard key={m.id} m={m} />)}
+                {(p.moms || []).length > 4 && <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>Older sessions are on the Internal MoM page.</div>}
+              </div>
+            )}
+          </Section>
 
           {(p.knownStatus || isPM) && (
             <Section>
@@ -2936,6 +3097,48 @@ function ResourceModal({ mode, user, onClose }) {
 const wuDays = (n = 7) => [...Array(n)].map((_, i) => { const dd = new Date(Date.now() - (n - 1 - i) * 86400000); return { date: dd.toISOString().slice(0, 10), dow: dd.getDay(), label: dd.toLocaleDateString("en-IN", { weekday: "short" }), dnum: dd.getDate() }; });
 const noteOf = (w) => w?.note ?? [w?.learnings, w?.wrong, w?.better].filter(Boolean).join("\n\n");
 
+/* Contribution, on the person's own Performance page: what they suggested,
+   what it saved, and where they sit against everyone else. */
+function IdeasTab({ projects, users, me, isMgr, viewUserId, setViewUserId }) {
+  const credit = momCredit(projects);
+  const who = users.find((u) => u.id === (isMgr ? viewUserId : me));
+  const mine = credit.find((c) => normId(c.name) === normId(who?.name || ""));
+  const rank = mine ? credit.findIndex((c) => c === mine) + 1 : 0;
+  const sessions = allMoms(projects).filter((m) => (m.ai?.ideas || []).some((i) => normId(i.by) === normId(who?.name || "")));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
+        <SectionTitle icon={Lightbulb} right={isMgr && (
+          <select className="inp" style={{ width: 190 }} value={viewUserId} onChange={(e) => setViewUserId(e.target.value)}>
+            {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        )}>{who?.name || "Contribution"}</SectionTitle>
+        {!mine ? (
+          <Empty icon={Lightbulb} title="No ideas credited yet" sub="Ideas are credited when a discussion is written up in Internal MoM on a project — and only when the suggestion actually changed the approach, saved time or money, caught a risk, or lifted quality." />
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 14 }}>
+              <div><div style={{ fontSize: 30, fontWeight: 800, fontFamily: MONO, color: "var(--amber)", lineHeight: 1 }}>#{rank}</div><div style={{ fontSize: 11, color: "var(--txt2)", marginTop: 3 }}>of {credit.length} contributing</div></div>
+              <div><div style={{ fontSize: 30, fontWeight: 800, fontFamily: MONO, color: "var(--acc)", lineHeight: 1 }}>{mine.count}</div><div style={{ fontSize: 11, color: "var(--txt2)", marginTop: 3 }}>ideas credited</div></div>
+              <div><div style={{ fontSize: 30, fontWeight: 800, fontFamily: MONO, color: "var(--purple)", lineHeight: 1 }}>{mine.score}</div><div style={{ fontSize: 11, color: "var(--txt2)", marginTop: 3 }}>impact score</div></div>
+              <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                {Object.entries(mine.impacts).map(([k, n]) => <Pill key={k} color={impactOf(k).c}>{impactOf(k).label} {n}</Pill>)}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {sessions.slice(0, 8).map((m) => <MomCard key={m.id} m={m} showProject />)}
+            </div>
+          </>
+        )}
+      </div>
+      <div className="card" style={{ padding: 16 }}>
+        <SectionTitle icon={Award}>Across the team</SectionTitle>
+        {credit.length ? <IdeaBoard credit={credit} /> : <div style={{ fontSize: 12.5, color: "var(--txt3)" }}>Nothing written up yet.</div>}
+      </div>
+    </div>
+  );
+}
+
 function PerfModule() {
   const { users, me, projects, tasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, toast } = useCtx();
   const my = users.find((u) => u.id === me);
@@ -2969,7 +3172,7 @@ function PerfModule() {
     if (escalations > KPI_T.escalations) alerts.push(`${escalations} escalations to Shreya (max ${KPI_T.escalations})`);
     return { queries, decisions, onTimePct, aiChecks, escalations, dayTaskCount: dayTasks.length, alerts };
   };
-  const TABS = [["kpi", "KPI tracking", Gauge], ["worklog", "Work update sheet", NotebookPen], ["training", "Training", GraduationCap]];
+  const TABS = [["kpi", "KPI tracking", Gauge], ["worklog", "Work update sheet", NotebookPen], ["ideas", "Ideas & contribution", Lightbulb], ["training", "Training", GraduationCap]];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card" style={{ padding: "0 16px", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
@@ -2986,6 +3189,7 @@ function PerfModule() {
 
       {ptab === "kpi" && <KpiTab shownPMs={shownPMs} date={date} setDate={setDate} metricsFor={metricsFor} me={me} isAdmin={isAdmin} tasks={tasks} />}
       {ptab === "worklog" && <WorklogTab date={date} setDate={setDate} viewUserId={viewUserId} setViewUserId={setViewUserId} isMgr={isMgr} />}
+      {ptab === "ideas" && <IdeasTab projects={projects} users={users} me={me} isMgr={isMgr} viewUserId={viewUserId} setViewUserId={setViewUserId} />}
       {ptab === "training" && (
         <div className="card" style={{ padding: 16 }}>
           <SectionTitle icon={GraduationCap} right={isMgr && <Btn small icon={Plus} onClick={() => setAssignOpen(true)}>Assign training</Btn>}>Training</SectionTitle>
@@ -3292,6 +3496,121 @@ function MemoryModule() {
 /* ═══ WORKSPACE ASSISTANT — the chat available on every page ═════════════ */
 /* ── SHARED CHAT PIECES (module scope — components declared inside another
    component get a new identity every render and remount their subtree) ──── */
+
+/* ═══ INTERNAL MoM ════════════════════════════════════════════════════════ */
+function MomCard({ m, showProject }) {
+  const [open, setOpen] = useState(false);
+  const ai = m.ai || {};
+  const solved = (ai.challenges || []).filter((c) => c.status === "solved").length;
+  return (
+    <div className="card" style={{ padding: 14, borderLeft: "3px solid var(--purple)" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 13.5 }}>{ai.title || m.title || "Discussion"}</span>
+        {showProject && <Pill color="var(--acc)" style={{ fontFamily: MONO }}>{m.projectId}</Pill>}
+        <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(m.date)} · {m.time}</span>
+        <span style={{ fontSize: 11, color: "var(--txt3)" }}>by {m.byName}</span>
+        {(ai.challenges || []).length > 0 && <Pill color={solved ? "var(--green)" : "var(--amber)"}>{solved}/{ai.challenges.length} beaten</Pill>}
+        {(ai.ideas || []).length > 0 && <Pill color="var(--purple)"><Lightbulb size={10} /> {ai.ideas.length} idea{ai.ideas.length === 1 ? "" : "s"}</Pill>}
+        {m.savedTo && <Pill color="var(--green)"><CheckCircle2 size={10} /> In Drive</Pill>}
+        <button onClick={() => setOpen(!open)} style={{ marginLeft: "auto", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{open ? "Less" : "Open"}</button>
+      </div>
+      {ai.summary && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.6, marginTop: 6 }}>{ai.summary}</div>}
+      {m.attendees && <div style={{ fontSize: 11, color: "var(--txt3)", marginTop: 4 }}>In the room: {m.attendees}</div>}
+
+      {open && (
+        <div className="fade" style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 13 }}>
+          {(ai.challenges || []).length > 0 && (
+            <div>
+              <CardLabel>Challenges and how they went</CardLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {ai.challenges.map((c, i) => {
+                  const [label, colour] = MOM_STATUS[c.status] || MOM_STATUS.watch;
+                  return (
+                    <div key={i} style={{ border: `1px solid ${colour}`, borderRadius: 9, padding: "9px 11px", background: "var(--s2)" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                        <span style={{ fontWeight: 600, fontSize: 12.5, flex: 1, minWidth: 180 }}>{c.problem}</span>
+                        <Pill color={colour}>{label}</Pill>
+                      </div>
+                      {c.solution && <div style={{ fontSize: 12, color: "var(--txt2)", marginTop: 4, lineHeight: 1.55 }}>{c.solution}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {(ai.ideas || []).length > 0 && (
+            <div>
+              <CardLabel>Who moved this forward</CardLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {ai.ideas.map((x, i) => {
+                  const im = impactOf(x.impact);
+                  return (
+                    <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                      <Pill color={im.c} style={{ flexShrink: 0 }}>{x.by}</Pill>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>{x.idea}</div>
+                        <div style={{ fontSize: 11, color: "var(--txt3)", marginTop: 2 }}>{im.label}{x.why ? ` · ${x.why}` : ""}</div>
+                      </div>
+                      <span title={`${x.value}/5 by impact`} style={{ flexShrink: 0, fontSize: 11, fontFamily: MONO, color: im.c, fontWeight: 700 }}>{"●".repeat(Math.max(1, Math.min(5, Number(x.value) || 1)))}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {(ai.decisions || []).length > 0 && (
+            <div>
+              <CardLabel>Decided</CardLabel>
+              {ai.decisions.map((d, i) => (
+                <div key={i} style={{ fontSize: 12.5, lineHeight: 1.6, display: "flex", gap: 7 }}>
+                  <CheckCircle2 size={13} style={{ color: "var(--green)", flexShrink: 0, marginTop: 3 }} />
+                  <span>{d.what}{d.owner ? <span style={{ color: "var(--txt3)" }}> — {d.owner}</span> : null}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(ai.lessons || []).length > 0 && (
+            <div>
+              <CardLabel right={<Pill color="var(--purple)"><Sparkles size={10} /> in system memory</Pill>}>What we learned</CardLabel>
+              {ai.lessons.map((l, i) => (
+                <div key={i} style={{ fontSize: 12.5, lineHeight: 1.6, display: "flex", gap: 7 }}>
+                  <Lightbulb size={13} style={{ color: "var(--purple)", flexShrink: 0, marginTop: 3 }} />{l}
+                </div>
+              ))}
+            </div>
+          )}
+          {m.raw && (
+            <details>
+              <summary style={{ cursor: "pointer", fontSize: 11.5, color: "var(--txt3)", fontWeight: 600 }}>the notes as they were written</summary>
+              <div style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginTop: 7, padding: "9px 11px", background: "var(--s2)", borderRadius: 9 }}>{m.raw}</div>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Ranked contributors — named on every note, ranked here, and echoed on each
+   person's Performance page. */
+function IdeaBoard({ credit, compact }) {
+  if (!credit.length) return null;
+  const top = credit[0].score || 1;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+      {credit.slice(0, compact ? 5 : 20).map((c, i) => (
+        <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ width: 18, flexShrink: 0, fontFamily: MONO, fontSize: 11, fontWeight: 800, color: i === 0 ? "var(--amber)" : "var(--txt3)" }}>{i + 1}</span>
+          <span style={{ width: 120, flexShrink: 0, fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
+          <span style={{ flex: 1, minWidth: 60, height: 9, background: "var(--s2)", borderRadius: 5, overflow: "hidden" }}>
+            <span style={{ display: "block", width: `${Math.round((c.score / top) * 100)}%`, height: "100%", background: i === 0 ? "var(--amber)" : "var(--acc)" }} />
+          </span>
+          <span style={{ flexShrink: 0, fontSize: 11, color: "var(--txt2)", fontFamily: MONO, width: 96, textAlign: "right" }}>{c.count} idea{c.count === 1 ? "" : "s"} · {c.score}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /* ═══ PLAN BOARD — one plan, four ways of looking at it ═══════════════════
    Gantt for the shape of the schedule, Flow for the sequence, Steps for the
@@ -4173,19 +4492,112 @@ function AssistantModule() {
   );
 }
 
+/* ═══ INTERNAL MoM — every session, and who has been contributing ════════ */
+function MomModule() {
+  const { projects, setView } = useCtx();
+  const [q, setQ] = useState("");
+  const [proj, setProj] = useState("");
+  const sessions = allMoms(projects);
+  const credit = momCredit(projects);
+  const needle = normId(q);
+  const shown = sessions.filter((m) =>
+    (!proj || m.projectId === proj)
+    && (!needle || normId(JSON.stringify([m.title, m.raw, m.attendees, m.ai])).includes(needle)));
+
+  const challenges = sessions.flatMap((m) => (m.ai?.challenges || []).map((c) => ({ ...c, projectId: m.projectId, date: m.date })));
+  const openOnes = challenges.filter((c) => c.status !== "solved");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,320px)", gap: 16, alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Section>
+            <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
+              <input className="inp" style={{ flex: 1, minWidth: 200 }} placeholder="Search every discussion — a part, a supplier, a person, a problem…" value={q} onChange={(e) => setQ(e.target.value)} />
+              <select className="inp" style={{ width: 190 }} value={proj} onChange={(e) => setProj(e.target.value)}>
+                <option value="">Every project</option>
+                {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId}</option>)}
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+              <Pill color="var(--acc)">{sessions.length} session{sessions.length === 1 ? "" : "s"}</Pill>
+              <Pill color="var(--green)">{challenges.length - openOnes.length} challenge{challenges.length - openOnes.length === 1 ? "" : "s"} beaten</Pill>
+              {openOnes.length > 0 && <Pill color="var(--red)">{openOnes.length} still open</Pill>}
+            </div>
+          </Section>
+
+          {shown.length === 0 ? (
+            <Section>
+              <Empty icon={Lightbulb} title={sessions.length ? "Nothing matches that" : "No discussions written up yet"}
+                sub={sessions.length ? "Try a different word, or clear the project filter." : "Open a project and use Internal MoM to type up a brainstorm. The AI keeps the challenge, how it was beaten, whose idea helped and what to do next — so the same argument never has to happen twice."} />
+              {!sessions.length && <div style={{ marginTop: 10 }}><Btn small kind="ghost" icon={ArrowRight} onClick={() => setView("projects")}>Open a project</Btn></div>}
+            </Section>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+              {shown.map((m) => <MomCard key={m.id} m={m} showProject />)}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Section>
+            <CardLabel right={<Award size={14} style={{ color: "var(--amber)" }} />}>Who is moving projects forward</CardLabel>
+            {credit.length === 0
+              ? <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.6 }}>Once discussions are written up, whoever's ideas actually saved time, money or quality shows up here — scored on how much each one helped, not on how often they spoke.</div>
+              : <>
+                <IdeaBoard credit={credit} />
+                <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 10, lineHeight: 1.55 }}>Scored 1–5 per idea on how much it actually helped, so one idea that saved a fortnight outweighs ten easy ones.</div>
+              </>}
+          </Section>
+
+          {credit.slice(0, 3).map((c) => (
+            <Section key={c.name} style={{ background: "var(--s2)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                <Lightbulb size={13} style={{ color: "var(--purple)" }} />
+                <span style={{ fontWeight: 700, fontSize: 12.5 }}>{c.name}</span>
+                <Pill color="var(--purple)">{c.score}</Pill>
+              </div>
+              {c.examples.map((e, i) => (
+                <div key={i} style={{ fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55, marginBottom: 5 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)" }}>{e.projectId}</span> · {e.idea}
+                </div>
+              ))}
+            </Section>
+          ))}
+
+          {openOnes.length > 0 && (
+            <Section>
+              <CardLabel>Still unresolved</CardLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {openOnes.slice(0, 8).map((c, i) => (
+                  <div key={i} style={{ fontSize: 12, lineHeight: 1.55 }}>
+                    <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)" }}>{c.projectId}</span> · {c.problem}
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ═══ SHELL — SIDEBAR, HEADER, TOASTS, APP ROOT ══════════════════════════ */
 const NAV = [
   { id: "assistant", label: "Assistant", icon: Bot },
-  { id: "projects", label: "Create a Project", icon: FolderPlus, admin: true },
+  { id: "projects", label: "Projects", icon: FolderPlus, admin: true },
   { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
   { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
+  { id: "mom", label: "Internal MoM", icon: Lightbulb },
   { id: "resources", label: "Resources", icon: Users },
   { id: "perf", label: "Performance & Training", icon: Gauge },
   { id: "memory", label: "System Memory", icon: Database, admin: true },
 ];
 const TITLES = {
   assistant: ["Assistant", "Say it in plain words — it creates projects, staffs them, raises tasks, writes the scrum, remembers, and reads & writes Drive"],
-  projects: ["Create a Project", "Chat-guided creation · hard gates on Project ID + both LLDs · list & status only"],
+  projects: ["Projects", "Add or create a project · hard gates on Project ID + both LLDs · open one for its plan, files and chat"],
+  mom: ["Internal MoM", "Brainstorms, challenges and how they were beaten — kept so the same mistake is never made twice, and so good ideas get credited"],
   scrum: ["Daily Scrum", "Write it as it comes — AI turns it into assigned, time-boxed, if/else-aware tasks"],
   tasks: ["My Projects & Tasks", "Start → work window → AI-gated closure · branch stuck work back to scrum"],
   resources: ["Resources", "Team roster, availability, deployment & efficiency"],
@@ -4485,6 +4897,7 @@ export default function App() {
             {view === "projects" && <ProjectsModule />}
             {view === "scrum" && <ScrumModule />}
             {view === "tasks" && <TasksModule />}
+            {view === "mom" && <MomModule />}
             {view === "resources" && <ResourcesModule />}
             {view === "perf" && <PerfModule />}
             {view === "memory" && <MemoryModule />}
