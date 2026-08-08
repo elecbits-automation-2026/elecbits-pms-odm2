@@ -278,6 +278,31 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
    Returns true on success. */
 /* Returns true on success, or a short human reason on failure — a blanket
    "Drive isn't reachable" hid real causes like a folder that isn't shared. */
+/* Browse a folder. Searching and browsing are different questions — "what is
+   in Eb-02-ODM" deserves a listing, not a keyword hunt. */
+async function driveListFolder(folderPath) {
+  if (!DRIVE_READ_URL) return { listing: "", error: "Drive isn't connected in this build." };
+  const ctrl = new AbortController();
+  const bail = setTimeout(() => ctrl.abort(), 40000);
+  try {
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST", signal: ctrl.signal,
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "list", folderPath: folderPath || "", token: DRIVE_READ_TOKEN }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      return { listing: "", error: data.error || `Drive wouldn't list that (${res.status}).` };
+    }
+    if (!("listing" in data)) {
+      return { listing: "", error: "The Drive reader on the server is an older build that can't browse folders — redeploy supabase/functions/drive-read." };
+    }
+    return { listing: data.listing || "", error: "", path: data.path || "" };
+  } catch (e) {
+    return { listing: "", error: e?.name === "AbortError" ? "Drive took too long to answer." : "Drive isn't reachable right now." };
+  } finally { clearTimeout(bail); }
+}
+
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
   if ((!projectId && !opts.folderPath) || !fileName) return "I need somewhere to put it and a file name.";
@@ -423,6 +448,7 @@ const stepLabel = (name, input) => {
     case "write_drive_file": return `Writing ${i.fileName} into ${i.folderPath || i.projectId}…`;
     case "save_attachment": return `Filing ${i.name} into ${i.projectId}…`;
     case "list_projects": return "Checking the project list…";
+    case "list_folder": return `Opening ${i.folderPath || "Eb-02-ODM"} in Drive…`;
     case "create_project": return `Creating ${i.projectId || i.name || "the project"}…`;
     case "update_project": return `Updating ${i.projectId}…`;
     case "delete_projects": return "Working out what to delete…";
@@ -476,6 +502,8 @@ const WORKSPACE_TOOLS = [
     { projectId: str("the project whose folders to open, e.g. Eb-09-ML-432-01-1752"), search: str("what to hunt for when no project is named, e.g. 'project tracker'") }),
   tool("create_doc", "Write a document and hand it to the user in the chat — a plan, a checklist, a summary, a report, a CSV. They can open it, download it, and it is filed into the project's Drive folder if you name one. Use this whenever they ask you to write, draft, produce or prepare something, rather than dumping the text into your reply.",
     { title: str("what to call it"), fileName: str("file name with extension, e.g. Kickoff-Plan.md"), content: str("the whole document"), projectId: str("file it into this project's Drive folder — optional"), folderPath: str("or file it at this path under Eb-02-ODM — optional; folders are created if missing") }, ["content"]),
+  tool("list_folder", "See what is actually inside a Drive folder — its sub-folders and its files. Use this for \"what is in X\", \"list the files in X\", or whenever you need to know what exists before deciding anything. Leave folderPath empty for the top of Eb-02-ODM. This is browsing, not searching: it shows you everything at that level.",
+    { folderPath: str("the folder to open, e.g. 'Eb-02-ODM', 'Eb-02-ODM/Eb-ODM Execution', or 'Project Management/Eb-09-ML-432-01-1752'. Empty means the top of Eb-02-ODM.") }),
   tool("write_drive_file", "Write a file anywhere in the company Drive. Give a projectId for a project folder, or a folderPath to put it somewhere else entirely — any folder under Eb-02-ODM. Folders in the path that do not exist are created.",
     { projectId: str("a project's folder"), folderPath: str("where to put it instead, e.g. 'Eb-02-ODM/Templates' or 'Eb-ODM Execution/Engineering Services/Shared'"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["fileName", "content"]),
   tool("save_attachment", "File something the user attached into a project's Drive folder, exactly as they sent it.",
@@ -820,7 +848,7 @@ Check before you claim. If you are asked what exists, look — do not answer fro
 
 WHAT YOU CAN REACH
 · This workspace — projects, tasks, the team roster, the daily scrum, system memory, training.
-· The company's Google Drive, under ${DRIVE_CHAIN}. File names in there are not standard: never expect a particular name, never say something is missing because it is not called what you expected. Look at what is actually there.
+· The company's Google Drive, all of it under Eb-02-ODM — not only ${DRIVE_CHAIN}. list_folder opens any folder and shows what is in it, read_drive searches and reads the files. If you are asked what is somewhere, OPEN IT with list_folder rather than saying you cannot see it. File names in there are not standard: never expect a particular name, never say something is missing because it is not called what you expected. Look at what is actually there.
 · The internet, through web_search. Use it for anything current or external — a part number, a datasheet figure, a supplier lead time, a standard, a price — and name the source. Drive and this workspace remain the authority on this company's own projects; a search result never overrides them.
 · Code execution, for anything you cannot do reliably in your head: arithmetic over a list, parsing a table, working out dates and durations, checking a BoM adds up.
 · Anything the person attaches — screenshots, PDFs, spreadsheets. You can see images and read documents directly. Never say you cannot see or read something they have given you.
@@ -5057,6 +5085,11 @@ function AssistantModule() {
         const r = await saveAttachmentToDrive(f, p.projectId, driveScope(my?.role));
         if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${f.name} uploaded from the assistant`);
         return { line: saveResult(r, f.name, p.projectId) };
+      }
+      case "list_folder": {
+        const { listing, error } = await driveListFolder(a.folderPath || "");
+        if (error) return { ok: false, line: error };
+        return { line: "", drive: listing || "That folder is empty." };
       }
       case "write_drive_file": {
         const p = proj(a.projectId);

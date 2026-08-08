@@ -230,7 +230,11 @@ async function resolveBranches(token: string) {
   const top = await searchFolders(token, ROOT_CHAIN[0]);
   let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
   for (let i = 1; node && i < ROOT_CHAIN.length; i++) node = await childFolder(token, node.id, ROOT_CHAIN[i]);
-  const out = { pm: null as GFile | null, pcb: null as GFile | null, all: [] as GFile[], ok: !!node };
+  const out = { pm: null as GFile | null, pcb: null as GFile | null, all: [] as GFile[], top: null as GFile | null, ok: !!node };
+  // the very top of the tree, kept as a last-resort root: a project living
+  // outside Engineering Services is still inside Eb-02-ODM, and "everything
+  // under Eb-02-ODM" is what people mean when they say the ODM folder.
+  out.top = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
   if (node) {
     out.all = (await listSafe(token, node.id)).filter(isFolder);
     const pick = (name: string) => {
@@ -244,15 +248,24 @@ async function resolveBranches(token: string) {
   return out;
 }
 /* Where to look, in order: the asker's usual branch, then the other named one,
-   then every other branch under Engineering Services. */
-function searchOrder(branches: { pm: GFile | null; pcb: GFile | null; all: GFile[] }, scope: string): GFile[] {
+   then every other branch under Engineering Services — and finally the top of
+   Eb-02-ODM itself, so anything filed outside Engineering Services is still
+   found rather than reported as invisible. */
+function searchOrder(branches: { pm: GFile | null; pcb: GFile | null; all: GFile[]; top?: GFile | null }, scope: string): GFile[] {
   const first = scope === "pcb" ? [branches.pcb, branches.pm] : [branches.pm, branches.pcb];
   const seen = new Set<string>();
   const out: GFile[] = [];
-  for (const f of [...first, ...branches.all]) {
+  for (const f of [...first, ...branches.all, branches.top || null]) {
     if (f && !seen.has(f.id)) { seen.add(f.id); out.push(f); }
   }
   return out;
+}
+
+/* Where a search root actually lives. Every root except the last is a child of
+   Engineering Services; the last one IS the top of Eb-02-ODM, and prefixing the
+   chain onto it produced paths that did not exist. */
+function rootPath(root: GFile, branches: { top?: GFile | null }): string {
+  return root.id === branches.top?.id ? `/${root.name}/` : `${ROOT_PATH}${root.name}/`;
 }
 
 /* Find the folder for an ID somewhere under a branch. A level at a time, so a
@@ -510,7 +523,8 @@ Deno.serve(async (req) => {
   // No project named is a legitimate question ("find the checklists across the
   // ODM folder") as long as there is something to search for — it used to be a
   // flat 400.
-  if (!needles.length && !String(body.search || "").trim() && body.action !== "write") {
+  // browsing needs neither a project nor a search term — the folder IS the ask
+  if (!needles.length && !String(body.search || "").trim() && body.action !== "write" && body.action !== "list") {
     return json({ ok: true, digest: "", note: "no project or search term given" });
   }
 
@@ -520,6 +534,60 @@ Deno.serve(async (req) => {
 
   try {
     const token = await getAccessToken();
+
+    /* Walk a slash-separated path down from Eb-02-ODM. `make` creates the
+       folders that are missing; without it a missing folder just stops the
+       walk and the caller is told how far it got. */
+    const walkPath = async (rawPath: string, make: boolean) => {
+      const parts = rawPath.split("/").map((x) => x.trim()).filter(Boolean);
+      const top = await searchFolders(token, ROOT_CHAIN[0]);
+      let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
+      if (!node) return { node: null, walked: [] as string[], missing: ROOT_CHAIN[0] };
+      const walked: string[] = [ROOT_CHAIN[0]];
+      // a path that does not start at the top is taken from Engineering Services
+      if (parts.length && norm(parts[0]) === norm(ROOT_CHAIN[0])) parts.shift();
+      else if (parts.length) {
+        for (let i = 1; node && i < ROOT_CHAIN.length; i++) {
+          node = await childFolder(token, node.id, ROOT_CHAIN[i]);
+          if (node) walked.push(node.name);
+        }
+        if (!node) return { node: null, walked, missing: ROOT_CHAIN.join("/") };
+      }
+      for (const part of parts) {
+        const kid: GFile | null = await childFolder(token, node!.id, part);
+        node = kid || (make ? await createFolder(token, node!.id, part) : null);
+        if (!node) return { node: null, walked, missing: part };
+        walked.push(node.name);
+      }
+      return { node, walked, missing: "" };
+    };
+
+    /* ── list action: what is actually in a folder ──
+       Browsing is not searching. "What is in Eb-02-ODM" is a fair question and
+       used to be answered with "I don't have visibility there", because the
+       only tool was a search confined to the Engineering Services branches. */
+    if (body.action === "list") {
+      const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+      const { node, walked, missing } = await walkPath(rawPath, false);
+      if (!node) {
+        return json({ error: missing === ROOT_CHAIN[0]
+          ? `I can't see ${ROOT_CHAIN[0]} in Drive at all — share it with the service account.`
+          : `There's no folder called "${missing}" under /${walked.join("/")}/.` }, 404);
+      }
+      const kids = await listSafe(token, node.id);
+      const folders = kids.filter(isFolder).map((k) => k.name).sort();
+      const files = kids.filter((k) => !isFolder(k)).map((k) => k.name).sort();
+      return json({
+        ok: true,
+        path: `/${walked.join("/")}/`,
+        folders, files,
+        listing: [
+          `/${walked.join("/")}/ holds ${folders.length} folder(s) and ${files.length} file(s).`,
+          ...folders.map((n) => `  [folder] ${n}`),
+          ...files.map((n) => `  ${n}`),
+        ].join("\n"),
+      });
+    }
 
     // ── write action: { action:"write", projectId | folderPath, fileName, content } ──
     if (body.action === "write") {
@@ -532,31 +600,10 @@ Deno.serve(async (req) => {
          Templates folder" is one instruction rather than a trip to Drive. */
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
       if (rawPath) {
-        const parts = rawPath.split("/").map((x) => x.trim()).filter(Boolean);
-        let node: GFile | null = null;
-        if (norm(parts[0]) === norm(ROOT_CHAIN[0])) {
-          const top = await searchFolders(token, ROOT_CHAIN[0]);
-          node = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
-          parts.shift();
-        } else {
-          const br = await resolveBranches(token);
-          if (!br.ok) return json({ error: `I can't reach ${ROOT_PATH} — share it with the service account` }, 404);
-          // walk from Engineering Services
-          const eng = await searchFolders(token, ROOT_CHAIN[0]);
-          let n: GFile | null = eng.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || eng[0] || null;
-          for (let i = 1; n && i < ROOT_CHAIN.length; i++) n = await childFolder(token, n.id, ROOT_CHAIN[i]);
-          node = n;
-        }
-        if (!node) return json({ error: `I couldn't find ${ROOT_CHAIN[0]} in Drive — share it with the service account` }, 404);
-        const walked: string[] = [];
-        for (const part of parts) {
-          const kid: GFile | null = await childFolder(token, node.id, part);
-          node = kid || await createFolder(token, node.id, part);
-          if (!node) return json({ error: `I couldn't open or create "${part}" under ${walked.join("/") || ROOT_CHAIN[0]}` }, 502);
-          walked.push(node.name);
-        }
+        const { node, walked, missing } = await walkPath(rawPath, true);
+        if (!node) return json({ error: `I couldn't open or create "${missing}" under /${walked.join("/")}/` }, 502);
         const fid = await writeFile(token, node.id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
-        return json({ ok: true, fileId: fid, folder: node.name, path: `/${[ROOT_CHAIN[0], ...walked].join("/")}/` });
+        return json({ ok: true, fileId: fid, folder: node.name, path: `/${walked.join("/")}/` });
       }
 
       // Same address, and the same best-match rule, as the read side — so a
@@ -566,7 +613,7 @@ Deno.serve(async (req) => {
       let best = 9;
       for (const root of searchOrder(br, String(body.scope || "pm"))) {
         if (outOfTime()) break;
-        const { hits, rank } = await findFolderUnder(token, root, String(body.projectId));
+        const { hits, rank } = await findFolderUnder(token, root, String(body.projectId), root.id === br.top?.id ? 4 : 2);
         if (hits.length && rank < best) { best = rank; folders = hits; }
         if (best === 0) break;
       }
@@ -589,7 +636,10 @@ Deno.serve(async (req) => {
     // useful ones after the whole tree is mapped (not just the first folder's).
     const candidates: Entry[] = [];
 
-    if (branches.ok) lines.push(`Looked under ${ROOT_PATH} — across ${order.map((f) => f.name).join(", ") || "its folders"}.`);
+    if (branches.ok) {
+      const named = order.filter((f) => f.id !== branches.top?.id).map((f) => f.name);
+      lines.push(`Looked across ${named.join(", ") || "its folders"} under ${ROOT_PATH}${branches.top ? `, and then the whole of /${ROOT_CHAIN[0]}/` : ""}.`);
+    }
 
     // No project named — search the whole chain for what they asked about.
     if (!needles.length) {
@@ -622,8 +672,8 @@ Deno.serve(async (req) => {
       let best = 9;
       for (const root of order) {
         if (outOfTime()) break;
-        const { hits, rank } = await findFolderUnder(token, root, needle);
-        if (hits.length && rank < best) { best = rank; folders = hits; where = `${ROOT_PATH}${root.name}/`; }
+        const { hits, rank } = await findFolderUnder(token, root, needle, root.id === branches.top?.id ? 4 : 2);
+        if (hits.length && rank < best) { best = rank; folders = hits; where = rootPath(root, branches); }
         if (best === 0) break;                       // an exact name; nothing will beat it
       }
       if (!folders.length) { folders = await findFolders(token, needle); where = ""; }
@@ -631,7 +681,17 @@ Deno.serve(async (req) => {
 
       const section: string[] = [];
       for (const folder of folders.slice(0, 2)) {
-        const base = where || await folderPath(token, folder).then((p) => p.replace(new RegExp(`${folder.name}/$`), ""));
+        // Always resolve the real parent chain. The search root is only the
+        // right prefix when the hit is a direct child of it, which stopped
+        // being true once the whole of Eb-02-ODM became searchable — and a
+        // path that does not exist is worse than a slow one.
+        const real = await folderPath(token, folder)
+          .then((p) => p.replace(new RegExp(`${folder.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/$`), ""))
+          .catch(() => "");
+        // If Drive did not hand back enough parents to reach the top, the
+        // chain is incomplete — fall back to the root we searched from rather
+        // than printing a path that starts nowhere.
+        const base = real.startsWith(`/${ROOT_CHAIN[0]}/`) ? real : (where || real);
         const path = `${base}${folder.name}/`;
         const { entries, truncated } = await walkTree(token, folder, path);
         const fileCount = entries.filter((e) => !isFolder(e.f)).length;
