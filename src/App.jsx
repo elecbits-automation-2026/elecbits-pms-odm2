@@ -280,7 +280,7 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
    "Drive isn't reachable" hid real causes like a folder that isn't shared. */
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
-  if (!projectId || !fileName) return "I need a project and a file name to save it.";
+  if ((!projectId && !opts.folderPath) || !fileName) return "I need somewhere to put it and a file name.";
   // A big file takes as long as it takes — roughly a second per megabyte on a
   // modest connection, on top of the reader's own budget.
   const mb = String(content || "").length / 1048576;
@@ -291,7 +291,7 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
       method: "POST",
       signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.ok) return true;
@@ -420,7 +420,7 @@ const stepLabel = (name, input) => {
   const i = input || {};
   switch (name) {
     case "read_drive": return `Looking in Drive${i.projectId ? ` at ${i.projectId}` : i.search ? ` for "${String(i.search).slice(0, 40)}"` : ""}…`;
-    case "write_drive_file": return `Writing ${i.fileName} into ${i.projectId}…`;
+    case "write_drive_file": return `Writing ${i.fileName} into ${i.folderPath || i.projectId}…`;
     case "save_attachment": return `Filing ${i.name} into ${i.projectId}…`;
     case "list_projects": return "Checking the project list…";
     case "create_project": return `Creating ${i.projectId || i.name || "the project"}…`;
@@ -433,6 +433,9 @@ const stepLabel = (name, input) => {
     case "add_resource": return `Adding ${i.name} to the team…`;
     case "add_scrum_note": return "Writing the scrum note…";
     case "add_memory": return "Committing that to memory…";
+    case "list_memory": return "Reading the standing rules…";
+    case "update_memory": return "Rewriting a standing rule…";
+    case "delete_memory": return "Dropping a standing rule…";
     case "assign_training": return `Assigning training to ${i.name}…`;
     default: return "Working…";
   }
@@ -472,9 +475,9 @@ const WORKSPACE_TOOLS = [
   tool("read_drive", "Look inside the company's Google Drive. Give a projectId to open that project's folders, or a search phrase to hunt across the whole ODM tree. Returns the folder listing and the text inside the files. Use it before answering anything about what exists, what a checklist says, or what state a board is in.",
     { projectId: str("the project whose folders to open, e.g. Eb-09-ML-432-01-1752"), search: str("what to hunt for when no project is named, e.g. 'project tracker'") }),
   tool("create_doc", "Write a document and hand it to the user in the chat — a plan, a checklist, a summary, a report, a CSV. They can open it, download it, and it is filed into the project's Drive folder if you name one. Use this whenever they ask you to write, draft, produce or prepare something, rather than dumping the text into your reply.",
-    { title: str("what to call it"), fileName: str("file name with extension, e.g. Kickoff-Plan.md"), content: str("the whole document"), projectId: str("file it into this project's Drive folder — optional") }, ["content"]),
-  tool("write_drive_file", "Write a file into a project's Drive folder.",
-    { projectId: str("which project's folder"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["projectId", "fileName", "content"]),
+    { title: str("what to call it"), fileName: str("file name with extension, e.g. Kickoff-Plan.md"), content: str("the whole document"), projectId: str("file it into this project's Drive folder — optional"), folderPath: str("or file it at this path under Eb-02-ODM — optional; folders are created if missing") }, ["content"]),
+  tool("write_drive_file", "Write a file anywhere in the company Drive. Give a projectId for a project folder, or a folderPath to put it somewhere else entirely — any folder under Eb-02-ODM. Folders in the path that do not exist are created.",
+    { projectId: str("a project's folder"), folderPath: str("where to put it instead, e.g. 'Eb-02-ODM/Templates' or 'Eb-ODM Execution/Engineering Services/Shared'"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["fileName", "content"]),
   tool("save_attachment", "File something the user attached into a project's Drive folder, exactly as they sent it.",
     { name: str("the attached file's name"), projectId: str("which project's folder") }, ["name", "projectId"]),
   tool("list_projects", "The full project list with status, deadline, client, team and linked board ids. Cheap — call it whenever you need to be sure.", {}),
@@ -495,6 +498,12 @@ const WORKSPACE_TOOLS = [
   tool("add_scrum_note", "Write a note into the daily scrum, in the user's own words.", { text: str("the note"), date: str("YYYY-MM-DD") }, ["text"]),
   tool("add_memory", "Remember something for good — a rule, a preference, a standing instruction. It is injected into every future AI answer.",
     { title: str("short label"), content: str("the full text"), type: str("instruction|template|conversation") }, ["content"]),
+  /* The rules this assistant works to are data, not code — so it can read them,
+     add to them and take them away when the person tells it to. */
+  tool("list_memory", "Read the standing rules and notes in System Memory — everything that shapes how you and every other AI answer here.", {}),
+  tool("update_memory", "Change a standing rule. Find it by its title or by a phrase from it.",
+    { match: str("enough of the existing rule's title or text to find it"), title: str("the new title — optional"), content: str("the new text of the rule") }, ["match", "content"]),
+  tool("delete_memory", "Remove a standing rule that no longer applies.", { match: str("enough of its title or text to find it") }, ["match"]),
   tool("assign_training", "Assign training to somebody.", { name: str("person"), title: str("what to learn"), resource: str("link or book"), due: str("YYYY-MM-DD") }, ["name", "title"]),
 ];
 
@@ -815,6 +824,14 @@ WHAT YOU CAN REACH
 · The internet, through web_search. Use it for anything current or external — a part number, a datasheet figure, a supplier lead time, a standard, a price — and name the source. Drive and this workspace remain the authority on this company's own projects; a search result never overrides them.
 · Code execution, for anything you cannot do reliably in your head: arithmetic over a list, parsing a table, working out dates and durations, checking a BoM adds up.
 · Anything the person attaches — screenshots, PDFs, spreadsheets. You can see images and read documents directly. Never say you cannot see or read something they have given you.
+
+NEVER INVENT A LIMIT
+If you are not sure whether you can do something, TRY IT. The tool will tell you, and its answer is the truth. Do not reason from what you imagine the system allows, do not describe permissions or policies you have not been told about, and never say something is "locked down" or "how the system was built" — you do not know that. "I tried and it refused, here is what it said" is always better than a guess about the rules.
+
+You can write anywhere in the company Drive, not only into project folders: give write_drive_file or create_doc a folderPath and missing folders are created on the way.
+
+THE RULES ARE YOURS TO CHANGE
+System Memory below is the standing rulebook for this workspace — how things are named, what must happen before a review, anything this team has decided. It is data, not code. When somebody tells you a way of working has changed, change it: add_memory for a new rule, update_memory to reword one, delete_memory when it no longer applies. Read them back with list_memory. Never tell anyone a rule can only be changed by an admin or "on the backend" — you are how it gets changed. Where a rule here conflicts with your own defaults, the rule wins.
 
 WHEN SOMETHING FAILS
 Say so plainly and say what would fix it. Never report a failure as though it worked.
@@ -4980,6 +4997,29 @@ function AssistantModule() {
         setNotes((ns) => [n, ...ns]);
         return { line: `Written into the ${date === todayStr() ? "today's" : date} scrum as Note ${n.noteNo}. Open Daily Scrum and press Organise with AI to turn it into tasks.` };
       }
+      case "list_memory": {
+        if (!memory.length) return { line: "System Memory is empty — there are no standing rules yet." };
+        return { line: memory.map((m) => `[${m.type || "instruction"}] ${m.title}: ${String(m.content).slice(0, 400)}`).join("\n") };
+      }
+      case "update_memory": {
+        const want = normId(a.match);
+        const hit = memory.find((m) => normId(m.title) === want)
+          || memory.find((m) => normId(m.title).includes(want) || want.includes(normId(m.title)))
+          || memory.find((m) => normId(m.content).includes(want));
+        if (!hit) return { ok: false, line: `There is no standing rule matching "${a.match}".` };
+        const next = { ...hit, title: a.title || hit.title, content: String(a.content), updatedAt: new Date().toISOString() };
+        setMemory((mm) => mm.map((m) => (m.id === hit.id ? next : m)));
+        return { line: `Rewrote the rule "${next.title}". Every AI answer from now on follows the new wording.` };
+      }
+      case "delete_memory": {
+        const want = normId(a.match);
+        const hit = memory.find((m) => normId(m.title) === want)
+          || memory.find((m) => normId(m.title).includes(want) || want.includes(normId(m.title)))
+          || memory.find((m) => normId(m.content).includes(want));
+        if (!hit) return { ok: false, line: `There is no standing rule matching "${a.match}".` };
+        setMemory((mm) => mm.filter((m) => m.id !== hit.id));
+        return { line: `Dropped the rule "${hit.title}".` };
+      }
       case "add_memory": {
         if (!a.content) return { line: "There was nothing to remember." };
         setMemory((m) => [{ id: uid(), type: a.type || "instruction", title: a.title || String(a.content).slice(0, 40), content: String(a.content), createdAt: new Date().toISOString() }, ...m]);
@@ -5022,11 +5062,13 @@ function AssistantModule() {
         const p = proj(a.projectId);
         const fileName = String(a.fileName || "note.md").replace(/[\\/:*?"<>|]/g, "-");
         const content = String(a.content || "");
-        const r = await driveWriteFile(p?.projectId || a.projectId, fileName, content, { scope: driveScope(my?.role) });
+        const where = a.folderPath ? String(a.folderPath) : (p?.projectId || a.projectId);
+        const r = await driveWriteFile(a.folderPath ? "" : (p?.projectId || a.projectId), fileName, content, { scope: driveScope(my?.role), folderPath: a.folderPath || "" });
         if (r === true && p) sheetSync(`${pmPath(p.projectId)}`, `${fileName} written from the assistant`);
         return {
-          line: saveResult(r, fileName, p?.projectId || a.projectId),
-          doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: r === true ? (p?.projectId || a.projectId) : "" },
+          ok: r === true,
+          line: saveResult(r, fileName, where),
+          doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: r === true ? where : "" },
         };
       }
       case "create_doc": {
@@ -5035,9 +5077,10 @@ function AssistantModule() {
         if (!content.trim()) return { line: "" };
         let savedTo = "", why = "";
         const p = a.projectId ? proj(a.projectId) : null;
-        if (p) {
-          const r = await driveWriteFile(p.projectId, fileName, content, { scope: driveScope(my?.role) });
-          if (r === true) { savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} created from the assistant`); }
+        if (p || a.folderPath) {
+          const target = a.folderPath ? String(a.folderPath) : p.projectId;
+          const r = await driveWriteFile(a.folderPath ? "" : p.projectId, fileName, content, { scope: driveScope(my?.role), folderPath: a.folderPath || "" });
+          if (r === true) { savedTo = target; if (p) sheetSync(`${pmPath(p.projectId)}`, `${fileName} created from the assistant`); }
           else why = String(r);
         }
         return {

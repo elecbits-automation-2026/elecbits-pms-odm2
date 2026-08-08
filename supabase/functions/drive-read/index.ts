@@ -451,6 +451,17 @@ async function writeFailureReason(res: Response): Promise<string> {
   return (msg || `Drive refused the write (${res.status})`).slice(0, 160);
 }
 
+/* Make a folder if it is not there. Returns the folder either way. */
+async function createFolder(token: string, parentId: string, name: string): Promise<GFile | null> {
+  const res = await fetch("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,mimeType", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mimeType: "application/vnd.google-apps.folder", parents: [parentId] }),
+  });
+  if (!res.ok) return null;
+  return await res.json() as GFile;
+}
+
 async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
@@ -510,9 +521,44 @@ Deno.serve(async (req) => {
   try {
     const token = await getAccessToken();
 
-    // ── write action: { action:"write", projectId, fileName, content } ──
+    // ── write action: { action:"write", projectId | folderPath, fileName, content } ──
     if (body.action === "write") {
       if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
+
+      /* An explicit path writes anywhere the service account can reach, not
+         only inside a project folder. "Eb-02-ODM/Templates" walks down from the
+         top; a bare "Templates" is taken as relative to Engineering Services.
+         Missing folders along the way are created, so "put it in a new
+         Templates folder" is one instruction rather than a trip to Drive. */
+      const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+      if (rawPath) {
+        const parts = rawPath.split("/").map((x) => x.trim()).filter(Boolean);
+        let node: GFile | null = null;
+        if (norm(parts[0]) === norm(ROOT_CHAIN[0])) {
+          const top = await searchFolders(token, ROOT_CHAIN[0]);
+          node = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
+          parts.shift();
+        } else {
+          const br = await resolveBranches(token);
+          if (!br.ok) return json({ error: `I can't reach ${ROOT_PATH} — share it with the service account` }, 404);
+          // walk from Engineering Services
+          const eng = await searchFolders(token, ROOT_CHAIN[0]);
+          let n: GFile | null = eng.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || eng[0] || null;
+          for (let i = 1; n && i < ROOT_CHAIN.length; i++) n = await childFolder(token, n.id, ROOT_CHAIN[i]);
+          node = n;
+        }
+        if (!node) return json({ error: `I couldn't find ${ROOT_CHAIN[0]} in Drive — share it with the service account` }, 404);
+        const walked: string[] = [];
+        for (const part of parts) {
+          const kid: GFile | null = await childFolder(token, node.id, part);
+          node = kid || await createFolder(token, node.id, part);
+          if (!node) return json({ error: `I couldn't open or create "${part}" under ${walked.join("/") || ROOT_CHAIN[0]}` }, 502);
+          walked.push(node.name);
+        }
+        const fid = await writeFile(token, node.id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
+        return json({ ok: true, fileId: fid, folder: node.name, path: `/${[ROOT_CHAIN[0], ...walked].join("/")}/` });
+      }
+
       // Same address, and the same best-match rule, as the read side — so a
       // file lands in the folder the reader is actually looking at.
       const br = await resolveBranches(token);
