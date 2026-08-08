@@ -606,10 +606,14 @@ To do something, end your reply with one or more blocks in exactly this shape, a
 <<<END>>>
 One block per thing. Always write one short plain line BEFORE the blocks saying what you are doing. Never show the blocks themselves in your sentence, never explain the format, never ask the user to run anything.
 
+DO THE WHOLE JOB IN ONE TURN. When they ask for something across many things — "delete all the projects except 1752", "close every overdue task on EB-24-001", "put Ravi on all three boards" — do not do one and stop, and do not hand it back a step at a time. Either use the bulk form of the action where there is one, or emit every block the job needs in this one reply. Working through a list one item per message is the wrong answer; they asked once, so it happens once.
+
 The actions, with their fields:
 {"action":"create_project","projectId":"EB-24-001","name":"Smart Meter","clientName":"Acme","deadline":"2026-09-30","status":"Planning","linkedIds":["EB-24-001-PCB-R1"],"knownStatus":"one paragraph of where it stands","team":[{"name":"Saurav","slot":"PM (Project Manager)"},{"name":"Ravi","slot":"Jr. Hardware Engineer"}]}
 {"action":"update_project","projectId":"EB-24-001","status":"In Progress","deadline":"2026-10-15","knownStatus":"...","name":"...","linkedIds":["..."]}
 {"action":"delete_project","projectId":"EB-24-001"}
+{"action":"delete_projects","projectIds":["EB-24-001","EB-24-002"]}          — several at once
+{"action":"delete_projects","all":true,"except":["EB-09-ML-432-01-1752"]}    — everything but the ones named
 {"action":"assign_resource","name":"Ravi","projectId":"EB-24-001","slot":"Jr. Hardware Engineer"}
 {"action":"unassign_resource","name":"Ravi","projectId":"EB-24-001"}
 {"action":"add_resource","name":"Asha Menon","title":"Jr. Firmware Engineer","dept":"Firmware","resourceRole":"jr_fw","role":"engineer","skills":["Embedded C"],"maxProjects":3,"email":"asha@elecbits.in"}
@@ -4694,8 +4698,36 @@ function AssistantModule() {
       }
       case "delete_project": {
         const p = proj(a.projectId);
-        if (!p) return { line: `There is no project called ${a.projectId}.` };
-        return { confirm: { kind: "delete_project", id: p.id, label: `Delete ${p.projectId} — ${p.name}? Its tasks stay, but the project goes.` } };
+        if (!p) return { ok: false, line: `There is no project called ${a.projectId}.` };
+        return { confirm: { ids: [p.id], label: `Delete ${p.projectId} — ${p.name}? Its tasks stay, but the project goes.` } };
+      }
+      /* "delete all of them except 1752" is one instruction, so it gets one
+         action, one list and one button — not sixteen rounds of asking. */
+      case "delete_projects": {
+        const keep = new Set((a.except || a.keep || []).map((x) => normId(x)).filter(Boolean));
+        const asked = a.projectIds || a.projects || [];
+        const named = asked.map((x) => proj(x)).filter(Boolean);
+        // "everything" only when they actually said everything. A list of names
+        // that resolves to nothing must delete nothing — falling through to the
+        // sweep here would wipe the workspace over a typo.
+        const sweep = a.all === true || asked.length === 0;
+        if (!sweep && !named.length) {
+          return { ok: false, line: `I couldn't find ${asked.map((x) => `"${x}"`).join(" or ")} — nothing matched that, so nothing was touched.` };
+        }
+        let victims = sweep
+          ? live.projects.filter((x) => ![...keep].some((k) => normId(x.projectId).includes(k) || k.includes(normId(x.projectId))))
+          : named;
+        // never let a vague "all" quietly include something they said to keep
+        if (keep.size) victims = victims.filter((x) => ![...keep].some((k) => normId(x.projectId).includes(k)));
+        victims = [...new Map(victims.map((x) => [x.id, x])).values()];
+        if (!victims.length) return { ok: false, line: "Nothing matched that — no projects were touched." };
+        const names = victims.map((x) => x.projectId);
+        return {
+          confirm: {
+            ids: victims.map((x) => x.id),
+            label: `Delete ${victims.length} project${victims.length === 1 ? "" : "s"}${keep.size ? `, keeping ${[...keep].length === 1 ? names.length ? (a.except || a.keep)[0] : "" : (a.except || a.keep).join(", ")}` : ""}? Their tasks stay, the projects go.\n${names.join(", ")}`,
+          },
+        };
       }
       case "assign_resource": {
         const p = proj(a.projectId), u = findPerson(users, a.name);
@@ -4843,11 +4875,15 @@ function AssistantModule() {
     }
   };
 
-  const doDelete = (id) => {
-    const p = projects.find((x) => x.id === id);
-    setProjects((ps) => ps.filter((x) => x.id !== id));
-    toast(`${p?.projectId || "Project"} deleted`, "amber");
-    say("sys", `Deleted ${p?.projectId || "the project"}.`);
+  const doDelete = (ids) => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const gone = projects.filter((x) => list.includes(x.id));
+    setProjects((ps) => ps.filter((x) => !list.includes(x.id)));
+    const names = gone.map((x) => x.projectId);
+    toast(names.length === 1 ? `${names[0]} deleted` : `${names.length} projects deleted`, "amber");
+    say("sys", names.length === 1
+      ? `Deleted ${names[0] || "the project"}.`
+      : `Deleted ${names.length} projects: ${names.join(", ")}.`, { ok: true });
   };
 
   /* One turn: ask → execute → (optionally) ask again with the Drive contents. */
@@ -4879,13 +4915,13 @@ function AssistantModule() {
 
     try {
       let { clean, blocks } = await runOnce(drive);
-      const lines = []; const docs = []; let confirm = null; let freshDrive = ""; let anyFailed = false;
+      const lines = []; const docs = []; const confirms = []; let freshDrive = ""; let anyFailed = false;
       for (const [, raw] of blocks) {
         let a; try { a = JSON.parse(raw); } catch { continue; }
         for (const one of Array.isArray(a) ? a : [a]) {
           const r = await runAction(one, live);
           if (r.drive) freshDrive = r.drive;
-          if (r.confirm) confirm = r.confirm;
+          if (r.confirm) confirms.push(r.confirm);
           if (r.doc) docs.push(r.doc);
           if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
         }
@@ -4899,7 +4935,7 @@ function AssistantModule() {
           for (const one of Array.isArray(a) ? a : [a]) {
             if (String(one.action).toLowerCase() === "read_drive") continue;   // no loops
             const r = await runAction(one, live);
-            if (r.confirm) confirm = r.confirm;
+            if (r.confirm) confirms.push(r.confirm);
             if (r.doc) docs.push(r.doc);
             if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
           }
@@ -4911,7 +4947,15 @@ function AssistantModule() {
         say("sys", lines.join("\n"), { ok: !anyFailed });
         toast(anyFailed ? lines[0].slice(0, 70) : lines.length === 1 ? lines[0].slice(0, 60) : `${lines.length} things done`, anyFailed ? "amber" : "green");
       }
-      if (confirm) say("sys", confirm.label, { confirm });
+      // Several delete blocks in one reply are still one decision — fold them
+      // into a single question with a single button.
+      if (confirms.length) {
+        const ids = [...new Set(confirms.flatMap((c) => c.ids || []))];
+        say("sys", confirms.length === 1
+          ? confirms[0].label
+          : `Delete these ${ids.length} projects? Their tasks stay, the projects go.\n${projects.filter((x) => ids.includes(x.id)).map((x) => x.projectId).join(", ")}`,
+          { confirm: { ids } });
+      }
     } catch (e) {
       const open = tasks.filter((t) => t.status !== "done").length;
       say("ai", `I can't reach the AI right now, so nothing was changed. What I can tell you from here: ${projects.length} project${projects.length === 1 ? "" : "s"} and ${open} open task${open === 1 ? "" : "s"}.`);
@@ -4960,7 +5004,11 @@ function AssistantModule() {
                 {m.text}
                 {m.confirm && (
                   <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
-                    <Btn small kind="danger" icon={Trash2} onClick={() => { doDelete(m.confirm.id); setAssistantLog((x) => x.map((y) => (y.id === m.id ? { ...y, confirm: null, text: "Deleted." } : y))); }}>Yes, delete</Btn>
+                    <Btn small kind="danger" icon={Trash2} onClick={() => {
+                      const ids = m.confirm.ids || (m.confirm.id ? [m.confirm.id] : []);
+                      doDelete(ids);
+                      setAssistantLog((x) => x.map((y) => (y.id === m.id ? { ...y, confirm: null, text: ids.length > 1 ? `Deleted all ${ids.length}.` : "Deleted." } : y)));
+                    }}>{(m.confirm.ids || []).length > 1 ? `Yes, delete all ${m.confirm.ids.length}` : "Yes, delete"}</Btn>
                     <Btn small kind="ghost" onClick={() => setAssistantLog((x) => x.map((y) => (y.id === m.id ? { ...y, confirm: null, text: "Left it alone." } : y)))}>Keep it</Btn>
                   </div>
                 )}
