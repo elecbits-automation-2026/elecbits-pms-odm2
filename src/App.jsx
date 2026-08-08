@@ -33,7 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
-import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, fetchProfiles } from "./lib/auth.js";
+import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -211,7 +211,13 @@ const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
    function explains itself instead of silently degrading. */
 async function driveReadDigest(projectId, linkedIds, opts = {}) {
   if (!DRIVE_READ_URL) return { digest: "", error: "" };
-  if (!projectId && !(linkedIds || []).length) return { digest: "", error: "" };
+  // A search with no project named is a real question — "find the project
+  // tracker", "which folders have an audit checklist". This used to return
+  // empty without ever calling Drive, which is why those answers were always
+  // "I couldn't open anything".
+  if (!projectId && !(linkedIds || []).length && !String(opts.search || "").trim()) {
+    return { digest: "", error: "" };
+  }
   // The reader works to its own 20s budget; give up at 40 so a stalled call
   // can never leave the page spinning on "Analysing…".
   const ctrl = new AbortController();
@@ -239,6 +245,22 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
       return { digest: "", error: `Drive read failed (${res.status}): ${String(hint).slice(0, 220)}` };
     }
     if (data.error) return { digest: "", error: `Drive read: ${data.error}` };
+    // An empty digest with a 200 is the confusing case — Drive answered, but
+    // there is nothing to show. Say which of the three reasons it is instead
+    // of shrugging. `root` only comes back from the current reader, so its
+    // absence is itself the diagnosis.
+    if (!String(data.digest || "").trim()) {
+      const stale = !("root" in data);
+      return {
+        digest: "",
+        error: stale
+          ? "The Drive reader running on the server is an older build that can't search — redeploy supabase/functions/drive-read and try again."
+          : !data.root
+            ? `I reached Drive but couldn't find ${DRIVE_CHAIN} — the service account can't see that folder. Share it with the service-account address (Editor) and try again.`
+            : "",
+        searchedRoot: data.root || "",
+      };
+    }
     // No second truncation here — the reader already budgets the digest per
     // folder. Cutting it again dropped whatever came last, which is why linked
     // board folders kept looking empty.
@@ -378,15 +400,30 @@ const attachCtx = (atts, fresh = true) => !atts?.length ? "" : `\n${fresh ? "FIL
   : a.text != null
     ? `- ${a.name} (${kb(a.size)}), contents:\n"""${a.text}"""`
     : /^image\//.test(a.mime)
-      ? `- ${a.name} (${kb(a.size)}) — an image or screenshot they pasted in. You cannot see the picture itself, so do not describe or guess at what is in it. Ask them in one short line what it shows, or file it where they want with save_attachment. Never pretend to have read it.`
+      ? `- ${a.name} (${kb(a.size)}) — a screenshot they pasted. THE PICTURE ITSELF IS ATTACHED TO THIS MESSAGE: look at it and answer from what you can see. Never say you cannot see an image.`
       : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. You have not stored it anywhere yet. If it belongs in a project folder, use save_attachment with that project's ID, and after it is saved you can read what is inside it.`).join("\n")}\n`;
 /* Tries the proxy first (key stays server-side), then the direct browser key —
    so a configured-but-undeployed proxy no longer silently kills live AI. */
-async function claude(prompt, { json = true, maxTokens = 1000 } = {}) {
+/* Anthropic takes images as content blocks alongside the text. Sending only
+   the file NAME was why the assistant kept saying it could not see a
+   screenshot — the bytes were sitting in the browser the whole time. */
+const IMG_OK = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const imageBlocks = (atts) => (atts || [])
+  .filter((a) => a && a.b64 && IMG_OK.includes(a.mime) && !a.tooBig)
+  .slice(0, 4)                                   // the API caps what is useful
+  .map((a) => ({ type: "image", source: { type: "base64", media_type: a.mime, data: a.b64 } }));
+
+/* Anthropic runs this one itself — it searches, reads the results and folds
+   them into the answer, all inside the single call. No search key of our own,
+   and the citations come back in the same content array. */
+const WEB_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
+
+async function claude(prompt, { json = true, maxTokens = 1000, images = [], web = false } = {}) {
   const attempts = [];
   if (import.meta.env.VITE_CLAUDE_PROXY_URL) attempts.push({ url: import.meta.env.VITE_CLAUDE_PROXY_URL, direct: false });
   if (import.meta.env.VITE_ANTHROPIC_API_KEY || attempts.length === 0) attempts.push({ url: "https://api.anthropic.com/v1/messages", direct: true });
   let lastErr;
+  const budget = web ? Math.max(maxTokens, 4000) : maxTokens;
   for (const a of attempts) {
     try {
       const headers = { "Content-Type": "application/json" };
@@ -397,7 +434,16 @@ async function claude(prompt, { json = true, maxTokens = 1000 } = {}) {
       }
       const res = await fetch(a.url, {
         method: "POST", headers,
-        body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
+        body: JSON.stringify({
+          model: AI_MODEL, max_tokens: budget,
+          messages: [{
+            role: "user",
+            // the picture first, then the question about it — the order the
+            // model reads best
+            content: images.length ? [...images, { type: "text", text: prompt }] : prompt,
+          }],
+          ...(web ? { tools: [WEB_TOOL] } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       // Any non-2xx, or a body that isn't a real Anthropic response, is a
@@ -509,6 +555,8 @@ const DRIVE_FACTS = `WHERE THE FILES ARE
 Project folders live at one address and nowhere else:
   ${PM_ROOT}/<Project ID>/      — the project management side
   ${PCB_ROOT}/<board folder>/   — the hardware and firmware side
+YOU ALSO HAVE THE INTERNET. A web_search tool is attached to every one of your replies — use it yourself, without asking, whenever the answer depends on something outside this workspace: a part number, a datasheet figure, a supplier's lead time, a certification rule, a standard, a price, anything current. Search first and answer from what you find, with the source named. Two rules: the Drive files and the workspace data below are the authority on THIS company's projects — never let a search result override them — and never say you cannot look something up.
+
 Names INSIDE a project folder are not standard. There is no guaranteed checklist, no guaranteed Reports folder — people name things however they like, and it changes from project to project. So never expect a particular file name, never say something is missing because it is not called what you expected, and never tell anyone what a folder "should" contain. Look at what is actually there, including the sub-folders, read whatever is relevant, and answer from that.`;
 
 const driveIntelPrompt = (p, users, memory, driveData) => `You are the Elecbits ODM project-intelligence analyst. Read the project's Google Drive knowledge and report what is actually going on and how things are moving.
@@ -2100,7 +2148,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     // Pull live Drive contents so the copilot answers from real files rather
     // than telling the PM to go and paste them in.
     const { digest: chatDigest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: driveScope(my?.role), search: q });
-    const ask = (driveData) => claude(projChatPrompt(p, projTasks, users, hist, q, memory, driveData, pool, sent.length > 0), { json: false });
+    const ask = (driveData) => claude(projChatPrompt(p, projTasks, users, hist, q, memory, driveData, pool, sent.length > 0), { json: false, images: imageBlocks(pool), web: true });
     try {
       reply = await ask(chatDigest);
       // <<<LOOK term>>> — it decided the first read didn't cover the question.
@@ -4344,6 +4392,17 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
   );
 }
 
+/* An action line is only a success if it actually succeeded. Painting every
+   one of them green with a tick made a run of failures read as a run of wins. */
+const sysColor = (m) => {
+  if (m.confirm) return "var(--amber)";
+  if (m.ok === false) return "var(--red)";
+  if (m.ok === true) return "var(--green)";
+  // older messages carry no flag — read the sentence
+  return /^(i couldn't|couldn't|i could not|i can't|i cannot|nothing|no |failed|there was nothing|i'm not sure|i don't)/i.test(String(m.text || "").trim())
+    ? "var(--red)" : "var(--green)";
+};
+
 /* A document the AI wrote, shown in the chat like a real artefact: name,
    preview, open/close, download, and where it went in Drive. */
 function DocCard({ doc }) {
@@ -4449,7 +4508,7 @@ function WorkspaceChat() {
       notes: notes.map((n) => ({ date: n.date, raw: n.raw })),
     };
     let reply;
-    try { reply = await claude(workspacePrompt(ctx, hist, q, memory, pool, sent.length > 0), { json: false }); }
+    try { reply = await claude(workspacePrompt(ctx, hist, q, memory, pool, sent.length > 0), { json: false, images: imageBlocks(pool), web: true }); }
     catch {
       const openN = ctx.openTasks.length;
       reply = `I can't reach the AI right now, so here's the short version: you have ${ctx.projects.length} project${ctx.projects.length === 1 ? "" : "s"} and ${openN} open task${openN === 1 ? "" : "s"}.${ctx.projects.length ? ` Closest deadline: ${[...ctx.projects].sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)))[0]?.name}.` : ""}`;
@@ -4724,8 +4783,11 @@ function AssistantModule() {
         const term = a.search || "";
         if (!pid && !term.trim()) return { line: "" };
         const { digest, error } = await driveReadDigest(pid, p?.linkedIds, { scope: driveScope(my?.role), search: term });
+        const asked = pid || `"${term}"`;
         return {
-          line: digest ? "" : (error || `I couldn't open anything in Drive for ${pid || `"${term}"`} just now.`),
+          ok: !!digest,
+          line: digest ? "" : (error
+            || `I searched ${DRIVE_CHAIN} for ${asked} and nothing there matched. Try the exact folder or file name, or tell me which project it sits under.`),
           drive: digest,
         };
       }
@@ -4809,7 +4871,7 @@ function AssistantModule() {
 
     const live = { projects: [...projects], tasks: [...tasks], attachments: pool };
     const runOnce = async (driveData) => {
-      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData, pool, sent.length > 0), { json: false });
+      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData, pool, sent.length > 0), { json: false, images: imageBlocks(pool), web: true });
       const blocks = [...String(reply).matchAll(/<<<DO>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
       const clean = String(reply).replace(/<<<DO>>>[\s\S]*?<<<END>>>/g, "").trim();
       return { clean, blocks };
@@ -4817,7 +4879,7 @@ function AssistantModule() {
 
     try {
       let { clean, blocks } = await runOnce(drive);
-      const lines = []; const docs = []; let confirm = null; let freshDrive = "";
+      const lines = []; const docs = []; let confirm = null; let freshDrive = ""; let anyFailed = false;
       for (const [, raw] of blocks) {
         let a; try { a = JSON.parse(raw); } catch { continue; }
         for (const one of Array.isArray(a) ? a : [a]) {
@@ -4825,7 +4887,7 @@ function AssistantModule() {
           if (r.drive) freshDrive = r.drive;
           if (r.confirm) confirm = r.confirm;
           if (r.doc) docs.push(r.doc);
-          if (r.line) lines.push(r.line);
+          if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
         }
       }
       // The model asked to look in Drive — hand it the contents and let it finish.
@@ -4839,13 +4901,16 @@ function AssistantModule() {
             const r = await runAction(one, live);
             if (r.confirm) confirm = r.confirm;
             if (r.doc) docs.push(r.doc);
-            if (r.line) lines.push(r.line);
+            if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
           }
         }
       }
       say("ai", clean || (lines.length ? "Done." : "I didn't catch that — say it again in your own words?"));
       for (const d of docs) say("doc", "", { doc: d });
-      if (lines.length) { say("sys", lines.join("\n")); toast(lines.length === 1 ? lines[0].slice(0, 60) : `${lines.length} things done`, "green"); }
+      if (lines.length) {
+        say("sys", lines.join("\n"), { ok: !anyFailed });
+        toast(anyFailed ? lines[0].slice(0, 70) : lines.length === 1 ? lines[0].slice(0, 60) : `${lines.length} things done`, anyFailed ? "amber" : "green");
+      }
       if (confirm) say("sys", confirm.label, { confirm });
     } catch (e) {
       const open = tasks.filter((t) => t.status !== "done").length;
@@ -4887,8 +4952,10 @@ function AssistantModule() {
             </div>
           )}
           {dayMsgs.map((m) => m.who === "sys" ? (
-            <div key={m.id} className="fade" style={{ alignSelf: "flex-start", maxWidth: "88%", border: "1px solid var(--green)", background: "color-mix(in srgb, var(--green) 8%, transparent)", borderRadius: 11, padding: "10px 14px", fontSize: 12.5, lineHeight: 1.65, whiteSpace: "pre-wrap", display: "flex", gap: 9 }}>
-              {m.confirm ? <AlertTriangle size={15} style={{ color: "var(--amber)", flexShrink: 0, marginTop: 2 }} /> : <CheckCircle2 size={15} style={{ color: "var(--green)", flexShrink: 0, marginTop: 2 }} />}
+            <div key={m.id} className="fade" style={{ alignSelf: "flex-start", maxWidth: "88%", border: `1px solid ${sysColor(m)}`, background: `color-mix(in srgb, ${sysColor(m)} 8%, transparent)`, borderRadius: 11, padding: "10px 14px", fontSize: 12.5, lineHeight: 1.65, whiteSpace: "pre-wrap", display: "flex", gap: 9 }}>
+              {m.confirm || sysColor(m) !== "var(--green)"
+                ? <AlertTriangle size={15} style={{ color: sysColor(m), flexShrink: 0, marginTop: 2 }} />
+                : <CheckCircle2 size={15} style={{ color: "var(--green)", flexShrink: 0, marginTop: 2 }} />}
               <div>
                 {m.text}
                 {m.confirm && (
@@ -5089,6 +5156,14 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
   const [msg, setMsg] = useState("");
   const [wrongPw, setWrongPw] = useState(false);   // offer the reset only once it is the likely problem
   const [sent, setSent] = useState(false);
+  const [linkDead, setLinkDead] = useState(false);
+
+  // Arriving from a reset link that Supabase refused: say why, and put the
+  // way out right under it.
+  useEffect(() => {
+    const e = authReturnError();
+    if (e) { setErr(e); setLinkDead(true); }
+  }, []);
 
   const netErr = (m) => /failed to fetch|networkerror|load failed|fetch/i.test(m);
 
@@ -5194,8 +5269,8 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
         {!demo && (
           <div style={{ marginTop: 16, textAlign: "center" }}>
             <button onClick={sendReset} disabled={busy || sent}
-              style={{ background: "none", border: "none", padding: 0, color: sent ? "var(--txt3)" : "var(--txt2)", cursor: sent ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}>
-              {sent ? "Reset link sent — check your inbox" : "Forgot your password?"}
+              style={{ background: "none", border: "none", padding: 0, color: sent ? "var(--txt3)" : linkDead ? "var(--acc)" : "var(--txt2)", cursor: sent ? "default" : "pointer", fontSize: linkDead ? 13 : 12, fontWeight: linkDead ? 700 : 600 }}>
+              {sent ? "Reset link sent — check your inbox" : linkDead ? "Send me a new reset link" : "Forgot your password?"}
             </button>
             {/* No sign-up tab: the same button makes the account if there is
                 not one yet, so there is nothing here to choose between. */}

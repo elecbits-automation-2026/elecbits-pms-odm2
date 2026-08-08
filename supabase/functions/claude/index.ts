@@ -28,7 +28,10 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: { message: "POST only" } }, 405);
   if (!ANTHROPIC_API_KEY) return json({ error: { message: "ANTHROPIC_API_KEY not set on the function" } }, 500);
 
-  let body: { model?: string; max_tokens?: number; messages?: unknown };
+  let body: {
+    model?: string; max_tokens?: number; messages?: unknown;
+    system?: unknown; tools?: unknown; tool_choice?: unknown; temperature?: number;
+  };
   try {
     body = await req.json();
   } catch {
@@ -48,6 +51,13 @@ Deno.serve(async (req) => {
         model: body.model ?? DEFAULT_MODEL,
         max_tokens: body.max_tokens ?? 1000,
         messages: body.messages,
+        // Forward the rest instead of dropping it. Rebuilding the body from a
+        // fixed list of fields is what silently disabled web search: the tools
+        // array never left this function.
+        ...(body.system !== undefined ? { system: body.system } : {}),
+        ...(body.tools !== undefined ? { tools: body.tools } : {}),
+        ...(body.tool_choice !== undefined ? { tool_choice: body.tool_choice } : {}),
+        ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
       }),
     });
     const data = await res.json();

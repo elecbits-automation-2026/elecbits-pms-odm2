@@ -33,6 +33,26 @@ export async function signUp(email, password, name) {
   return data;
 }
 
+/* A reset or confirmation link can come back refusing to work — most often
+   because it has already been used or has timed out. Supabase says so in the
+   URL fragment, where nobody reads it; without this the person lands on a
+   blank login page with a frightening address bar and no idea what happened. */
+export function authReturnError() {
+  if (typeof window === "undefined") return "";
+  const read = (str) => new URLSearchParams(str.replace(/^[#?]/, ""));
+  const frag = read(window.location.hash), query = read(window.location.search);
+  const code = frag.get("error_code") || query.get("error_code") || frag.get("error") || query.get("error");
+  if (!code) return "";
+  const desc = (frag.get("error_description") || query.get("error_description") || "").replace(/\+/g, " ");
+  // clear it, or it reappears on every reload of this tab
+  try { window.history.replaceState({}, "", window.location.pathname); } catch { /* ignore */ }
+  if (/otp_expired|expired/i.test(`${code} ${desc}`))
+    return "That link has expired — they are one-time and short-lived. Put your email in below and send yourself a fresh one.";
+  if (/access_denied/i.test(code))
+    return "That link is no longer valid — it may already have been used. Send yourself a fresh one below.";
+  return desc || "That link didn't work. Send yourself a fresh one below.";
+}
+
 /* Email them a link back into the app to choose a new password. The link
    lands on the same origin, where PASSWORD_RECOVERY switches the login card
    into "set a new password". */
