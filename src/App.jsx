@@ -408,12 +408,161 @@ const attachCtx = (atts, fresh = true) => !atts?.length ? "" : `\n${fresh ? "FIL
    the file NAME was why the assistant kept saying it could not see a
    screenshot — the bytes were sitting in the browser the whole time. */
 const IMG_OK = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+/* PDFs go to the model as documents it can actually read. Spreadsheets are
+   turned into rows first — the API takes text, and rows are what matter. */
+const docBlocks = (atts) => (atts || [])
+  .filter((a) => a && a.b64 && a.mime === "application/pdf" && !a.tooBig)
+  .slice(0, 3)
+  .map((a) => ({ type: "document", source: { type: "base64", media_type: "application/pdf", data: a.b64 } }));
+
+/* What to show while a step is running, in the person's language. */
+const stepLabel = (name, input) => {
+  const i = input || {};
+  switch (name) {
+    case "read_drive": return `Looking in Drive${i.projectId ? ` at ${i.projectId}` : i.search ? ` for "${String(i.search).slice(0, 40)}"` : ""}…`;
+    case "write_drive_file": return `Writing ${i.fileName} into ${i.projectId}…`;
+    case "save_attachment": return `Filing ${i.name} into ${i.projectId}…`;
+    case "list_projects": return "Checking the project list…";
+    case "create_project": return `Creating ${i.projectId || i.name || "the project"}…`;
+    case "update_project": return `Updating ${i.projectId}…`;
+    case "delete_projects": return "Working out what to delete…";
+    case "add_task": return `Raising "${String(i.title || "").slice(0, 40)}"…`;
+    case "update_task": return "Updating the task…";
+    case "assign_resource": return `Putting ${i.name} on ${i.projectId}…`;
+    case "unassign_resource": return `Taking ${i.name} off ${i.projectId}…`;
+    case "add_resource": return `Adding ${i.name} to the team…`;
+    case "add_scrum_note": return "Writing the scrum note…";
+    case "add_memory": return "Committing that to memory…";
+    case "assign_training": return `Assigning training to ${i.name}…`;
+    default: return "Working…";
+  }
+};
+
 const imageBlocks = (atts) => (atts || [])
   .filter((a) => a && a.b64 && IMG_OK.includes(a.mime) && !a.tooBig)
   .slice(0, 4)                                   // the API caps what is useful
   .map((a) => ({ type: "image", source: { type: "base64", media_type: a.mime, data: a.b64 } }));
 
-/* Anthropic runs this one itself — it searches, reads the results and folds
+/* ── THE AGENT LOOP ────────────────────────────────────────────────────────
+   Everything before this was one shot: ask the model, parse whatever it wrote,
+   run it, stop. That is why it could not chase a thread — find the tracker,
+   read it, then create the projects it lists — without being nudged at every
+   step.
+
+   This is the real thing. The model is given actual tools, calls them, sees
+   what came back, and decides what to do next, round after round, until it has
+   finished the job and says so. The workspace tools and Anthropic's own
+   server-side ones (web search, code execution) sit side by side, so a single
+   question can cross the internet, a spreadsheet and the project list without
+   coming back to ask permission to continue.                                  */
+const MAX_STEPS = 10;                      // a runaway guard, not a work limit
+const SERVER_TOOLS = [
+  { type: "web_search_20250305", name: "web_search", max_uses: 6 },
+  { type: "code_execution_20250522", name: "code_execution" },
+];
+/* code execution is a beta; the header is harmless when the tool is unused */
+const AGENT_BETA = "code-execution-2025-05-22";
+
+const tool = (name, description, properties, required = []) =>
+  ({ name, description, input_schema: { type: "object", properties, required } });
+const str = (description) => ({ type: "string", description });
+const strs = (description) => ({ type: "array", items: { type: "string" }, description });
+
+const WORKSPACE_TOOLS = [
+  tool("read_drive", "Look inside the company's Google Drive. Give a projectId to open that project's folders, or a search phrase to hunt across the whole ODM tree. Returns the folder listing and the text inside the files. Use it before answering anything about what exists, what a checklist says, or what state a board is in.",
+    { projectId: str("the project whose folders to open, e.g. Eb-09-ML-432-01-1752"), search: str("what to hunt for when no project is named, e.g. 'project tracker'") }),
+  tool("create_doc", "Write a document and hand it to the user in the chat — a plan, a checklist, a summary, a report, a CSV. They can open it, download it, and it is filed into the project's Drive folder if you name one. Use this whenever they ask you to write, draft, produce or prepare something, rather than dumping the text into your reply.",
+    { title: str("what to call it"), fileName: str("file name with extension, e.g. Kickoff-Plan.md"), content: str("the whole document"), projectId: str("file it into this project's Drive folder — optional") }, ["content"]),
+  tool("write_drive_file", "Write a file into a project's Drive folder.",
+    { projectId: str("which project's folder"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["projectId", "fileName", "content"]),
+  tool("save_attachment", "File something the user attached into a project's Drive folder, exactly as they sent it.",
+    { name: str("the attached file's name"), projectId: str("which project's folder") }, ["name", "projectId"]),
+  tool("list_projects", "The full project list with status, deadline, client, team and linked board ids. Cheap — call it whenever you need to be sure.", {}),
+  tool("create_project", "Create a project.",
+    { projectId: str("e.g. EB-26-014"), name: str("project name"), clientName: str("client"), deadline: str("YYYY-MM-DD"), status: str("Planning | In Progress | On Hold | Done"), linkedIds: strs("linked board folder ids"), knownStatus: str("a paragraph on where it stands"), team: { type: "array", description: "who is on it", items: { type: "object", properties: { name: str("person"), slot: str("their role on this project") } } } }),
+  tool("update_project", "Change a project's status, deadline, name, linked ids or written status.",
+    { projectId: str("which project"), status: str(""), deadline: str("YYYY-MM-DD"), name: str(""), knownStatus: str(""), linkedIds: strs("") }, ["projectId"]),
+  tool("delete_projects", "Delete projects. Pass the whole set in ONE call — a list of ids, or all:true with except:[...]. The user is asked to confirm once, so never call this repeatedly for the same request.",
+    { projectIds: strs("the projects to delete"), all: { type: "boolean", description: "delete every project" }, except: strs("ids to keep when all is true") }),
+  tool("add_task", "Raise a task for somebody.",
+    { title: str("what has to be done"), assignee: str("who"), projectId: str("which project"), date: str("YYYY-MM-DD"), startTime: str("HH:MM"), endTime: str("HH:MM") }, ["title"]),
+  tool("update_task", "Change an existing task — its status or who owns it.",
+    { match: str("enough of the task's title to find it"), status: str("pending | in-progress | blocked | done"), assignee: str("move it to this person") }, ["match"]),
+  tool("assign_resource", "Put somebody on a project.", { name: str("person"), projectId: str("project"), slot: str("their role on it") }, ["name", "projectId"]),
+  tool("unassign_resource", "Take somebody off a project.", { name: str("person"), projectId: str("project") }, ["name", "projectId"]),
+  tool("add_resource", "Add a new person to the team roster.",
+    { name: str("full name"), email: str("work email — this is how they get their login"), title: str("job title"), dept: str("department"), resourceRole: str("jr_pm|sr_pm|jr_fw|sr_fw|jr_hw|sr_hw|sc|ind_design|sol_arch"), role: str("superadmin|dept_head|pm|engineer"), skills: strs(""), maxProjects: { type: "number", description: "how many projects at once" } }, ["name"]),
+  tool("add_scrum_note", "Write a note into the daily scrum, in the user's own words.", { text: str("the note"), date: str("YYYY-MM-DD") }, ["text"]),
+  tool("add_memory", "Remember something for good — a rule, a preference, a standing instruction. It is injected into every future AI answer.",
+    { title: str("short label"), content: str("the full text"), type: str("instruction|template|conversation") }, ["content"]),
+  tool("assign_training", "Assign training to somebody.", { name: str("person"), title: str("what to learn"), resource: str("link or book"), due: str("YYYY-MM-DD") }, ["name", "title"]),
+];
+
+/* One round trip. Returns the raw Anthropic message. */
+async function agentTurn({ messages, system, tools, maxTokens }) {
+  const attempts = [];
+  if (import.meta.env.VITE_CLAUDE_PROXY_URL) attempts.push({ url: import.meta.env.VITE_CLAUDE_PROXY_URL, direct: false });
+  if (import.meta.env.VITE_ANTHROPIC_API_KEY || attempts.length === 0) attempts.push({ url: "https://api.anthropic.com/v1/messages", direct: true });
+  let lastErr;
+  for (const a of attempts) {
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (a.direct && import.meta.env.VITE_ANTHROPIC_API_KEY) {
+        headers["x-api-key"] = import.meta.env.VITE_ANTHROPIC_API_KEY;
+        headers["anthropic-version"] = "2023-06-01";
+        headers["anthropic-dangerous-direct-browser-access"] = "true";
+        headers["anthropic-beta"] = AGENT_BETA;
+      }
+      const res = await fetch(a.url, {
+        method: "POST", headers,
+        body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens || 8000, system, tools, messages, anthropic_beta: AGENT_BETA }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error?.message || data.message || `${res.status} ${res.statusText}`);
+      if (data.error) throw new Error(data.error.message || "API error");
+      if (!Array.isArray(data.content)) throw new Error(data.message || "unexpected AI response");
+      return data;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("AI unreachable");
+}
+
+/* Run until the model stops asking for tools. `exec` runs one workspace tool
+   and returns whatever the model should see next; `onStep` reports progress so
+   the person is not staring at a spinner. */
+async function runAgent({ messages, system, exec, onStep, onText, maxSteps = MAX_STEPS }) {
+  const convo = [...messages];
+  const tools = [...WORKSPACE_TOOLS, ...SERVER_TOOLS];
+  let steps = 0;
+  for (;;) {
+    const msg = await agentTurn({ messages: convo, system, tools });
+    const text = (msg.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    const calls = (msg.content || []).filter((b) => b.type === "tool_use" && WORKSPACE_TOOLS.some((t) => t.name === b.name));
+    if (text) onText?.(text, calls.length > 0);
+    convo.push({ role: "assistant", content: msg.content });
+
+    if (msg.stop_reason !== "tool_use" || !calls.length) return { convo, text };
+    if (++steps >= maxSteps) {
+      convo.push({ role: "user", content: calls.map((c) => ({ type: "tool_result", tool_use_id: c.id, content: "Stopped here — this has taken too many steps. Tell the user what you did and what is left." })) });
+      const last = await agentTurn({ messages: convo, system, tools: SERVER_TOOLS });
+      const t = (last.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (t) onText?.(t, false);
+      return { convo, text: t };
+    }
+
+    const results = [];
+    for (const c of calls) {
+      onStep?.(c.name, c.input);
+      let out;
+      try { out = await exec(c.name, c.input || {}); }
+      catch (e) { out = `That failed: ${String(e?.message || e).slice(0, 300)}`; }
+      results.push({ type: "tool_result", tool_use_id: c.id, content: String(out ?? "done").slice(0, 24000) });
+    }
+    convo.push({ role: "user", content: results });
+  }
+}
+
+/* Anthropic runs this one itself/* Anthropic runs this one itself — it searches, reads the results and folds
    them into the answer, all inside the single call. No search key of our own,
    and the citations come back in the same content array. */
 const WEB_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
@@ -645,6 +794,38 @@ HOW TO DECIDE
 - Use people's names as they appear in the team list; near-enough spelling is fine, the system matches them.
 - Do several things in one go when that is what was asked — several blocks, one after another.
 - If the request is only a question, answer it and emit no blocks at all.`;
+
+/* The system prompt for the agent. No action protocol in it — the tools are
+   real tools now, described by their own schemas, so the model is told what it
+   IS rather than how to format a request. */
+const agentSystem = (ctx, memory) => `You are the Elecbits ODM assistant. You run this company's hardware project management system, and the people here ask you first.
+
+${CHAT_STYLE}
+
+HOW YOU WORK
+You have real tools. Use them without asking permission and without narrating the mechanics — nobody wants to hear "I will now call read_drive". Do the work, then say what you found or what you changed, in plain words.
+
+Finish the job in one go. If an answer needs three lookups and two changes, do all five. Chain them: read the tracker, then create what it lists; search the web for a lead time, then move the plan. Never hand back a half-done job with "shall I continue?", and never work a list one item per message — if they ask for something across many things, use the bulk form of the tool or call it once with everything in it.
+
+Check before you claim. If you are asked what exists, look — do not answer from memory of the conversation. list_projects and read_drive are cheap.
+
+WHAT YOU CAN REACH
+· This workspace — projects, tasks, the team roster, the daily scrum, system memory, training.
+· The company's Google Drive, under ${DRIVE_CHAIN}. File names in there are not standard: never expect a particular name, never say something is missing because it is not called what you expected. Look at what is actually there.
+· The internet, through web_search. Use it for anything current or external — a part number, a datasheet figure, a supplier lead time, a standard, a price — and name the source. Drive and this workspace remain the authority on this company's own projects; a search result never overrides them.
+· Code execution, for anything you cannot do reliably in your head: arithmetic over a list, parsing a table, working out dates and durations, checking a BoM adds up.
+· Anything the person attaches — screenshots, PDFs, spreadsheets. You can see images and read documents directly. Never say you cannot see or read something they have given you.
+
+WHEN SOMETHING FAILS
+Say so plainly and say what would fix it. Never report a failure as though it worked.
+
+${memCtx(memory)}
+WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})${ctx.isAdmin ? " — an admin, so anything goes" : ""}
+TODAY: ${todayStr()} ${nowHM()}
+THE WORKSPACE RIGHT NOW — a snapshot, not the last word; look things up when it matters:
+PROJECTS: ${JSON.stringify(ctx.projects || []).slice(0, 4000)}
+OPEN TASKS: ${JSON.stringify(ctx.openTasks || []).slice(0, 3000)}
+TEAM: ${JSON.stringify(ctx.team || []).slice(0, 2000)}`;
 
 const assistantPrompt = (ctx, history, q, memory, driveData, atts, fresh = true) => `You are the Elecbits ODM assistant — the person everyone in this company asks first. You know the whole workspace and you run it for them.
 ${CHAT_STYLE}
@@ -4629,6 +4810,7 @@ function AssistantModule() {
   const [day, setDay] = useState(todayStr());
   const [val, setVal] = useState("");
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState("");   // what it is doing right now, in words
   const [atts, setAtts] = useState([]);
   const bodyRef = useRef(null);
   const fileRef = useRef(null);
@@ -4886,69 +5068,86 @@ function AssistantModule() {
       : `Deleted ${names.length} projects: ${names.join(", ")}.`, { ok: true });
   };
 
-  /* One turn: ask → execute → (optionally) ask again with the Drive contents. */
+  /* One turn, however many steps it takes. The model calls tools, sees what
+     came back and decides what to do next, until the job is done. */
   const send = async (preset) => {
     const q = (preset || val).trim();
     if ((!q && !atts.length) || busy) return;
-    // The conversation continues on today, whichever day was being read.
     setDay(todayStr());
-    const hist = assistantLog.filter((m) => m.date === todayStr() && (m.who === "me" || m.who === "ai"));
     const sent = atts;
     if (sent.length) lastAtts.current = sent;
-    const pool = sent.length ? sent : lastAtts.current;   // still in hand next turn
+    const pool = sent.length ? sent : lastAtts.current;
     say("me", q || `Sent ${sent.map((a) => a.name).join(", ")}`, sent.length ? { files: sent.map((a) => ({ name: a.name, size: a.size })) } : null);
     setVal(""); setAtts([]); setBusy(true);
 
-    // If they named a project, open its Drive before answering, so the first
-    // reply already knows what is inside the files.
-    let drive = "";
-    const mentioned = projects.find((p) => normId(q).includes(normId(p.projectId)) || (p.name && normId(q).includes(normId(p.name))));
-    if (mentioned && DRIVE_READ_URL) { try { drive = (await driveReadDigest(mentioned.projectId, mentioned.linkedIds, { scope: driveScope(my?.role), search: q })).digest; } catch { /* carry on */ } }
-
     const live = { projects: [...projects], tasks: [...tasks], attachments: pool };
-    const runOnce = async (driveData) => {
-      const reply = await claude(assistantPrompt(buildCtx(), hist, q, memory, driveData, pool, sent.length > 0), { json: false, images: imageBlocks(pool), web: true });
-      const blocks = [...String(reply).matchAll(/<<<DO>>>\s*([\s\S]*?)\s*<<<END>>>/g)];
-      const clean = String(reply).replace(/<<<DO>>>[\s\S]*?<<<END>>>/g, "").trim();
-      return { clean, blocks };
+    const confirms = []; const docs = [];
+    // What actually changed, kept so the person sees a record and not only the
+    // model's summary of itself. Reads are not changes and are left out.
+    const changed = []; let anyFailed = false;
+    const READS = new Set(["read_drive", "list_projects"]);
+
+    /* One tool call. Everything the model should see next comes back as text;
+       side effects on the workspace happen here. */
+    const exec = async (name, input) => {
+      if (name === "list_projects") {
+        return JSON.stringify(live.projects.map((p) => ({
+          projectId: p.projectId, name: p.name, status: p.status, deadline: p.deadline,
+          client: p.clientName, linkedIds: p.linkedIds || [],
+          team: (p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`),
+        })));
+      }
+      const r = await runAction({ action: name, ...input }, live);
+      if (r.doc) docs.push(r.doc);
+      if (r.confirm) {
+        confirms.push(r.confirm);
+        return "Queued — the user has been asked to confirm this. Do not call it again; carry on with the rest and mention it is waiting on them.";
+      }
+      if (r.line && (!READS.has(name) || r.ok === false)) {
+        changed.push(r.line);
+        if (r.ok === false) anyFailed = true;
+      }
+      if (r.drive) return `Drive contents:\n${r.drive}`;
+      return r.line || (r.ok === false ? "That did not work." : "Done.");
     };
 
+    /* What the model sees of this conversation: the real turns, plus whatever
+       is attached — pictures as pictures, documents as documents. */
+    // Pictures as pictures, PDFs as documents — and every single one also
+    // NAMED in the text, contents inlined where we could read them. A file the
+    // model cannot name is a file it cannot file away.
+    const asBlock = new Set((pool || []).filter((a) => a.b64 && !a.tooBig && (IMG_OK.includes(a.mime) || a.mime === "application/pdf")).map((a) => a.id));
+    const restText = !(pool || []).length ? "" : `\n\nFILES IN YOUR HANDS RIGHT NOW — you can read these and you can file any of them into a project with save_attachment, using the exact name below. Never say you cannot take or read an upload:\n${pool.map((a) => a.tooBig
+      ? `- ${a.name} (${kb(a.size)}) — too big to open here, but it can still be filed.`
+      : asBlock.has(a.id)
+        ? `- ${a.name} (${kb(a.size)}, ${a.mime}) — attached to this message above; look at it directly.`
+        : a.text != null
+          ? `- ${a.name} (${kb(a.size)}), contents:\n"""${a.text}"""`
+          : `- ${a.name} (${kb(a.size)}, ${a.mime}) — a document they handed you. Not stored anywhere yet.`).join("\n")}`;
+    const content = [
+      ...imageBlocks(pool),
+      ...docBlocks(pool),
+      { type: "text", text: (q || "(they attached the files above without saying anything — work out what they want, or ask in one line)") + restText },
+    ];
+    const history = assistantLog
+      .filter((m) => m.date === todayStr() && (m.who === "me" || m.who === "ai") && String(m.text || "").trim())
+      .slice(-20)
+      .map((m) => ({ role: m.who === "me" ? "user" : "assistant", content: String(m.text) }));
+    // an assistant turn cannot open the conversation
+    while (history.length && history[0].role !== "user") history.shift();
+
     try {
-      let { clean, blocks } = await runOnce(drive);
-      const lines = []; const docs = []; const confirms = []; let freshDrive = ""; let anyFailed = false;
-      for (const [, raw] of blocks) {
-        let a; try { a = JSON.parse(raw); } catch { continue; }
-        for (const one of Array.isArray(a) ? a : [a]) {
-          const r = await runAction(one, live);
-          if (r.drive) freshDrive = r.drive;
-          if (r.confirm) confirms.push(r.confirm);
-          if (r.doc) docs.push(r.doc);
-          if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
-        }
-      }
-      // The model asked to look in Drive — hand it the contents and let it finish.
-      if (freshDrive) {
-        const second = await runOnce(freshDrive);
-        clean = [clean, second.clean].filter(Boolean).join("\n\n");
-        for (const [, raw] of second.blocks) {
-          let a; try { a = JSON.parse(raw); } catch { continue; }
-          for (const one of Array.isArray(a) ? a : [a]) {
-            if (String(one.action).toLowerCase() === "read_drive") continue;   // no loops
-            const r = await runAction(one, live);
-            if (r.confirm) confirms.push(r.confirm);
-            if (r.doc) docs.push(r.doc);
-            if (r.line) { lines.push(r.line); if (r.ok === false) anyFailed = true; }
-          }
-        }
-      }
-      say("ai", clean || (lines.length ? "Done." : "I didn't catch that — say it again in your own words?"));
+      let spoke = false;
+      await runAgent({
+        messages: [...history, { role: "user", content }],
+        system: agentSystem(buildCtx(), memory),
+        exec,
+        onStep: (name, input) => setStep(stepLabel(name, input)),
+        onText: (text) => { say("ai", text); spoke = true; },
+      });
+      if (!spoke) say("ai", "Done.");
       for (const d of docs) say("doc", "", { doc: d });
-      if (lines.length) {
-        say("sys", lines.join("\n"), { ok: !anyFailed });
-        toast(anyFailed ? lines[0].slice(0, 70) : lines.length === 1 ? lines[0].slice(0, 60) : `${lines.length} things done`, anyFailed ? "amber" : "green");
-      }
-      // Several delete blocks in one reply are still one decision — fold them
-      // into a single question with a single button.
+      if (changed.length) say("sys", changed.join("\n"), { ok: !anyFailed });
       if (confirms.length) {
         const ids = [...new Set(confirms.flatMap((c) => c.ids || []))];
         say("sys", confirms.length === 1
@@ -4957,10 +5156,9 @@ function AssistantModule() {
           { confirm: { ids } });
       }
     } catch (e) {
-      const open = tasks.filter((t) => t.status !== "done").length;
-      say("ai", `I can't reach the AI right now, so nothing was changed. What I can tell you from here: ${projects.length} project${projects.length === 1 ? "" : "s"} and ${open} open task${open === 1 ? "" : "s"}.`);
+      say("sys", `I couldn't finish that — ${String(e?.message || e).slice(0, 200)}`, { ok: false });
     }
-    setBusy(false);
+    setStep(""); setBusy(false);
   };
 
   return (
@@ -5029,7 +5227,14 @@ function AssistantModule() {
               </div>
             </div>
           ))}
-          {busy && <div style={{ padding: "8px 14px", borderRadius: 13, background: "var(--s2)", alignSelf: "flex-start" }}><TypingDots /></div>}
+          {busy && (
+            <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 14px", borderRadius: 13, background: "var(--s2)", alignSelf: "flex-start" }}>
+              <TypingDots />
+              {/* say what it is actually doing — a multi-step job is a long
+                  time to watch three dots */}
+              {step && <span style={{ fontSize: 12, color: "var(--txt2)", fontWeight: 600 }}>{step}</span>}
+            </div>
+          )}
         </div>
         {atts.length > 0 && <div style={{ padding: "0 13px" }}><AttachStrip atts={atts} setAtts={setAtts} /></div>}
         <div

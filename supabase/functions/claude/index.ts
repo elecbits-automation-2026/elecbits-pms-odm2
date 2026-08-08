@@ -31,6 +31,7 @@ Deno.serve(async (req) => {
   let body: {
     model?: string; max_tokens?: number; messages?: unknown;
     system?: unknown; tools?: unknown; tool_choice?: unknown; temperature?: number;
+    anthropic_beta?: string;
   };
   try {
     body = await req.json();
@@ -46,6 +47,8 @@ Deno.serve(async (req) => {
         "content-type": "application/json",
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
+        // beta tools (code execution) are opted into by header, not by body
+        ...(body.anthropic_beta ? { "anthropic-beta": String(body.anthropic_beta) } : {}),
       },
       body: JSON.stringify({
         model: body.model ?? DEFAULT_MODEL,
