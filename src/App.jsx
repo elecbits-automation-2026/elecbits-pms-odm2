@@ -648,15 +648,32 @@ async function claude(prompt, { json = true, maxTokens = 1000, images = [], web 
   }
   throw lastErr || new Error("AI unreachable");
 }
+/* The whole rulebook goes into every AI call. The old ceiling of 5,200
+   characters — about 1,300 tokens — was a guess from when these prompts were
+   one-shot and tiny; against a 200k-token window it was throwing away rules
+   for no reason. 120,000 characters is roughly 30k tokens, which leaves the
+   Drive digest, the attachments and the conversation plenty of room.
+
+   If a workspace ever does write more than that, whole entries are dropped
+   from the end and the model is told how many and which — a rule cut off
+   mid-sentence is worse than a rule left out and named. */
+const MEM_BUDGET = 120000;
 const memCtx = (memory) => {
   if (!memory || !memory.length) return "";
   let out = "── SYSTEM MEMORY (org templates, instructions, Drive sitemaps — follow strictly) ──\n";
+  const left = [];
   for (const m of memory) {
-    out += `[${(m.type || "note").toUpperCase()}] ${m.title}\n${m.content}\n\n`;
-    if (out.length > 5200) { out = out.slice(0, 5200) + "\n…(truncated)"; break; }
+    const entry = `[${(m.type || "note").toUpperCase()}] ${m.title}\n${m.content}\n\n`;
+    if (out.length + entry.length > MEM_BUDGET) { left.push(m.title); continue; }
+    out += entry;
+  }
+  if (left.length) {
+    out += `(${left.length} more rule(s) did not fit this message and are NOT shown: ${left.join("; ").slice(0, 500)}. `
+      + `Say so if the answer might depend on them, and use list_memory to read one.)\n`;
   }
   return out;
 };
+const memSize = (memory) => memCtx(memory).length;
 const scrumPrompt = (raw, date, users, projects, memory) => `You are the Elecbits ODM daily-scrum organiser.
 ${memCtx(memory)}
 TEAM ROSTER: ${users.map((u) => `${u.name} (${u.title})`).join(", ")}
@@ -4127,8 +4144,8 @@ function MemoryModule() {
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 11, flexWrap: "wrap" }}>
           <Btn icon={Plus} disabled={!f.title.trim() || (!f.content.trim() && !f.fileName)} onClick={() => { setMemory((m) => [{ id: uid(), ...f, content: f.content.trim() || `(content lives in the attached file ${f.fileName})`, createdAt: new Date().toISOString() }, ...m]); setF({ type: f.type, title: "", content: "", fileName: "" }); toast("Memory added — AI gets smarter", "green"); }}>Add memory</Btn>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 200 }}>
-            <span style={{ fontSize: 11, color: "var(--txt3)", whiteSpace: "nowrap" }}>AI context {size}/5200 ch</span>
-            <Progress pct={(size / 5200) * 100} color={size > 4700 ? "var(--amber)" : "var(--acc)"} />
+            <span style={{ fontSize: 11, color: "var(--txt3)", whiteSpace: "nowrap" }}>AI context {size.toLocaleString()}/{MEM_BUDGET.toLocaleString()} ch</span>
+            <Progress pct={Math.min(100, (size / MEM_BUDGET) * 100)} color={size > MEM_BUDGET * 0.9 ? "var(--amber)" : "var(--acc)"} />
           </div>
         </div>
       </div>
