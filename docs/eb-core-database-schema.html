@@ -1,0 +1,1088 @@
+<title>eb-core-database-1 — the ideal schema</title>
+
+<style>
+:root{
+  --ground:#F4F6F5;
+  --panel:#FFFFFF;
+  --panel-2:#EDF2F0;
+  --ink:#101A1C;
+  --ink-soft:#4C5F61;
+  --ink-faint:#718384;
+  --rule:#CBD6D4;
+  --rule-soft:#E2E9E7;
+  --spine:#0E6E62;
+  --spine-wash:#DFEEEA;
+  --legacy:#A9552E;
+  --legacy-wash:#F5E6DE;
+  --warn:#7E6410;
+  --warn-wash:#F3EDD8;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --serif: "Iowan Old Style", Charter, "Bitstream Charter", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --col: 70ch;
+  --wide: 1160px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0A1012;
+    --panel:#121B1D;
+    --panel-2:#0F1719;
+    --ink:#DCE6E4;
+    --ink-soft:#95A9A7;
+    --ink-faint:#6E8280;
+    --rule:#2A3739;
+    --rule-soft:#1B2426;
+    --spine:#4FC9B4;
+    --spine-wash:#12312D;
+    --legacy:#E0906A;
+    --legacy-wash:#33211A;
+    --warn:#D7B855;
+    --warn-wash:#2E2814;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0A1012;
+  --panel:#121B1D;
+  --panel-2:#0F1719;
+  --ink:#DCE6E4;
+  --ink-soft:#95A9A7;
+  --ink-faint:#6E8280;
+  --rule:#2A3739;
+  --rule-soft:#1B2426;
+  --spine:#4FC9B4;
+  --spine-wash:#12312D;
+  --legacy:#E0906A;
+  --legacy-wash:#33211A;
+  --warn:#D7B855;
+  --warn-wash:#2E2814;
+}
+
+*{ box-sizing:border-box; }
+
+body{
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--serif);
+  font-size:17px;
+  line-height:1.62;
+  margin:0;
+  padding:0 24px 120px;
+  -webkit-font-smoothing:antialiased;
+}
+
+.col{ max-width:var(--col); margin-inline:auto; }
+.wide{ max-width:var(--wide); margin-inline:auto; }
+
+/* ── masthead ───────────────────────────────────────────── */
+.mast{ max-width:var(--wide); margin:0 auto; padding:72px 0 40px; border-bottom:1px solid var(--rule); }
+.eyebrow{
+  font-family:var(--sans); font-size:11.5px; font-weight:600; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--ink-faint); margin:0 0 18px;
+}
+h1{
+  font-family:var(--mono); font-size:clamp(28px,4.4vw,46px); font-weight:600;
+  letter-spacing:-.02em; line-height:1.12; margin:0 0 20px; text-wrap:balance;
+}
+h1 .dim{ color:var(--ink-faint); font-weight:400; }
+.standfirst{ font-size:20px; line-height:1.55; color:var(--ink-soft); max-width:62ch; margin:0; text-wrap:pretty; }
+
+.meta{ display:flex; flex-wrap:wrap; gap:0 34px; margin-top:30px;
+  font-family:var(--sans); font-size:12.5px; color:var(--ink-faint); }
+.meta b{ font-weight:600; color:var(--ink-soft); }
+
+/* ── sections ───────────────────────────────────────────── */
+section{ padding-top:64px; }
+h2{
+  font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:-.015em;
+  margin:0 0 8px; text-wrap:balance;
+}
+h3{
+  font-family:var(--sans); font-size:12px; font-weight:700; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--ink-faint);
+  margin:44px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule-soft);
+}
+.lede{ color:var(--ink-soft); font-size:18px; margin:0 0 4px; }
+p{ margin:0 0 18px; }
+a{ color:var(--spine); }
+
+code{ font-family:var(--mono); font-size:.86em; background:var(--panel-2);
+  padding:.1em .34em; border-radius:3px; color:var(--ink); }
+
+/* ── schema badge ───────────────────────────────────────── */
+.schema-head{ display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  margin:56px 0 6px; padding-top:20px; border-top:2px solid var(--ink); }
+.badge{
+  font-family:var(--mono); font-size:19px; font-weight:600; letter-spacing:-.01em;
+  background:var(--spine); color:var(--ground); padding:3px 11px 4px; border-radius:4px;
+}
+.badge.legacy{ background:var(--legacy); }
+.badge.ghost{ background:transparent; color:var(--ink); border:1.5px solid var(--rule); }
+.schema-head .what{ font-family:var(--sans); font-size:13px; color:var(--ink-faint);
+  letter-spacing:.02em; }
+.schema-note{ max-width:74ch; color:var(--ink-soft); font-size:16.5px; margin:12px 0 0; }
+
+/* ── table cards ────────────────────────────────────────── */
+.tables{ display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:14px; margin:22px 0 0; }
+.tbl{ background:var(--panel); border:1px solid var(--rule-soft); border-radius:6px;
+  padding:15px 16px 14px; }
+.tbl h4{ font-family:var(--mono); font-size:14.5px; font-weight:600; margin:0 0 3px;
+  color:var(--ink); letter-spacing:-.01em; }
+.tbl .why{ font-family:var(--sans); font-size:12px; line-height:1.45; color:var(--ink-faint);
+  margin:0 0 11px; }
+.cols{ margin:0; font-family:var(--mono); font-size:12.5px; line-height:1.5; }
+.cols > div{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px;
+  padding:2.5px 0; border-top:1px solid var(--rule-soft); }
+.cols > div:first-child{ border-top:0; }
+.cols dt{ color:var(--ink); overflow-wrap:anywhere; }
+.cols dd{ margin:0; color:var(--ink-faint); text-align:right; white-space:nowrap;
+  font-size:11.5px; font-variant-numeric:tabular-nums; }
+.cols .fk dt{ color:var(--spine); }
+.cols .hot dt{ color:var(--legacy); }
+.pk{ font-family:var(--sans); font-size:9.5px; font-weight:700; letter-spacing:.08em;
+  text-transform:uppercase; }
+
+/* one-liner table list, for schemas that don't need every column */
+.brief{ margin:20px 0 0; padding:0; list-style:none; border-top:1px solid var(--rule-soft); }
+.brief li{ display:grid; grid-template-columns:minmax(190px,auto) 1fr; gap:8px 20px;
+  padding:9px 0; border-bottom:1px solid var(--rule-soft); align-items:baseline; }
+.brief b{ font-family:var(--mono); font-size:13.5px; font-weight:600; }
+.brief span{ font-size:15px; color:var(--ink-soft); line-height:1.45; }
+@media (max-width:620px){ .brief li{ grid-template-columns:1fr; gap:2px; } }
+
+/* ── figures ────────────────────────────────────────────── */
+figure{ margin:34px 0 8px; }
+figure .frame{ background:var(--panel); border:1px solid var(--rule-soft); border-radius:8px;
+  padding:22px 20px; overflow-x:auto; }
+figure svg{ display:block; width:100%; min-width:640px; height:auto; color:var(--ink); }
+figcaption{ font-family:var(--sans); font-size:12.5px; line-height:1.55; color:var(--ink-faint);
+  margin-top:12px; max-width:82ch; }
+
+/* ── code blocks ────────────────────────────────────────── */
+pre{ background:var(--panel-2); border:1px solid var(--rule-soft); border-left:3px solid var(--spine);
+  border-radius:5px; padding:15px 17px; overflow-x:auto; margin:22px 0;
+  font-family:var(--mono); font-size:12.5px; line-height:1.62; color:var(--ink); }
+pre b{ font-weight:600; color:var(--spine); }
+pre i{ font-style:normal; color:var(--ink-faint); }
+
+/* ── rules list ─────────────────────────────────────────── */
+.rules{ margin:22px 0 0; padding:0; list-style:none; counter-reset:r; }
+.rules li{ position:relative; padding:0 0 16px 42px; counter-increment:r; }
+.rules li::before{ content:counter(r,decimal-leading-zero); position:absolute; left:0; top:2px;
+  font-family:var(--mono); font-size:12px; font-weight:600; color:var(--spine);
+  font-variant-numeric:tabular-nums; }
+.rules b{ font-weight:600; }
+
+/* ── stages ─────────────────────────────────────────────── */
+.stages{ margin:26px 0 0; padding:0; list-style:none; }
+.stage{ display:grid; grid-template-columns:70px 1fr; gap:0 20px;
+  padding:20px 0; border-top:1px solid var(--rule); }
+.stage:last-child{ border-bottom:1px solid var(--rule); }
+.stage .n{ font-family:var(--mono); font-size:28px; font-weight:600; color:var(--ink-faint);
+  line-height:1; font-variant-numeric:tabular-nums; }
+.stage h4{ font-family:var(--mono); font-size:16px; font-weight:600; margin:0 0 6px; }
+.stage p{ margin:0 0 8px; color:var(--ink-soft); font-size:16px; }
+.tag{ display:inline-block; font-family:var(--sans); font-size:10.5px; font-weight:700;
+  letter-spacing:.09em; text-transform:uppercase; padding:2.5px 8px; border-radius:3px; }
+.tag.safe{ background:var(--spine-wash); color:var(--spine); }
+.tag.touch{ background:var(--warn-wash); color:var(--warn); }
+.tag.new{ background:transparent; color:var(--ink-faint); border:1px solid var(--rule); }
+@media (max-width:620px){ .stage{ grid-template-columns:1fr; gap:6px; } .stage .n{ font-size:20px; } }
+
+/* ── access matrix ──────────────────────────────────────── */
+.matrix-wrap{ overflow-x:auto; margin:22px 0 0; border:1px solid var(--rule-soft); border-radius:6px; }
+table.matrix{ border-collapse:collapse; width:100%; min-width:640px; background:var(--panel);
+  font-family:var(--mono); font-size:12.5px; }
+table.matrix th, table.matrix td{ padding:9px 12px; text-align:left; border-bottom:1px solid var(--rule-soft); }
+table.matrix thead th{ font-family:var(--sans); font-size:10.5px; font-weight:700; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-faint); background:var(--panel-2); white-space:nowrap; }
+table.matrix tbody th{ font-weight:600; white-space:nowrap; }
+table.matrix td{ color:var(--ink-soft); }
+table.matrix td.no{ color:var(--ink-faint); }
+table.matrix td.yes{ color:var(--spine); }
+table.matrix td.hot{ color:var(--legacy); }
+table.matrix tbody tr:last-child th, table.matrix tbody tr:last-child td{ border-bottom:0; }
+
+/* ── callout ────────────────────────────────────────────── */
+.callout{ border:1px solid var(--rule); border-left:3px solid var(--legacy);
+  background:var(--panel); border-radius:5px; padding:18px 20px; margin:28px 0; }
+.callout .k{ font-family:var(--sans); font-size:10.5px; font-weight:700; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--legacy); margin:0 0 8px; }
+.callout p:last-child{ margin-bottom:0; }
+.callout.ok{ border-left-color:var(--spine); }
+.callout.ok .k{ color:var(--spine); }
+
+hr.end{ border:0; border-top:1px solid var(--rule); margin:72px 0 0; }
+.colophon{ font-family:var(--sans); font-size:12px; color:var(--ink-faint); margin-top:18px; }
+
+:focus-visible{ outline:2px solid var(--spine); outline-offset:2px; }
+@media (prefers-reduced-motion:reduce){ *{ animation:none !important; transition:none !important; } }
+</style>
+
+<header class="mast">
+  <p class="eyebrow">Elecbits · database architecture</p>
+  <h1>eb-core-database-1<span class="dim"> — one database, six tools</span></h1>
+  <p class="standfirst">A thin shared spine in <code>core</code>, one private schema per tool, and a
+  migration path whose first four stages touch none of the repositories you have already built.</p>
+  <div class="meta">
+    <span><b>Tools</b> pms-odm · boxbuild · sales · finance · hr · mgmt</span>
+    <span><b>Backend</b> Supabase Postgres · Google Drive · Vercel</span>
+    <span><b>Drafted</b> 9 Aug 2026</span>
+  </div>
+</header>
+
+<main>
+
+<section class="col">
+  <h2>The one decision everything else follows from</h2>
+  <p class="lede">Which schema owns the words <em>project</em>, <em>client</em> and <em>person</em>.</p>
+  <p>Today <code>public.projects</code> and <code>public.clients</code> already exist, and they are
+  ODM-shaped — they carry <code>lld_customer</code>, <code>lld_designer</code>, <code>sanctioned</code>.
+  A box-build run has none of those and needs a line rate and a yield figure instead. If the shared
+  project table lives in <code>public</code>, every new tool either bends its work to fit ODM columns
+  or bolts nullable columns onto a table three other tools read. Within a year that table has sixty
+  columns and nobody dares drop one.</p>
+  <p>So the spine does not live in <code>public</code>. It lives in a new schema called
+  <code>core</code>, it is deliberately small, and <code>public</code> is frozen the day
+  <code>core</code> is created.</p>
+  <p><strong>Shared identity, private detail.</strong> <code>core.projects</code> holds only what is
+  true of every project in the company — a code, a kind, a client, a state, an owner, some dates.
+  Everything a particular tool needs goes in that tool's own <code>project_detail</code> table, keyed
+  on the same primary key. One project, one id, six different opinions about it.</p>
+</section>
+
+<div class="wide">
+<figure>
+  <div class="frame">
+<svg viewBox="0 0 1100 566" role="img" aria-label="Six tool schemas each hold a private project_detail table keyed on the shared core.projects row; the legacy public schema is reached only through compatibility views over core.">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+    <marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--spine)"/>
+    </marker>
+    <marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--legacy)"/>
+    </marker>
+  </defs>
+
+  <!-- core panel -->
+  <rect x="418" y="128" width="264" height="286" rx="9" fill="var(--spine-wash)" stroke="var(--spine)" stroke-width="1.5"/>
+  <text x="432" y="152" font-family="var(--sans)" font-size="10.5" font-weight="700" letter-spacing="1.6" fill="var(--spine)">SCHEMA CORE — THE SPINE</text>
+  <rect x="434" y="164" width="232" height="46" rx="5" fill="var(--panel)" stroke="var(--spine)" stroke-width="1.2"/>
+  <text x="448" y="185" font-family="var(--mono)" font-size="13.5" font-weight="600" fill="currentColor">core.projects</text>
+  <text x="448" y="200" font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">code · kind · org · state · owner · dates</text>
+  <rect x="434" y="220" width="232" height="46" rx="5" fill="var(--panel)" stroke="var(--spine)" stroke-width="1.2"/>
+  <text x="448" y="241" font-family="var(--mono)" font-size="13.5" font-weight="600" fill="currentColor">core.people</text>
+  <text x="448" y="256" font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">roster + login. no pay, no title</text>
+  <rect x="434" y="276" width="232" height="46" rx="5" fill="var(--panel)" stroke="var(--spine)" stroke-width="1.2"/>
+  <text x="448" y="297" font-family="var(--mono)" font-size="13.5" font-weight="600" fill="currentColor">core.orgs</text>
+  <text x="448" y="312" font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">clients + vendors + partners, one table</text>
+  <rect x="434" y="332" width="232" height="30" rx="5" fill="var(--panel)" stroke="var(--rule)" stroke-width="1"/>
+  <text x="448" y="352" font-family="var(--mono)" font-size="12" fill="var(--ink-soft)">documents · events · memory</text>
+  <rect x="434" y="368" width="232" height="30" rx="5" fill="var(--panel)" stroke="var(--rule)" stroke-width="1"/>
+  <text x="448" y="388" font-family="var(--mono)" font-size="12" fill="var(--ink-soft)">grants · can() · numbering</text>
+
+  <!-- left tools -->
+  <g font-family="var(--mono)" font-size="13" font-weight="600">
+    <rect x="34" y="42" width="206" height="60" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="48" y="65" fill="currentColor">pms</text>
+    <text x="48" y="83" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">stages · tasks · scrum · MoM</text>
+
+    <rect x="34" y="140" width="206" height="60" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="48" y="163" fill="currentColor">boxbuild</text>
+    <text x="48" y="181" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">work orders · BOM · QC</text>
+
+    <rect x="34" y="238" width="206" height="60" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="48" y="261" fill="currentColor">sales</text>
+    <text x="48" y="279" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">deals · quotes · activities</text>
+
+    <rect x="34" y="336" width="206" height="60" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="48" y="359" fill="currentColor">hr</text>
+    <text x="48" y="377" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">employment · salary · leave</text>
+  </g>
+
+  <!-- right tools -->
+  <g font-family="var(--mono)" font-size="13" font-weight="600">
+    <rect x="860" y="90" width="206" height="60" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="874" y="113" fill="currentColor">finance</text>
+    <text x="874" y="131" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">invoices · bills · expenses</text>
+
+    <rect x="860" y="288" width="206" height="76" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="874" y="311" fill="currentColor">mgmt</text>
+    <text x="874" y="329" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">okrs, and views only —</text>
+    <text x="874" y="344" font-family="var(--sans)" font-size="10.5" font-weight="400" fill="var(--ink-faint)">it owns almost no data</text>
+  </g>
+
+  <!-- edges: tools -> core. one vertical rail each, so nothing runs on top of anything -->
+  <g stroke="var(--spine)" stroke-width="1.4" fill="none" marker-end="url(#ahs)">
+    <path d="M 244 72 L 300 72 L 300 180 L 412 180"/>
+    <path d="M 244 170 L 320 170 L 320 196 L 412 196"/>
+    <path d="M 244 268 L 340 268 L 340 299 L 412 299"/>
+    <path d="M 244 366 L 360 366 L 360 243 L 412 243"/>
+    <path d="M 856 120 L 760 120 L 760 200 L 690 200"/>
+  </g>
+  <g font-family="var(--mono)" font-size="10.5" fill="var(--spine)">
+    <text x="252" y="64">project_id</text>
+    <text x="294" y="162" text-anchor="end">project_id</text>
+    <text x="252" y="260">org_id</text>
+    <text x="252" y="358">person_id</text>
+    <text x="963" y="172" text-anchor="middle">org_id · project_id · person_id</text>
+  </g>
+
+  <!-- mgmt reads -->
+  <path d="M 856 326 L 690 326" stroke="var(--ink-faint)" stroke-width="1.3" stroke-dasharray="5 4" fill="none" marker-end="url(#ah)" color="var(--ink-faint)"/>
+  <text x="850" y="316" font-family="var(--mono)" font-size="10.5" fill="var(--ink-faint)" text-anchor="end">reads, writes nothing</text>
+
+  <!-- the forbidden edge -->
+  <g font-family="var(--mono)" font-size="11">
+    <rect x="34" y="452" width="54" height="26" rx="4" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.1"/>
+    <text x="47" y="470" fill="var(--ink-soft)">pms</text>
+    <rect x="152" y="452" width="62" height="26" rx="4" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.1"/>
+    <text x="165" y="470" fill="var(--ink-soft)">sales</text>
+  </g>
+  <path d="M 90 465 L 150 465" stroke="var(--ink-faint)" stroke-width="1.2" stroke-dasharray="3 4" fill="none"/>
+  <circle cx="120" cy="465" r="9" fill="var(--ground)" stroke="var(--ink-faint)" stroke-width="1.2"/>
+  <path d="M 115 460 L 125 470 M 125 460 L 115 470" stroke="var(--ink-faint)" stroke-width="1.4"/>
+  <g font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">
+    <text x="34" y="502">no tool schema may reference another —</text>
+    <text x="34" y="517">cross-tool joins go through core</text>
+  </g>
+
+  <!-- legacy public -->
+  <rect x="418" y="470" width="264" height="72" rx="8" fill="var(--legacy-wash)" stroke="var(--legacy)" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="434" y="494" font-family="var(--mono)" font-size="13.5" font-weight="600" fill="var(--legacy)">public — frozen</text>
+  <text x="434" y="512" font-family="var(--sans)" font-size="10.5" fill="var(--ink-soft)">12 PMS tables + collections. Nothing new lands here.</text>
+  <text x="434" y="528" font-family="var(--sans)" font-size="10.5" fill="var(--ink-soft)">Becomes views over core, one table at a time.</text>
+  <path d="M 550 420 L 550 464" stroke="var(--legacy)" stroke-width="1.4" fill="none" marker-end="url(#ahl)"/>
+  <text x="562" y="447" font-family="var(--mono)" font-size="10.5" fill="var(--legacy)">security_invoker views</text>
+</svg>
+  </div>
+  <figcaption>Every solid arrow into <code>core</code> is a foreign key, labelled with the column that
+  carries it; the dashed arrow out of the bottom is a view. Sales starts with only
+  <code>org_id</code> and fills in <code>project_id</code> the moment a deal is won — which is the
+  whole handover, one UPDATE. The crossed link is the rule that keeps this from collapsing back into
+  one tangled schema: a tool may depend on <code>core</code>, never on another tool. Cross-tool
+  questions are answered by a <code>mgmt</code> view, which is allowed to read everything precisely
+  because it writes nothing.</figcaption>
+</figure>
+</div>
+
+<section class="col">
+  <h2>Why one table for clients and vendors</h2>
+  <p>Half your vendors will eventually buy something from you, and two of your clients already supply
+  components. Model them as separate tables and you will maintain the same company's GSTIN in two
+  places and reconcile them by hand forever. <code>core.orgs</code> is <em>a company we deal with</em>;
+  <code>core.org_roles</code> says in what capacity, and a company can carry several rows there at once.
+  Finance joins <code>invoices</code> to orgs playing <code>client</code> and <code>bills</code> to orgs
+  playing <code>vendor</code> — same table, different role.</p>
+  <p>The same argument applies to <code>core.people</code>: one row per human, whether they are staff, a
+  contractor, or a client-side engineer who shows up in a MoM. What they are <em>paid</em> and what
+  their <em>title</em> is are HR facts, and they live in <code>hr.employment</code> and
+  <code>hr.salary</code>, behind a separate lock.</p>
+</section>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge">core</span>
+    <span class="what">nine tables · every tool may read · almost nothing may be added</span>
+  </div>
+  <p class="schema-note">Keep this schema small on purpose. The test for a new column here is not
+  “is it useful?” — it is “would <em>all six</em> tools mean the same thing by it?” If not, it belongs
+  in a tool schema.</p>
+
+  <div class="tables">
+    <div class="tbl">
+      <h4>core.people</h4>
+      <p class="why">One row per human. Identity and login only.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>full_name</dt><dd>text not null</dd></div>
+        <div><dt>work_email</dt><dd>citext unique</dd></div>
+        <div><dt>personal_email</dt><dd>citext</dd></div>
+        <div><dt>phone</dt><dd>text</dd></div>
+        <div class="fk"><dt>auth_id</dt><dd>→ auth.users · null ok</dd></div>
+        <div><dt>kind</dt><dd>employee|contractor|intern|external</dd></div>
+        <div><dt>status</dt><dd>active|notice|exited</dd></div>
+        <div><dt>created_at</dt><dd>timestamptz</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.orgs</h4>
+      <p class="why">Every company you deal with, in any direction.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>name</dt><dd>text not null</dd></div>
+        <div><dt>legal_name</dt><dd>text</dd></div>
+        <div><dt>gstin</dt><dd>text</dd></div>
+        <div><dt>country</dt><dd>char(2) default 'IN'</dd></div>
+        <div><dt>website</dt><dd>text</dd></div>
+        <div><dt>status</dt><dd>active|dormant|blacklisted</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.org_roles</h4>
+      <p class="why">The same company can be a client and a vendor at once.</p>
+      <dl class="cols">
+        <div class="fk"><dt>org_id</dt><dd>→ core.orgs</dd></div>
+        <div><dt>role</dt><dd>client|vendor|partner|prospect</dd></div>
+        <div><dt>since</dt><dd>date</dd></div>
+        <div><dt>(org_id, role)</dt><dd><span class="pk">primary key</span></dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.contacts</h4>
+      <p class="why">Named humans at an org, for Sales and Finance alike.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div class="fk"><dt>org_id</dt><dd>→ core.orgs</dd></div>
+        <div><dt>name · title</dt><dd>text</dd></div>
+        <div><dt>email · phone</dt><dd>text</dd></div>
+        <div><dt>is_primary</dt><dd>boolean</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.projects</h4>
+      <p class="why">The spine. Twelve columns, and it stays that way.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>code</dt><dd>text unique · Eb-09-ML-432-…</dd></div>
+        <div><dt>kind</dt><dd>odm|boxbuild|product|internal</dd></div>
+        <div class="fk"><dt>org_id</dt><dd>→ core.orgs</dd></div>
+        <div><dt>name</dt><dd>text not null</dd></div>
+        <div><dt>state</dt><dd>lead…won|running|delivered|closed</dd></div>
+        <div class="fk"><dt>owner_id</dt><dd>→ core.people</dd></div>
+        <div><dt>started_on · due_on</dt><dd>date</dd></div>
+        <div><dt>closed_on</dt><dd>date</dd></div>
+        <div><dt>drive_folder_id</dt><dd>text</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.documents</h4>
+      <p class="why">Drive stays the file store; this is the index every tool searches.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>drive_file_id</dt><dd>text unique</dd></div>
+        <div><dt>name · mime_type</dt><dd>text</dd></div>
+        <div><dt>drive_path</dt><dd>text</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects · null ok</dd></div>
+        <div class="fk"><dt>org_id</dt><dd>→ core.orgs · null ok</dd></div>
+        <div class="hot"><dt>kind</dt><dd>gerber|quote|invoice|payslip…</dd></div>
+        <div class="fk"><dt>uploaded_by</dt><dd>→ core.people</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.events</h4>
+      <p class="why">Append-only company timeline. Every tool writes, nothing updates.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">bigserial pk</span></dd></div>
+        <div><dt>at</dt><dd>timestamptz default now()</dd></div>
+        <div class="fk"><dt>actor_id</dt><dd>→ core.people</dd></div>
+        <div><dt>tool</dt><dd>pms|sales|finance|hr|…</dd></div>
+        <div><dt>entity_type · entity_id</dt><dd>text · uuid</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects</dd></div>
+        <div><dt>verb</dt><dd>created|moved|approved|paid</dd></div>
+        <div><dt>payload</dt><dd>jsonb</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.grants</h4>
+      <p class="why">Who may touch which tool. Read by every RLS policy in the database.</p>
+      <dl class="cols">
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div><dt>tool</dt><dd>pms|boxbuild|sales|finance|hr|mgmt</dd></div>
+        <div class="hot"><dt>level</dt><dd>none|read|write|admin</dd></div>
+        <div><dt>(person_id, tool)</dt><dd><span class="pk">primary key</span></dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>core.memory · core.numbering</h4>
+      <p class="why">Standing rules the assistants read, and the single authority that mints Eb- codes so two tools never issue the same one.</p>
+      <dl class="cols">
+        <div><dt>memory.scope</dt><dd>company|pms|sales|…</dd></div>
+        <div><dt>memory.title · content</dt><dd>text</dd></div>
+        <div><dt>numbering.prefix</dt><dd><span class="pk">text pk</span></dd></div>
+        <div><dt>numbering.next_val</dt><dd>integer</dd></div>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge ghost">pms</span>
+    <span class="what">ODM delivery — the tool you already run</span>
+  </div>
+  <ul class="brief">
+    <li><b>pms.project_detail</b><span>PK is <code>core.projects.id</code>. Holds the ODM-only columns that are currently stranded in <code>public.projects</code>: <code>lld_customer</code>, <code>lld_designer</code>, <code>sanctioned</code>, <code>pcb_id</code>, <code>quantity</code>.</span></li>
+    <li><b>pms.stages</b><span>The eleven audit stages, per project, with a sequence number — so the grouping the assistant does today by keyword becomes a real column.</span></li>
+    <li><b>pms.tasks</b><span><code>stage_id → pms.stages</code>, <code>assignee_id → core.people</code>. This is the foreign key that makes stage-grouped to-dos structural rather than guessed.</span></li>
+    <li><b>pms.task_steps</b><span>Checklist rows under a task.</span></li>
+    <li><b>pms.scrum_notes</b><span>Daily scrum, timestamped, optionally attached to a project.</span></li>
+    <li><b>pms.moms</b><span>Brainstorming sessions and minutes, with attendees as <code>core.people</code> ids.</span></li>
+    <li><b>pms.assignments</b><span>Who is on the project and at what allocation.</span></li>
+  </ul>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge ghost">boxbuild</span>
+    <span class="what">same spine, entirely different detail — the proof the design works</span>
+  </div>
+  <ul class="brief">
+    <li><b>boxbuild.project_detail</b><span>Same PK, none of the ODM columns: <code>bom_rev</code>, <code>line_rate</code>, <code>target_qty</code>, <code>yield_pct</code>.</span></li>
+    <li><b>boxbuild.work_orders</b><span>A production run against a project — quantity, dates, status.</span></li>
+    <li><b>boxbuild.bom_lines</b><span><code>vendor_org_id → core.orgs</code>, which is how a component shortage becomes a purchase order in Finance without either tool importing the other's tables.</span></li>
+    <li><b>boxbuild.qc_checks</b><span>Result rows against a work order, signed by a <code>core.people</code> id.</span></li>
+  </ul>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge ghost">sales</span>
+    <span class="what">pipeline in front of the spine</span>
+  </div>
+  <ul class="brief">
+    <li><b>sales.deals</b><span><code>org_id → core.orgs</code> and a nullable <code>project_id → core.projects</code>. <strong>Winning a deal is one UPDATE</strong> that fills in <code>project_id</code> — not a re-entry of the client into the PMS.</span></li>
+    <li><b>sales.activities</b><span>Calls, emails, meetings, visits, against a deal or an org.</span></li>
+    <li><b>sales.quotes</b><span>Versioned, each pointing at a <code>core.documents</code> row so the PDF lives in Drive and the metadata lives here.</span></li>
+    <li><b>sales.targets</b><span>Per-person, per-period numbers — the input to <code>mgmt</code>, and to HR reviews.</span></li>
+    <li><b>sales.partners</b><span>Tier and agreement for orgs playing the <code>partner</code> role.</span></li>
+  </ul>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge">finance</span>
+    <span class="what">the schema every other tool eventually wants to read</span>
+  </div>
+  <p class="schema-note">Two rules carry most of the weight here. Money is always
+  <code>numeric(14,2)</code> beside a <code>currency char(3)</code> — never a float, never a bare
+  number. And a project's financial truth is derived, never stored: there is no
+  <code>projects.amount_received</code> column to drift out of date, only a sum over
+  <code>finance.payments</code>.</p>
+
+  <div class="tables">
+    <div class="tbl">
+      <h4>finance.invoices</h4>
+      <p class="why">Money owed to you. Joined to a project, so revenue is attributable.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>number</dt><dd>text unique</dd></div>
+        <div class="fk"><dt>org_id</dt><dd>→ core.orgs (client)</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects · null ok</dd></div>
+        <div><dt>issued_on · due_on</dt><dd>date</dd></div>
+        <div><dt>currency</dt><dd>char(3)</dd></div>
+        <div><dt>subtotal · tax · total</dt><dd>numeric(14,2)</dd></div>
+        <div class="hot"><dt>status</dt><dd>draft|sent|part_paid|paid|void</dd></div>
+        <div class="fk"><dt>document_id</dt><dd>→ core.documents</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>finance.invoice_lines</h4>
+      <p class="why">The detail, and the link to the chart of accounts.</p>
+      <dl class="cols">
+        <div class="fk"><dt>invoice_id</dt><dd>→ finance.invoices</dd></div>
+        <div><dt>description</dt><dd>text</dd></div>
+        <div><dt>qty · unit_price</dt><dd>numeric</dd></div>
+        <div><dt>tax_rate</dt><dd>numeric(5,2)</dd></div>
+        <div class="fk"><dt>account_id</dt><dd>→ finance.accounts</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>finance.bills</h4>
+      <p class="why">Money you owe. Same shape as an invoice, other direction.</p>
+      <dl class="cols">
+        <div><dt>id · number</dt><dd><span class="pk">uuid pk</span> · text</dd></div>
+        <div class="fk"><dt>vendor_org_id</dt><dd>→ core.orgs (vendor)</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects · null ok</dd></div>
+        <div><dt>issued_on · due_on</dt><dd>date</dd></div>
+        <div><dt>total · currency</dt><dd>numeric(14,2) · char(3)</dd></div>
+        <div><dt>status</dt><dd>draft|approved|part_paid|paid</dd></div>
+        <div class="fk"><dt>document_id</dt><dd>→ core.documents</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>finance.payments</h4>
+      <p class="why">The only place cash actually moves. Everything else is a claim.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div><dt>at</dt><dd>timestamptz</dd></div>
+        <div class="hot"><dt>direction</dt><dd>in | out</dd></div>
+        <div><dt>amount · currency</dt><dd>numeric(14,2) · char(3)</dd></div>
+        <div><dt>method · ref</dt><dd>text</dd></div>
+        <div class="fk"><dt>invoice_id</dt><dd>→ finance.invoices · null ok</dd></div>
+        <div class="fk"><dt>bill_id</dt><dd>→ finance.bills · null ok</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>finance.expenses</h4>
+      <p class="why">Where Finance and HR meet without either owning the other.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects · null ok</dd></div>
+        <div><dt>spent_on</dt><dd>date</dd></div>
+        <div><dt>category · amount</dt><dd>text · numeric(14,2)</dd></div>
+        <div class="hot"><dt>status</dt><dd>submitted|approved|reimbursed|rejected</dd></div>
+        <div class="fk"><dt>approved_by</dt><dd>→ core.people</dd></div>
+        <div class="fk"><dt>document_id</dt><dd>→ core.documents (receipt)</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>finance.accounts · budgets</h4>
+      <p class="why">A small chart of accounts, and a per-project budget line to compare actuals against.</p>
+      <dl class="cols">
+        <div><dt>accounts.code · name</dt><dd>text</dd></div>
+        <div><dt>accounts.type</dt><dd>asset|liability|income|expense|equity</dd></div>
+        <div class="fk"><dt>accounts.parent_id</dt><dd>→ finance.accounts</dd></div>
+        <div class="fk"><dt>budgets.project_id</dt><dd>→ core.projects</dd></div>
+        <div><dt>budgets.period</dt><dd>daterange</dd></div>
+        <div><dt>budgets.amount</dt><dd>numeric(14,2)</dd></div>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge">hr</span>
+    <span class="what">the most sensitive schema in the company — design the lock first</span>
+  </div>
+  <p class="schema-note">Note what is <em>not</em> here: names, emails and phone numbers. Those are in
+  <code>core.people</code>, because Sales needs to know who owns a deal and PMS needs to know who a task
+  is assigned to. HR owns the facts that only HR should see — the employment relationship, the money,
+  the leave, the reviews — and each of those is a separate table so the lock can be different on each.</p>
+
+  <div class="tables">
+    <div class="tbl">
+      <h4>hr.employment</h4>
+      <p class="why">The relationship, versioned. Never overwrite — close the old row, open a new one.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div><dt>designation</dt><dd>text</dd></div>
+        <div><dt>department</dt><dd>text</dd></div>
+        <div class="fk"><dt>manager_id</dt><dd>→ core.people</dd></div>
+        <div><dt>employment_type</dt><dd>full_time|part_time|intern|contract</dd></div>
+        <div><dt>started_on · ended_on</dt><dd>date</dd></div>
+        <div><dt>is_current</dt><dd>boolean</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>hr.salary</h4>
+      <p class="why">Its own table so its own policy can be stricter than the rest of HR.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div><dt>effective_from</dt><dd>date</dd></div>
+        <div class="hot"><dt>ctc_annual</dt><dd>numeric(14,2)</dd></div>
+        <div><dt>currency</dt><dd>char(3)</dd></div>
+        <div><dt>components</dt><dd>jsonb · basic, HRA, variable</dd></div>
+        <div class="fk"><dt>revised_by</dt><dd>→ core.people</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>hr.timesheets</h4>
+      <p class="why">The bridge table. Hours against a project make labour cost real and utilisation measurable.</p>
+      <dl class="cols">
+        <div><dt>id</dt><dd><span class="pk">uuid pk</span></dd></div>
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div class="fk"><dt>project_id</dt><dd>→ core.projects</dd></div>
+        <div><dt>on_date</dt><dd>date</dd></div>
+        <div><dt>hours</dt><dd>numeric(4,2)</dd></div>
+        <div><dt>note</dt><dd>text</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>hr.attendance</h4>
+      <p class="why">One row per person per day. Presence, not effort — timesheets carry effort.</p>
+      <dl class="cols">
+        <div class="fk"><dt>person_id</dt><dd>→ core.people</dd></div>
+        <div><dt>on_date</dt><dd>date</dd></div>
+        <div><dt>first_in · last_out</dt><dd>timestamptz</dd></div>
+        <div><dt>hours</dt><dd>numeric(4,2)</dd></div>
+        <div><dt>source</dt><dd>manual|biometric|import</dd></div>
+        <div><dt>(person_id, on_date)</dt><dd><span class="pk">primary key</span></dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>hr.leave_types · balances · requests</h4>
+      <p class="why">Entitlement, what is left, and what has been asked for — kept apart so a policy change doesn't rewrite history.</p>
+      <dl class="cols">
+        <div><dt>leave_types.name</dt><dd>casual|sick|earned|unpaid</dd></div>
+        <div><dt>leave_types.days_per_year</dt><dd>numeric(4,1)</dd></div>
+        <div><dt>balances.year</dt><dd>integer</dd></div>
+        <div><dt>balances.entitled · taken</dt><dd>numeric(4,1)</dd></div>
+        <div><dt>requests.from_date · to_date</dt><dd>date</dd></div>
+        <div class="hot"><dt>requests.status</dt><dd>pending|approved|rejected|cancelled</dd></div>
+        <div class="fk"><dt>requests.approver_id</dt><dd>→ core.people</dd></div>
+      </dl>
+    </div>
+
+    <div class="tbl">
+      <h4>hr.reviews · trainings</h4>
+      <p class="why">Performance and training — the two things the PMS already half-tracks, moved somewhere they belong.</p>
+      <dl class="cols">
+        <div class="fk"><dt>reviews.person_id</dt><dd>→ core.people</dd></div>
+        <div><dt>reviews.period</dt><dd>daterange</dd></div>
+        <div><dt>reviews.rating</dt><dd>numeric(3,1)</dd></div>
+        <div class="fk"><dt>reviews.reviewer_id</dt><dd>→ core.people</dd></div>
+        <div><dt>reviews.goals</dt><dd>jsonb</dd></div>
+        <div><dt>trainings.title · provider</dt><dd>text</dd></div>
+        <div><dt>assignments.done_on</dt><dd>date · score</dd></div>
+      </dl>
+    </div>
+  </div>
+
+  <div class="col">
+  <div class="callout">
+    <p class="k">Payslips, offer letters, contracts</p>
+    <p>These are files, so they belong in <code>core.documents</code> like everything else — but a
+    payslip must not be readable by anyone who can read a gerber. Give those rows a
+    <code>kind</code> of <code>payslip</code> / <code>offer</code> / <code>contract_employment</code>
+    and add one extra policy on <code>core.documents</code>: rows with those kinds are visible only to
+    HR admins and to the person they concern. It is the single exception to <code>core</code> being
+    freely readable, and it is worth writing down as one.</p>
+  </div>
+  </div>
+</div>
+
+<div class="wide">
+  <div class="schema-head">
+    <span class="badge ghost">mgmt</span>
+    <span class="what">one table and a handful of views — the payoff for all of the above</span>
+  </div>
+  <ul class="brief">
+    <li><b>mgmt.okrs</b><span>The only real table: objective, key result, target, current, scoped to company, team or person.</span></li>
+    <li><b>mgmt.v_project_health</b><span>One row per project: state, days to due, open and overdue tasks, hours booked, invoiced against sanctioned, cash received. Reads <code>core</code>, <code>pms</code>, <code>hr</code> and <code>finance</code> — and is possible only because they all agree on <code>project_id</code>.</span></li>
+    <li><b>mgmt.v_org_360</b><span>Per client: open deals, running projects, lifetime invoiced, outstanding, last contact. The question Sales and Finance each answer half of today.</span></li>
+    <li><b>mgmt.v_person_load</b><span>Per person: projects, open tasks, hours this week, leave booked ahead. Staffing decisions without a spreadsheet.</span></li>
+    <li><b>mgmt.v_company_pulse</b><span>A single row: cash in and out this month, pipeline value, work in progress, headcount, overdue receivables.</span></li>
+  </ul>
+</div>
+
+<section class="col">
+  <h2>One function guards the whole database</h2>
+  <p>Six tools × forty tables is a lot of RLS policies, and hand-written policies drift. So the
+  permission question is asked in exactly one place — <code>core.can(tool, level)</code> — and every
+  policy in every schema is a one-liner that calls it. Change someone's access by updating one row in
+  <code>core.grants</code>; no policy is ever edited to onboard a person.</p>
+</section>
+
+<div class="wide">
+<figure>
+  <div class="frame">
+<svg viewBox="0 0 1000 262" role="img" aria-label="A request from the browser carries a JWT to PostgREST, which evaluates the table's row-level-security policy; the policy calls core.can, which looks up one row in core.grants and returns true or false.">
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g font-family="var(--mono)" font-size="12.5">
+    <rect x="8" y="40" width="150" height="56" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="22" y="64" font-weight="600" fill="currentColor">browser</text>
+    <text x="22" y="82" font-size="10.5" font-family="var(--sans)" fill="var(--ink-faint)">anon key + user JWT</text>
+
+    <rect x="238" y="40" width="150" height="56" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="252" y="64" font-weight="600" fill="currentColor">PostgREST</text>
+    <text x="252" y="82" font-size="10.5" font-family="var(--sans)" fill="var(--ink-faint)">role authenticated</text>
+
+    <rect x="468" y="40" width="190" height="56" rx="6" fill="var(--panel)" stroke="var(--legacy)" stroke-width="1.4"/>
+    <text x="482" y="64" font-weight="600" fill="var(--legacy)">policy on hr.salary</text>
+    <text x="482" y="82" font-size="10.5" font-family="var(--sans)" fill="var(--ink-faint)">using ( … )</text>
+
+    <rect x="738" y="40" width="150" height="56" rx="6" fill="var(--spine-wash)" stroke="var(--spine)" stroke-width="1.4"/>
+    <text x="752" y="64" font-weight="600" fill="var(--spine)">core.can()</text>
+    <text x="752" y="82" font-size="10.5" font-family="var(--sans)" fill="var(--ink-faint)">stable · definer</text>
+
+    <rect x="738" y="148" width="150" height="42" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+    <text x="752" y="174" font-weight="600" fill="currentColor">core.grants</text>
+  </g>
+
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ah2)">
+    <path d="M 162 68 L 232 68"/>
+    <path d="M 392 68 L 462 68"/>
+    <path d="M 662 68 L 732 68"/>
+    <path d="M 813 100 L 813 142"/>
+  </g>
+  <g font-family="var(--mono)" font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">
+    <text x="197" y="58">select</text>
+    <text x="427" y="58">auth.uid()</text>
+    <text x="690" y="58">'hr','admin'</text>
+    <text x="803" y="126" text-anchor="end">one row</text>
+  </g>
+
+  <path d="M 888 169 C 962 169 962 46 894 54" stroke="var(--spine)" stroke-width="1.3" fill="none" marker-end="url(#ahs)"/>
+  <text x="972" y="114" font-family="var(--mono)" font-size="10.5" fill="var(--spine)" text-anchor="middle">true</text>
+
+  <text x="8" y="226" font-family="var(--mono)" font-size="11.5" fill="var(--ink-soft)">using ( core.can('hr','admin') or person_id = core.me() )</text>
+  <text x="8" y="246" font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">— the second clause is why a person can see their own pay and nobody else's</text>
+</svg>
+  </div>
+  <figcaption>Every policy in the database has this shape. The only per-table variation is the second
+  clause: <code>hr.salary</code> lets you see your own row, <code>finance.expenses</code> lets you see
+  the ones you filed, <code>pms.tasks</code> lets you see the ones assigned to you.</figcaption>
+</figure>
+</div>
+
+<section class="col">
+<pre><b>create schema</b> core;
+<b>create table</b> core.grants (
+  person_id uuid <b>references</b> core.people(id) <b>on delete cascade</b>,
+  tool      text <b>not null</b>,
+  level     text <b>not null check</b> (level <b>in</b> ('none','read','write','admin')),
+  <b>primary key</b> (person_id, tool));
+
+<i>-- the caller's row in the roster, or null if they are not on it</i>
+<b>create function</b> core.me() <b>returns</b> uuid
+<b>language</b> sql <b>stable security definer set</b> search_path = core <b>as</b> $$
+  <b>select</b> id <b>from</b> core.people <b>where</b> auth_id = auth.uid();
+$$;
+
+<i>-- does the caller hold at least `_level` on `_tool`?</i>
+<b>create function</b> core.can(_tool text, _level text) <b>returns</b> boolean
+<b>language</b> sql <b>stable security definer set</b> search_path = core <b>as</b> $$
+  <b>select exists</b> (
+    <b>select</b> 1 <b>from</b> core.grants g
+    <b>where</b> g.person_id = core.me() <b>and</b> g.tool = _tool
+      <b>and</b> array_position(<b>array</b>['none','read','write','admin'], g.level)
+       >= array_position(<b>array</b>['none','read','write','admin'], _level));
+$$;
+
+<i>-- and then, forty times over, one line each</i>
+<b>alter table</b> hr.salary <b>enable row level security</b>;
+<b>create policy</b> read_salary <b>on</b> hr.salary <b>for select to</b> authenticated
+  <b>using</b> (core.can('hr','admin') <b>or</b> person_id = core.me());
+<b>create policy</b> write_salary <b>on</b> hr.salary <b>for all to</b> authenticated
+  <b>using</b> (core.can('hr','admin')) <b>with check</b> (core.can('hr','admin'));</pre>
+</section>
+
+<section class="wide">
+  <h2 class="col" style="margin-bottom:14px;">Who can reach what</h2>
+  <p class="col" style="color:var(--ink-soft);">Levels are per person, per tool, in one table. This is
+  the shape I would seed on day one.</p>
+  <div class="matrix-wrap">
+    <table class="matrix">
+      <thead>
+        <tr><th scope="col">Person</th><th scope="col">core</th><th scope="col">pms</th><th scope="col">boxbuild</th><th scope="col">sales</th><th scope="col">finance</th><th scope="col">hr</th><th scope="col">mgmt</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Engineer</th><td class="yes">read</td><td class="yes">write</td><td class="no">none</td><td class="no">none</td><td>own expenses</td><td>own rows</td><td class="no">none</td></tr>
+        <tr><th scope="row">Project lead</th><td class="yes">read</td><td class="yes">admin</td><td class="yes">read</td><td class="yes">read</td><td class="yes">read</td><td>own rows</td><td class="yes">read</td></tr>
+        <tr><th scope="row">Sales</th><td class="yes">write</td><td class="yes">read</td><td class="no">none</td><td class="yes">admin</td><td class="yes">read</td><td>own rows</td><td class="yes">read</td></tr>
+        <tr><th scope="row">Production</th><td class="yes">read</td><td class="yes">read</td><td class="yes">admin</td><td class="no">none</td><td class="no">none</td><td>own rows</td><td class="no">none</td></tr>
+        <tr><th scope="row">Accounts</th><td class="yes">read</td><td class="yes">read</td><td class="yes">read</td><td class="yes">read</td><td class="yes">admin</td><td class="hot">read*</td><td class="yes">read</td></tr>
+        <tr><th scope="row">HR</th><td class="yes">write</td><td class="no">none</td><td class="no">none</td><td class="no">none</td><td class="no">none</td><td class="hot">admin</td><td class="yes">read</td></tr>
+        <tr><th scope="row">Founder</th><td class="yes">admin</td><td class="yes">admin</td><td class="yes">admin</td><td class="yes">admin</td><td class="yes">admin</td><td class="hot">admin</td><td class="yes">admin</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="col" style="font-family:var(--sans); font-size:12.5px; color:var(--ink-faint); margin-top:12px;">
+  * Accounts needs salary totals to run payroll but not review notes or leave reasons — grant
+  <code>hr:read</code> and leave <code>hr.reviews</code> and <code>hr.leave_requests.reason</code> to
+  <code>hr:admin</code> only. “own rows” is not a grant level; it is the second clause of the policy.</p>
+</section>
+
+<section class="col">
+  <h2>How none of this disturbs the repos you have built</h2>
+  <p>The PMS reads <code>public.profiles</code>. Once <code>core.people</code> is the real table, that
+  name becomes a view over it — and because the view is declared <code>security_invoker = on</code>,
+  it runs with the caller's own permissions, so <code>core</code>'s policies still apply. The app sends
+  the same query and gets the same columns back. Nothing is redeployed; the cut-over is two SQL
+  statements and the rollback is two more.</p>
+</section>
+
+<div class="wide">
+<figure>
+  <div class="frame">
+<svg viewBox="0 0 980 250" role="img" aria-label="Before: the PMS selects from public.profiles, which is a table holding the data. After: the PMS sends the identical query, public.profiles is now a security_invoker view, and the data lives in core.people.">
+  <defs>
+    <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <text x="8" y="20" font-family="var(--sans)" font-size="10.5" font-weight="700" letter-spacing="1.4" fill="var(--ink-faint)">TODAY</text>
+  <rect x="8" y="34" width="160" height="52" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+  <text x="24" y="65" font-family="var(--mono)" font-size="13" font-weight="600" fill="currentColor">pms-odm-2</text>
+  <path d="M 174 60 L 324 60" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ah3)"/>
+  <text x="249" y="50" font-family="var(--mono)" font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">select * from profiles</text>
+  <rect x="330" y="34" width="222" height="52" rx="6" fill="var(--legacy-wash)" stroke="var(--legacy)" stroke-width="1.3"/>
+  <text x="346" y="58" font-family="var(--mono)" font-size="13" font-weight="600" fill="var(--legacy)">public.profiles</text>
+  <text x="346" y="75" font-family="var(--sans)" font-size="10.5" fill="var(--ink-soft)">a table · the rows live here</text>
+
+  <line x1="8" y1="112" x2="972" y2="112" stroke="var(--rule)" stroke-width="1"/>
+
+  <text x="8" y="140" font-family="var(--sans)" font-size="10.5" font-weight="700" letter-spacing="1.4" fill="var(--spine)">AFTER STAGE 4 — NO DEPLOY</text>
+  <rect x="8" y="154" width="160" height="52" rx="6" fill="var(--panel)" stroke="var(--rule)" stroke-width="1.2"/>
+  <text x="24" y="185" font-family="var(--mono)" font-size="13" font-weight="600" fill="currentColor">pms-odm-2</text>
+  <text x="12" y="228" font-family="var(--sans)" font-size="10.5" fill="var(--ink-faint)">byte-for-byte unchanged</text>
+  <path d="M 174 180 L 324 180" stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#ah3)"/>
+  <text x="249" y="170" font-family="var(--mono)" font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">the identical query</text>
+  <rect x="330" y="154" width="222" height="52" rx="6" fill="var(--panel)" stroke="var(--legacy)" stroke-width="1.3" stroke-dasharray="6 4"/>
+  <text x="346" y="178" font-family="var(--mono)" font-size="13" font-weight="600" fill="var(--legacy)">public.profiles</text>
+  <text x="346" y="195" font-family="var(--sans)" font-size="10.5" fill="var(--ink-soft)">now a view · security_invoker</text>
+  <path d="M 558 180 L 664 180" stroke="var(--spine)" stroke-width="1.4" fill="none" marker-end="url(#ahs)"/>
+  <text x="611" y="170" font-family="var(--mono)" font-size="10.5" fill="var(--spine)" text-anchor="middle">reads</text>
+  <rect x="670" y="154" width="222" height="52" rx="6" fill="var(--spine-wash)" stroke="var(--spine)" stroke-width="1.4"/>
+  <text x="686" y="178" font-family="var(--mono)" font-size="13" font-weight="600" fill="var(--spine)">core.people</text>
+  <text x="686" y="195" font-family="var(--sans)" font-size="10.5" fill="var(--ink-soft)">the rows live here now</text>
+</svg>
+  </div>
+  <figcaption>The only thing that changes is which object the name <code>public.profiles</code> points
+  at. This works wherever the legacy shape is one row per entity — <code>profiles</code>,
+  <code>clients</code>, <code>projects</code>. It does <strong>not</strong> work for the Sales tool,
+  which stores each collection as a single JSONB blob in <code>public.collections</code>; that one needs
+  a real cut-over in its own repo, which is why it is last.</figcaption>
+</figure>
+</div>
+
+<section class="wide">
+  <h2 class="col" style="margin-bottom:14px;">Rollout</h2>
+  <p class="col" style="color:var(--ink-soft);">Stages 0–3 touch no existing repository. That is not a
+  coincidence in the ordering — it is the point of it. You can stop after stage 3 and stay there
+  indefinitely with HR and Finance fully live.</p>
+  <ol class="stages">
+    <li class="stage">
+      <div class="n">00</div>
+      <div>
+        <h4>Create the schemas, empty</h4>
+        <p><code>create schema core, pms, boxbuild, sales, finance, hr, mgmt;</code> then every table
+        above, with RLS enabled from the first statement. Add <code>core</code> to Supabase →
+        Settings → API → Exposed schemas. Not one row of data, not one app aware of it.</p>
+        <span class="tag safe">no repo touched</span>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="n">01</div>
+      <div>
+        <h4>Identity and the lock</h4>
+        <p>Seed <code>core.people</code> from <code>public.profiles</code>, carrying
+        <code>auth_id</code> across so existing logins keep working. Seed
+        <code>core.grants</code> for the current team. Write <code>core.me()</code> and
+        <code>core.can()</code>, then the policies. Verify by signing in as two different people and
+        selecting from <code>hr.salary</code> — one should see one row, the other zero.</p>
+        <span class="tag safe">no repo touched</span>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="n">02</div>
+      <div>
+        <h4>Backfill the spine</h4>
+        <p><code>public.clients</code> → <code>core.orgs</code> + a <code>client</code> role row.
+        <code>public.projects</code> → <code>core.projects</code> + <code>pms.project_detail</code>.
+        The PMS's live data currently sits in <code>app_kv</code> as two JSON blobs, so this is a
+        parse-and-insert, not a table copy — write it as an idempotent script you can re-run while
+        both stores are live.</p>
+        <span class="tag safe">no repo touched</span>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="n">03</div>
+      <div>
+        <h4>Build HR and Finance on core only</h4>
+        <p>Greenfield, so they never see <code>public</code> and inherit none of its shape. Each is its
+        own Vercel project and its own repo, pointing at the same Supabase URL with
+        <code>createClient(url, key, { db: { schema: 'hr' } })</code>. From day one they read
+        real clients and real projects, because the spine is already populated.</p>
+        <span class="tag new">new repos only</span>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="n">04</div>
+      <div>
+        <h4>Point the PMS at core, without deploying it</h4>
+        <p>Rename <code>public.profiles</code> to <code>profiles_legacy</code>, create the
+        <code>security_invoker</code> view in its place, confirm the app still works, drop the legacy
+        table a week later. Repeat per table. Every step is reversible in one statement.</p>
+        <span class="tag safe">no repo touched</span>
+      </div>
+    </li>
+    <li class="stage">
+      <div class="n">05</div>
+      <div>
+        <h4>Move Sales off the blob — and off the anon key</h4>
+        <p>The only stage that requires a code change in a repo you have already shipped, and it should
+        be done together with switching Sales from its own <code>sales:users</code> login to Supabase
+        Auth. Until that lands, see the note below.</p>
+        <span class="tag touch">sales repo</span>
+      </div>
+    </li>
+  </ol>
+</section>
+
+<section class="col">
+  <div class="callout">
+    <p class="k">The one thing that must not be skipped</p>
+    <p>The Sales tool authenticates in its own application code against rows in
+    <code>sales:users</code>, which means it hands the Supabase <strong>anon</strong> key to every
+    visitor of its URL. Today that is contained: <code>collections</code> is the only object
+    <code>anon</code> can reach, and the migration you already have removes the blanket
+    <code>anon</code> grant that the PMS schema left behind.</p>
+    <p>The moment salary rows and invoices live in the same database, “anon can reach exactly one
+    table” stops being hygiene and becomes load-bearing security. So:
+    <strong>do not add <code>hr</code> or <code>finance</code> to Supabase's Exposed schemas</strong>
+    while Sales still ships the anon key to the browser. Until stage 5 lands, those two tools should
+    reach Postgres only from server-side code holding the service role — a Vercel route or an edge
+    function — never from the browser.</p>
+  </div>
+
+  <h3>Seven conventions, decided once</h3>
+  <ol class="rules">
+    <li><b>A tool schema may reference <code>core</code>, never another tool schema.</b> Cross-tool
+    questions are answered by a <code>mgmt</code> view. Break this once and the six tools become one
+    tool with six front-ends.</li>
+    <li><b>Money is <code>numeric(14,2)</code> beside a <code>currency char(3)</code>.</b> No floats,
+    no implied INR, no totals stored where they can be summed.</li>
+    <li><b>Instants are <code>timestamptz</code>, dates are <code>date</code>.</b> Never bare
+    <code>timestamp</code> — it is the column type that silently loses an invoice a day.</li>
+    <li><b>Enumerations are <code>text</code> with a <code>check</code>, not Postgres <code>enum</code>
+    types.</b> Adding a status to a check constraint is one statement; adding a value to an enum inside
+    a transaction is a footgun you will meet at a bad moment.</li>
+    <li><b>Every table gets <code>id uuid default gen_random_uuid()</code>, <code>created_at</code>,
+    and RLS enabled in the same migration that creates it.</b> A table that ships without a policy
+    ships open.</li>
+    <li><b>Nothing in <code>core</code> is hard-deleted.</b> <code>core.events</code> references it.
+    Set <code>archived_at</code> and filter in the view.</li>
+    <li><b>One numbering authority.</b> Every Eb- code comes from <code>core.numbering</code>, so
+    Sales quoting a job and PMS opening it cannot mint the same code twice.</li>
+  </ol>
+
+  <h3>What I would do this week</h3>
+  <p>Stage 0 and stage 1 are a single afternoon and carry no risk to anything running — the schemas are
+  empty and nothing reads them. They are also the part that gets harder the longer HR and Finance wait,
+  because every table those tools add outside <code>core</code> is a table that later has to be moved.
+  Everything after that can wait for a quiet week.</p>
+  <p>Still outstanding from the current build, separately from all of this: redeploying the
+  <code>claude</code> edge function as <strong>bright-api</strong> and <code>drive-read</code> as
+  <strong>rapid-service</strong>, and running <code>RUN-THIS-FIX-ALL.sql</code> and
+  <code>fix-resource-creation.sql</code>. The Assistant's agent loop and Drive browsing stay broken
+  until those two functions are redeployed.</p>
+</section>
+
+<hr class="end">
+<p class="colophon col">Elecbits · eb-core-database-1 · schema proposal, 9 August 2026. Column lists are
+the proposed shape, not a generated dump — read them as the intent for the migration, not as the
+current state of the database.</p>
+
+</main>
