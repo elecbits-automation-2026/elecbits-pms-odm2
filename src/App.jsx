@@ -27,7 +27,7 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -3439,6 +3439,7 @@ function ResourcesModule() {
   const my = users.find((u) => u.id === me);
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   const [tab, setTab] = useState("team");
+  const [q, setQ] = useState("");
   const [roleF, setRoleF] = useState("all");
   const [deptF, setDeptF] = useState("all");
   const [avFrom, setAvFrom] = useState(todayStr());
@@ -3454,7 +3455,12 @@ function ResourcesModule() {
   const activeProjs = (uid) => assignedProjs(uid).filter((p) => p.status !== "Completed" && projWindow(p).end >= today);
   const roles = UNIQ_RR(members);
   const depts = [...new Set(members.map(deptOf).filter((d) => d !== "—"))];
-  const filtered = members.filter((u) => (roleF === "all" || u.resourceRole === roleF) && (deptF === "all" || deptOf(u) === deptF));
+  // Free-text search across the things you'd actually look someone up by:
+  // name, email, title and their role/function label.
+  const needle = q.trim().toLowerCase();
+  const matchesQ = (u) => !needle || [u.name, u.email, u.title, ROLE_TITLE[u.resourceRole] || u.resourceRole, deptOf(u)]
+    .some((v) => String(v || "").toLowerCase().includes(needle));
+  const filtered = members.filter((u) => (roleF === "all" || u.resourceRole === roleF) && (deptF === "all" || deptOf(u) === deptF) && matchesQ(u));
 
   const statusOf = (u) => { const a = activeProjs(u.id).length, cap = capOf(u); return a >= cap ? ["At Capacity", "var(--red)"] : a ? ["Deployed", "var(--amber)"] : ["Available", "var(--green)"]; };
 
@@ -3519,7 +3525,15 @@ function ResourcesModule() {
             <Ic size={15} /> {l}
           </button>
         ))}
-        <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)", padding: "8px 0" }}><b style={{ color: "var(--txt)" }}>{filtered.length}</b> resource{filtered.length !== 1 ? "s" : ""}</span>
+        <div style={{ marginLeft: "auto", position: "relative", display: "flex", alignItems: "center" }}>
+          <Search size={14} style={{ position: "absolute", left: 10, color: "var(--txt3)", pointerEvents: "none" }} />
+          <input className="inp" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people…"
+            aria-label="Search resources"
+            style={{ width: 220, padding: "8px 28px 8px 30px", fontSize: 12.5 }} />
+          {q && <button onClick={() => setQ("")} title="Clear search" aria-label="Clear search"
+            style={{ position: "absolute", right: 8, background: "none", border: "none", cursor: "pointer", color: "var(--txt3)", display: "flex", padding: 0 }}><X size={14} /></button>}
+        </div>
+        <span style={{ fontSize: 12, color: "var(--txt2)", padding: "8px 0 8px 12px" }}><b style={{ color: "var(--txt)" }}>{filtered.length}</b> resource{filtered.length !== 1 ? "s" : ""}</span>
         {isAdmin && <Btn small icon={Plus} onClick={() => setResModal({ mode: "add" })} style={{ margin: "8px 0 8px 10px" }}>Add Resource</Btn>}
       </div>
 
