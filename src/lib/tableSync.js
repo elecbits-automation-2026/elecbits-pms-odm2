@@ -67,7 +67,8 @@ export function projectRow(p) {
     project_id: String(p.projectId || "").trim(),
     app_id: text(p.id),
     id_mode: text(p.idMode) || "auto",
-    origin: text(p.origin),
+    // The assistant path stamps `source`, the form stamps `origin`.
+    origin: text(p.origin ?? p.source),
     name: String(p.name || "").trim() || String(p.projectId || ""),
     // The wizard writes `desc`; only the assistant path ever writes
     // `description`. Reading one name silently produced null for every
@@ -84,6 +85,8 @@ export function projectRow(p) {
     linked_ids: arr(p.linkedIds).filter(Boolean).map(String),
     team: arr(p.team),
     known_status: text(p.knownStatus),
+    // Derived exactly as the app derives it, so `where sanctioned` works.
+    sanctioned: (text(p.status) || "Planning") !== "Planning",
     drive_learning: text(p.driveLearning),
     lld_customer: p.lldCustomer ?? null,
     lld_designer: p.lldDesigner ?? null,

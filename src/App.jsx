@@ -34,6 +34,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
 import { syncAll } from "./lib/tableSync.js";
+import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
@@ -4914,7 +4915,7 @@ function AssistantModule() {
     const proj = (pid) => findProject(live.projects, pid);
     switch (A) {
       case "create_project": {
-        const pid = String(a.projectId || "").trim() || `EB-${todayStr().slice(2, 4)}-${String(live.projects.length + 1).padStart(3, "0")}`;
+        const pid = (String(a.projectId || "").trim() || `EB-${todayStr().slice(2, 4)}-${String(live.projects.length + 1).padStart(3, "0")}`).replace(/[^A-Za-z0-9-]/g, "-");
         if (proj(pid)) return { line: `${pid} already exists — I left it as it is.` };
         const team = (a.team || []).map((t) => {
           const u = findPerson(users, t.name);
@@ -5710,27 +5711,119 @@ export default function App() {
     }
   }, []);
 
-  /* boot from persistent storage */
-  useEffect(() => { (async () => {
-    try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
-    try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
-    setBooted(true);
-  })(); }, []);
-  /* debounced save */
-  useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
-    try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
-    try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog: assistantLog.slice(-200).filter((m) => !m.confirm) })); } catch (e) { }
-    // Mirror the workspace out as real rows — one per project, scrum note,
-    // task, MoM, chat line and so on — so it can be queried, joined and
-    // permissioned. One-way and best-effort: the blob above is the source of
-    // truth, and a failure here (migrations not run yet, offline) must not
-    // disturb the save.
+  /* ── shared-workspace sync ─────────────────────────────────────────────────
+     With Supabase on, every save READS the server first and MERGES before
+     writing, and a 30-second poll merges other people's saves in. Nobody's
+     save can erase anybody else's work any more — the old behaviour wrote
+     this browser's whole copy over the blob, so the second person to save
+     silently destroyed the first person's.
+
+     knownRef  — ids this browser has confirmed on the server
+     baseRef   — each item as of the last sync, so an incoming change can be
+                 told apart from this browser's own unsaved edit
+     cloudOk   — false until the server has actually been read; while false,
+                 nothing is written, so a failed boot can't overwrite anyone */
+  const knownRef = useRef({});
+  const baseRef = useRef({});
+  const cloudOkRef = useRef(!supabaseEnabled);
+  const savingRef = useRef(false);
+  const cloudGet = useCallback(async (key) => {
+    // Straight to the table — window.storage falls back to localStorage on
+    // failure, and a stale local copy fed into the merge would read as "the
+    // server deleted these" and drop live rows.
+    const { data, error } = await supabase.from("app_kv").select("value").eq("key", key).maybeSingle();
+    if (error) throw error;
+    return data?.value ? JSON.parse(data.value) : null;
+  }, []);
+  const cloudSet = useCallback(async (key, value) => {
+    const { error } = await supabase.from("app_kv").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    try { localStorage.setItem(key, value); } catch (e) { }   // offline mirror
+  }, []);
+  const applyMerged = useCallback((st, names) => {
+    const S = { projects: setProjects, clients: setClients, notes: setNotes, tasks: setTasks,
+      kpiLog: setKpiLog, workUpdates: setWorkUpdates, trainings: setTrainings, memory: setMemory,
+      syncLog: setSyncLog, assistantLog: setAssistantLog, roster: setCustomRoster };
+    for (const n of names) if (S[n]) S[n](st[n]);
+  }, []);
+
+  /* boot from persistent storage — with Supabase on, wait for the session so
+     an RLS-blocked read can't come back "empty" and boot the app onto seeds */
+  const bootRan = useRef(false);
+  useEffect(() => { if (bootRan.current) return; if (supabaseEnabled && !session) return; bootRan.current = true; (async () => {
     if (supabaseEnabled) {
-      try {
-        await syncAll(supabase, { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, assistantLog });
-      } catch (e) { }
+      let sa = null, sb = null, ok = false;
+      for (let i = 0; i < 3 && !ok; i++) {
+        try { [sa, sb] = await Promise.all([cloudGet("pms-v1-a"), cloudGet("pms-v1-b")]); ok = true; }
+        catch (e) { await new Promise((r) => setTimeout(r, 800 * (i + 1))); }
+      }
+      if (ok) {
+        if (sa?.projects) setProjects(sa.projects); else setProjects([]);   // a real workspace never
+        if (sa?.clients) setClients(sa.clients); else setClients([]);       // starts on demo seeds
+        if (sa?.notes) setNotes(sa.notes); if (sa?.tasks) setTasks(sa.tasks);
+        if (sb?.kpiLog) setKpiLog(sb.kpiLog); if (sb?.workUpdates) setWorkUpdates(sb.workUpdates);
+        if (sb?.trainings) setTrainings(sb.trainings); if (sb?.memory) setMemory(sb.memory);
+        if (sb?.syncLog) setSyncLog(sb.syncLog); if (sb?.roster) setCustomRoster(sb.roster);
+        if (sb?.assistantLog) setAssistantLog(sb.assistantLog);
+        knownRef.current = idsOf(sa, sb); baseRef.current = baseOf(sa, sb);
+        cloudOkRef.current = true;
+      } else {
+        // Server unreadable: show the offline mirror, but write NOTHING until
+        // a later read succeeds — the poll below keeps trying.
+        try { const a = localStorage.getItem("pms-v1-a"); if (a) { const d = JSON.parse(a); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
+        try { const b = localStorage.getItem("pms-v1-b"); if (b) { const d = JSON.parse(b); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
+        toast("Couldn't reach the database — showing your last local copy, saving is paused", "amber");
+      }
+    } else {
+      try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
+      try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
     }
-  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster, assistantLog]);
+    setBooted(true);
+  })(); }, [session, cloudGet, toast]);
+
+  /* debounced save — merge first, then write, then mirror to real tables */
+  useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
+    const local = { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
+    if (supabaseEnabled) {
+      if (!cloudOkRef.current || savingRef.current) return;   // never write blind
+      savingRef.current = true;
+      try {
+        const [sa, sb] = await Promise.all([cloudGet("pms-v1-a"), cloudGet("pms-v1-b")]);
+        const res = mergeWorkspace(local, sa, sb, knownRef.current, baseRef.current);
+        if (res.changed.length) applyMerged(res.state, res.changed);
+        await cloudSet("pms-v1-a", JSON.stringify(blobA(res.state)));
+        await cloudSet("pms-v1-b", JSON.stringify(blobB(res.state)));
+        // Only after the server confirms the write — otherwise the next merge
+        // would treat rows the server never received as someone's deletions.
+        knownRef.current = res.serverIds; baseRef.current = res.baseAfter;
+        try { await syncAll(supabase, { ...res.state, assistantLog: (res.state.assistantLog || []).filter((m) => !m.confirm) }); } catch (e) { }
+      } catch (e) { /* unreadable/unwritable this cycle — state is intact, the next save retries */ }
+      finally { savingRef.current = false; }
+    } else {
+      try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
+      try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog: assistantLog.slice(-200).filter((m) => !m.confirm) })); } catch (e) { }
+    }
+  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster, assistantLog, cloudGet, cloudSet, applyMerged]);
+
+  /* the poll — other people's saves arrive without a reload */
+  const pollState = useRef(null);
+  pollState.current = { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
+  useEffect(() => {
+    if (!supabaseEnabled || !booted || !session) return;
+    const pull = async () => {
+      if (savingRef.current) return;
+      try {
+        const [sa, sb] = await Promise.all([cloudGet("pms-v1-a"), cloudGet("pms-v1-b")]);
+        const res = mergeWorkspace(pollState.current, sa, sb, knownRef.current, baseRef.current);
+        if (res.changed.length) applyMerged(res.state, res.changed);
+        knownRef.current = idsOf(sa, sb); baseRef.current = baseOf(sa, sb);
+        if (!cloudOkRef.current) { cloudOkRef.current = true; toast("Back online — saving again", "green"); }
+      } catch (e) { }
+    };
+    const iv = setInterval(pull, 30000);
+    window.addEventListener("focus", pull);
+    return () => { clearInterval(iv); window.removeEventListener("focus", pull); };
+  }, [booted, session, cloudGet, applyMerged, toast]);
   /* auth session (Supabase configured only) */
   useEffect(() => {
     if (!supabaseEnabled) return;
