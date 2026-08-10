@@ -8,17 +8,20 @@
    thing. The blob stays authoritative; this is a one-way mirror:
 
      App state ──► app_kv blob        (authoritative, unchanged)
-               └─► projects, scrum_notes, tasks, clients, moms,
-                   project_chat, project_intel, assistant_log,
-                   kpi_log, work_updates, trainings, memory,
-                   drive_sync_log     (a queryable copy)
+               └─► projects, clients, scrum_notes, tasks,
+                   moms + mom_ideas / mom_decisions / mom_challenges,
+                   messages (project chat AND the assistant, one table),
+                   project_intel, kpi_log, work_updates, trainings,
+                   memory, drive_sync_log      (a queryable copy)
 
    Nothing reads these rows back yet, which is exactly why it is safe to turn
    on: a failed write is invisible to the app and the next save repairs it.
 
-   Run supabase/projects-into-a-real-table.sql and
+   Run, in order:
+       supabase/projects-into-a-real-table.sql
        supabase/every-table-filled.sql
-   first. Without them each write fails harmlessly and the tables stay empty.
+       supabase/nested-data-into-tables.sql
+   Without them each write fails harmlessly and the tables stay empty.
 
    ── Two shape rules worth knowing ──
    • `app_id` is the app's own short id (`uid()`, 8 chars). It is the upsert
@@ -123,49 +126,99 @@ export const taskRow = (t) => ({
   created_at: at(t.createdAt),
 });
 
-/* Brainstorming sessions. Nested inside a project today, so invisible unless
-   you open that one project. */
+/* Brainstorming sessions. Nested inside a project today, so a decision taken
+   on 1752 is invisible unless you open 1752 and scroll.
+
+   The app's shape is { id, date, time, by, byName, attendees, raw, ai, at,
+   title, savedTo }, where `attendees` is a free-text string the user typed and
+   `ai` holds the analysis. The whole `ai` object is kept verbatim so nothing is
+   lost if its shape changes; the three lists worth querying across sessions
+   are also flattened into child rows below. */
 export const momRow = (m, projectId) => ({
   app_id: text(m.id),
   project_id: text(projectId),
+  date: date(m.date),
+  time: text(m.time),
+  at: at(m.at),
+  by_app_id: text(m.by),
+  by_id: fk(m.by),
+  by_name: text(m.byName),
+  attendees: text(m.attendees),
   title: text(m.title),
-  at: at(m.at || m.createdAt),
-  body: text(m.body || m.text || m.summary),
-  attendees: arr(m.attendees),
-  decisions: arr(m.decisions),
-  created_by: text(m.by || m.createdBy),
-  created_at: at(m.createdAt || m.at),
+  raw: String(m.raw || ""),
+  summary: text(m.ai?.summary),
+  saved_to: text(m.savedTo),
+  ai: m.ai ?? null,
+  created_at: at(m.at),
 });
 
-export const projectChatRow = (c, projectId) => ({
+/* `actions` and `lessons` are deliberately absent: the app already turns them
+   into rows in `tasks` and `memory`, so copying them here would give two
+   answers to one question. */
+export const momIdeaRows = (m) => arr(m.ai?.ideas).map((i, seq) => ({
+  seq,
+  by_name: text(i.by),
+  idea: text(i.idea),
+  impact: text(i.impact),
+  value: num(i.value),
+  why: text(i.why),
+}));
+
+export const momDecisionRows = (m) => arr(m.ai?.decisions).map((d, seq) => ({
+  seq, what: text(d.what), owner: text(d.owner),
+}));
+
+export const momChallengeRows = (m) => arr(m.ai?.challenges).map((c, seq) => ({
+  seq, problem: text(c.problem), status: text(c.status), solution: text(c.solution),
+}));
+
+/* Project chat and the assistant transcript are the same record, differing
+   only in whether a project is named. One table, one query, one place to
+   embed from later. */
+export const projectMessageRow = (c, projectId) => ({
   app_id: text(c.id),
+  scope: "project",
   project_id: text(projectId),
-  at: at(c.at || c.createdAt),
-  who: text(c.who),
-  author: text(c.author || c.name),
+  day: date(String(c.at || "").slice(0, 10)),
+  at: at(c.at),
+  time: text(c.time),
+  who: text(c.who) || "me",
+  by_app_id: text(c.by),
+  by_id: fk(c.by),
+  by_name: text(c.byName),
   text: text(c.text),
-  meta: obj(c.meta),
+  ok: typeof c.ok === "boolean" ? c.ok : null,
+  files: arr(c.files),
+  docs: arr(c.docs),
 });
 
+export const assistantMessageRow = (m) => ({
+  app_id: text(m.id),
+  scope: "assistant",
+  project_id: null,
+  day: date(m.date),
+  at: at(m.at || (m.date && m.time ? `${m.date}T${m.time}:00.000Z` : null)),
+  time: text(m.time),
+  who: text(m.who) || "me",
+  by_app_id: text(m.by),
+  by_id: fk(m.by),
+  by_name: text(m.byName),
+  text: text(m.text),
+  ok: typeof m.ok === "boolean" ? m.ok : null,
+  files: arr(m.files),
+  docs: arr(m.docs),
+});
+
+/* A note someone wrote, plus the AI-tidied version. Both are kept — `raw` is
+   what a person actually said, and that is the version worth embedding. */
 export const projectIntelRow = (i, projectId) => ({
   app_id: text(i.id),
   project_id: text(projectId),
-  at: at(i.at || i.createdAt),
-  kind: text(i.kind || i.type),
-  title: text(i.title),
-  body: text(i.body || i.text),
-  payload: obj(i.payload),
-});
-
-export const assistantLogRow = (m) => ({
-  app_id: text(m.id),
-  date: date(m.date),
-  at: at(m.at || m.createdAt),
-  who: text(m.who),
-  author: text(m.author || m.name),
-  text: text(m.text),
-  ok: typeof m.ok === "boolean" ? m.ok : null,
-  meta: obj(m.meta),
+  at: at(i.at),
+  by_app_id: text(i.by),
+  by_id: fk(i.by),
+  raw: text(i.raw),
+  text: text(i.text),
 });
 
 export const kpiRow = (k) => ({
@@ -265,24 +318,38 @@ export async function syncAll(sb, state = {}) {
   const projects = arr(state.projects).filter((p) => p && String(p.projectId || "").trim());
 
   // The three collections that live *inside* each project, flattened out so
-  // they can be asked about across the whole company.
-  const moms = [], chat = [], intel = [];
+  // they can be asked about across the whole company. A brainstorming session
+  // additionally fans out into its own child rows.
+  const moms = [], ideas = [], decisions = [], challenges = [], messages = [], intel = [];
   for (const p of projects) {
     const pid = String(p.projectId).trim();
-    for (const m of arr(p.moms)) moms.push(momRow(m, pid));
-    for (const c of arr(p.chat)) chat.push(projectChatRow(c, pid));
+    for (const m of arr(p.moms)) {
+      if (!m?.id) continue;
+      moms.push(momRow(m, pid));
+      // '<mom>:<seq>' is the child key — see nested-data-into-tables.sql. It is
+      // what lets the children use the same upsert-and-prune path as every
+      // other table instead of a bespoke one.
+      for (const r of momIdeaRows(m))      ideas.push({ app_id: `${m.id}:${r.seq}`, mom_app_id: m.id, ...r });
+      for (const r of momDecisionRows(m))  decisions.push({ app_id: `${m.id}:${r.seq}`, mom_app_id: m.id, ...r });
+      for (const r of momChallengeRows(m)) challenges.push({ app_id: `${m.id}:${r.seq}`, mom_app_id: m.id, ...r });
+    }
+    for (const c of arr(p.chat)) messages.push(projectMessageRow(c, pid));
     for (const i of arr(p.intelligence)) intel.push(projectIntelRow(i, pid));
   }
+  for (const m of arr(state.assistantLog)) messages.push(assistantMessageRow(m));
 
   const jobs = [
     ["projects", projects.map(projectRow), "project_id"],
     ["clients", arr(state.clients).map(clientRow), "app_id"],
     ["scrum_notes", arr(state.notes).map(scrumNoteRow), "app_id"],
     ["tasks", arr(state.tasks).map(taskRow), "app_id"],
+    // moms before its children, so the foreign key has something to point at.
     ["moms", moms, "app_id"],
-    ["project_chat", chat, "app_id"],
+    ["mom_ideas", ideas, "app_id"],
+    ["mom_decisions", decisions, "app_id"],
+    ["mom_challenges", challenges, "app_id"],
+    ["messages", messages, "app_id"],
     ["project_intel", intel, "app_id"],
-    ["assistant_log", arr(state.assistantLog).map(assistantLogRow), "app_id"],
     ["kpi_log", arr(state.kpiLog).map(kpiRow), "app_id"],
     ["work_updates", arr(state.workUpdates).map(workUpdateRow), "app_id"],
     ["trainings", arr(state.trainings).map(trainingRow), "app_id"],
