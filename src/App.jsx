@@ -32,7 +32,7 @@ import {
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
-import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
+import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
@@ -1365,6 +1365,14 @@ const Field = ({ label, children, req, hint }) => (
 /* A password field you can look at. Typing a password you cannot see is how
    "wrong password" happens; the eye is a peek, not a setting, so it starts
    hidden every time and never persists. */
+/* A password an admin can read out over a call: no 0/O or 1/l/I lookalikes. */
+const genPassword = () => {
+  const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const buf = new Uint32Array(14);
+  crypto.getRandomValues(buf);
+  return [...buf].map((n) => chars[n % chars.length]).join("");
+};
+
 const PasswordInput = ({ value, onChange, onEnter, placeholder = "••••••••", autoComplete = "current-password", autoFocus }) => {
   const [show, setShow] = useState(false);
   return (
@@ -3670,7 +3678,10 @@ const UNIQ_RR = (users) => [...new Set(users.map((u) => u.resourceRole).filter(B
    name, email, department, grouped role/function, login type, role-based
    skills, project type, live preview; edit mode adds a confirmed Remove. */
 function ResourceModal({ mode, user, onClose }) {
-  const { users, addUser, updateUser, removeUser } = useCtx();
+  const { users, addUser, updateUser, removeUser, provisionLogin, toast } = useCtx();
+  const [pwd, setPwd] = useState("");
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [pwdErr, setPwdErr] = useState("");
   const editing = mode === "edit";
   const [name, setName] = useState(user?.name || "");
   const [email, setEmail] = useState(user?.email || "");
@@ -3699,8 +3710,9 @@ function ResourceModal({ mode, user, onClose }) {
     : !emailShapeOk(addr) ? "That doesn't look like an email address."
     : taken ? `${taken.name} is already on the roster with this email.` : "";
 
-  const save = () => {
-    if (!name.trim() || emailProblem) return;
+  const save = async () => {
+    if (!name.trim() || emailProblem || pwdBusy) return;
+    if (pwd && pwd.length < 8) { setPwdErr("At least 8 characters — or leave it blank and they sign up themselves."); return; }
     const u = {
       id: user?.id || uuid(), name: name.trim(), email: addr,
       role: login, title: info?.label ? (ROLE_TITLE[rr] || info.label) : "Team",
@@ -3708,7 +3720,15 @@ function ResourceModal({ mode, user, onClose }) {
       maxProjects: info?.cap || 3, color: user?.color || _PALETTE[users.length % _PALETTE.length],
     };
     if (editing) updateUser(u); else addUser(u);
-    onClose();
+    if (!pwd) { onClose(); return; }
+    // The roster entry is saved either way; the login is a second, separate
+    // step, and a failure keeps the modal open so it can be retried.
+    setPwdBusy(true); setPwdErr("");
+    const res = await provisionLogin(addr, pwd, name.trim());
+    setPwdBusy(false);
+    if (res === "") { toast(`Login ready — ${addr} can sign in now`, "green"); onClose(); }
+    else if (res === "reset") { toast(`Password reset — ${addr} signs in with the new one`, "green"); onClose(); }
+    else setPwdErr(res);
   };
   return (
     <Modal title={editing ? `Edit ${user?.name}` : "Add New Resource"} onClose={onClose} width={560}
@@ -3723,7 +3743,7 @@ function ResourceModal({ mode, user, onClose }) {
           <Btn small kind="ghost" icon={Trash2} style={{ marginRight: "auto", color: "var(--red)", borderColor: "color-mix(in srgb, var(--red) 40%, transparent)" }} onClick={() => setConfirmDel(true)}>Remove</Btn>
         ))}
         <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn kind="green" icon={CheckCircle2} disabled={!name.trim() || !!emailProblem} onClick={save}>{editing ? "Save changes" : "Add Resource"}</Btn>
+        <Btn kind="green" icon={CheckCircle2} disabled={!name.trim() || !!emailProblem || pwdBusy} onClick={save}>{pwdBusy ? "Creating login…" : editing ? "Save changes" : "Add Resource"}</Btn>
       </>}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <Field label="Full name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Raj Patel" /></Field>
@@ -3764,6 +3784,22 @@ function ResourceModal({ mode, user, onClose }) {
             </select>
           </Field>
         </div>
+        {supabaseEnabled && (
+          <Field label={editing ? "Reset their password (optional)" : "Set their password (optional)"}>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <div style={{ flex: 1 }}>
+                <PasswordInput value={pwd} onChange={(v) => { setPwd(v); setPwdErr(""); }} placeholder="leave blank — they sign up themselves" autoComplete="new-password" />
+              </div>
+              <Btn small kind="ghost" onClick={() => { setPwd(genPassword()); setPwdErr(""); }} title="Generate a strong password">Generate</Btn>
+            </div>
+            {pwdErr
+              ? <span style={{ fontSize: 11, color: "var(--red)", fontWeight: 600, marginTop: 5, display: "block", lineHeight: 1.5 }}>{pwdErr}</span>
+              : <span style={{ fontSize: 11, color: "var(--txt3)", marginTop: 5, display: "block", lineHeight: 1.5 }}>
+                  With a password set, their account works the moment you save — share it with them and they sign in at this URL.
+                  {pwd ? " Copy it now; it is not shown again." : ""}
+                </span>}
+          </Field>
+        )}
         <Field label="Skills — based on selected role">
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {(info?.skills || []).map((s) => <button key={s} style={chipS(skills.includes(s))} onClick={() => toggleSkill(s)}>{s}</button>)}
@@ -5892,6 +5928,34 @@ export default function App() {
     }
     return error;
   };
+  /* Create (or reset) a real login for a roster entry, from the Add Resource
+     form. The heavy lifting happens in the `admin-users` Edge Function — a
+     password can only be set with the service-role key, which never reaches
+     the browser. Returns "" on a fresh login, "reset" when an existing one had
+     its password replaced, or a human-readable error. */
+  const ADMIN_USERS_URL = import.meta.env.VITE_ADMIN_USERS_URL || (supabaseUrl ? `${supabaseUrl}/functions/v1/admin-users` : "");
+  const provisionLogin = useCallback(async (email, password, name) => {
+    if (!supabaseEnabled) return "Logins need Supabase configured — in demo mode there is nothing to sign in to.";
+    try {
+      const s = await getSession();
+      if (!s?.access_token) return "Your own session has expired — sign in again first.";
+      const r = await fetch(ADMIN_USERS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: supabaseAnonKey, Authorization: `Bearer ${s.access_token}` },
+        body: JSON.stringify({ email, password, name }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        return d.error || (r.status === 404
+          ? "The admin-users function isn't deployed yet — deploy supabase/functions/admin-users in Supabase (and set VITE_ADMIN_USERS_URL if you name it differently)."
+          : `Couldn't create the login (${r.status}).`);
+      }
+      return d.created ? "" : "reset";
+    } catch (e) {
+      return "Couldn't reach the login service — check the connection and try again.";
+    }
+  }, [ADMIN_USERS_URL]);
+
   const addUser = useCallback(async (u) => {
     applyRoster((rs) => [...rs, u]);
     const err = await dbProfileUpsert(u);
@@ -5911,7 +5975,7 @@ export default function App() {
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
-  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser };
+  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
   const visGroups = NAV_GROUPS
     .map(([title, items]) => [title, items.filter((n) => !n.admin || isAdmin)])
     .filter(([, items]) => items.length);

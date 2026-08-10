@@ -49,6 +49,7 @@ if (url && anonKey) {
 }
 
 export const supabase = client;
+export const supabaseAnonKey = anonKey;
 export const supabaseEnabled = Boolean(client);
 export const supabaseInitError = initError;
 
