@@ -69,6 +69,10 @@ export function projectRow(p) {
     drive_learning: text(p.driveLearning),
     lld_customer: p.lldCustomer ?? null,
     lld_designer: p.lldDesigner ?? null,
+    // One object per project, not a list, so it lives on the project itself.
+    drive_analysis: text(p.driveAnalysis?.text),
+    drive_analysis_at: text(p.driveAnalysis?.at),
+    drive_analysis_live: typeof p.driveAnalysis?.live === "boolean" ? p.driveAnalysis.live : null,
     created_by: fk(p.createdBy),
     created_at: at(p.createdAt),
   };
@@ -117,6 +121,7 @@ export const taskRow = (t) => ({
   stage_id: text(t.stageId),
   note_app_id: text(t.noteId),
   parent_task_app_id: text(t.parentTaskId),
+  mom_app_id: text(t.momId),
   work: obj(t.work),
   ai_verification: t.aiVerification ?? null,
   escalated: t.escalated ?? null,
@@ -260,6 +265,7 @@ export const memoryRow = (m) => ({
   type: text(m.type) || "note",
   title: text(m.title),
   content: text(m.content),
+  file_name: text(m.fileName),
   created_by: text(m.createdBy),
   created_at: at(m.createdAt),
   // `embedding` is left alone. schema.sql already gives this table a
@@ -273,6 +279,21 @@ export const syncLogRow = (s) => ({
   detail: text(s.detail),
   at: at(s.at),
 });
+
+/* Who is on a project. Also held as jsonb on `projects.team`, which is what
+   the app reads; these rows are the joinable form, so "what is Jerom on" is a
+   query rather than a scan of every project's jsonb. Keyed '<project>:<slot>'
+   because a person occupies one slot per project. */
+export const teamRows = (p) => arr(p.team)
+  .filter((r) => r && r.userId)
+  .map((r) => ({
+    app_id: `${p.projectId}:${r.slot}`,
+    project_app_id: text(p.id),
+    project_id: null,          // uuid FK; the app's project id is not a uuid
+    user_app_id: text(r.userId),
+    user_id: fk(r.userId),
+    slot: String(r.slot || ""),
+  }));
 
 /* ── the mirror ───────────────────────────────────────────────────────────── */
 
@@ -340,6 +361,7 @@ export async function syncAll(sb, state = {}) {
 
   const jobs = [
     ["projects", projects.map(projectRow), "project_id"],
+    ["team_assignments", projects.flatMap(teamRows), "app_id"],
     ["clients", arr(state.clients).map(clientRow), "app_id"],
     ["scrum_notes", arr(state.notes).map(scrumNoteRow), "app_id"],
     ["tasks", arr(state.tasks).map(taskRow), "app_id"],

@@ -2335,7 +2335,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           id: uid(), projectId: p.projectId, linked: true, title: a.title, assigneeId: u?.id || "",
           date: a.due || todayStr(), startTime: nowHM(),
           endTime: new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
-          steps: [], conditions: [], status: "pending", origin: "mom", createdBy: me, createdAt: at, work: {},
+          steps: [], conditions: [], status: "pending", origin: "mom", momId: entry.id, createdBy: me, createdAt: at, work: {},
           stageId: guessStageId(pRef.current.plan?.stages || [], { title: a.title, date: a.due || todayStr() }),
         });
       }
