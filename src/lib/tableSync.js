@@ -43,7 +43,22 @@ const text = (v) => (v == null || v === "" ? null : String(v));
 const at = (v) => text(v) || new Date().toISOString();
 const arr = (v) => (Array.isArray(v) ? v : []);
 const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+/* Number(null), Number(""), Number(false) and Number([]) are all 0, so a
+   plain Number() check turns "no score" into a real zero. When Claude is
+   unreachable the app stores score: null and shows "unscored" — recording 0
+   would manufacture a damning performance record out of a backend outage. */
+/* Build a real instant from a UTC day + a local clock time. */
+const localToIso = (day, hm) => {
+  if (!date(day) || !/^\d{2}:\d{2}$/.test(String(hm || ""))) return null;
+  const [h, mi] = String(hm).split(":").map(Number);
+  const d = new Date(`${day}T00:00:00`);      // local midnight of that day
+  d.setHours(h, mi, 0, 0);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+const num = (v) => (v === null || v === undefined || v === "" || typeof v === "boolean" || Array.isArray(v)
+  || !Number.isFinite(Number(v)) ? null : Number(v));
+/* Integer columns reject 3.5. A model asked for 1-5 sometimes answers 3.5. */
+const int = (v) => { const n = num(v); return n === null ? null : Math.round(n); };
 
 /* ── row builders ─────────────────────────────────────────────────────────── */
 
@@ -54,7 +69,10 @@ export function projectRow(p) {
     id_mode: text(p.idMode) || "auto",
     origin: text(p.origin),
     name: String(p.name || "").trim() || String(p.projectId || ""),
-    description: text(p.description),
+    // The wizard writes `desc`; only the assistant path ever writes
+    // `description`. Reading one name silently produced null for every
+    // project created through the UI.
+    description: text(p.desc ?? p.description),
     client_name: text(p.clientName),
     client_id: text(p.clientId),
     industry: text(p.industry),
@@ -73,6 +91,12 @@ export function projectRow(p) {
     drive_analysis: text(p.driveAnalysis?.text),
     drive_analysis_at: text(p.driveAnalysis?.at),
     drive_analysis_live: typeof p.driveAnalysis?.live === "boolean" ? p.driveAnalysis.live : null,
+    // One plan per project, so its own fields sit on the project; its stages
+    // become rows (see stageRows).
+    plan_summary: text(p.plan?.summary),
+    plan_updated_at: text(p.plan?.updatedAt),
+    plan_source: text(p.plan?.source),
+    plan_log: arr(p.plan?.log),
     created_by: fk(p.createdBy),
     created_at: at(p.createdAt),
   };
@@ -91,7 +115,7 @@ export const clientRow = (c) => ({
 export const scrumNoteRow = (n) => ({
   app_id: text(n.id),
   date: date(n.date),
-  note_no: num(n.noteNo),
+  note_no: int(n.noteNo),
   time: text(n.time),
   raw: text(n.raw),
   organized: n.organized ?? null,
@@ -109,7 +133,10 @@ export const taskRow = (t) => ({
   title: String(t.title || "").trim() || "(untitled)",
   assignee_id: fk(t.assigneeId),
   assignee_app_id: text(t.assigneeId),
-  assignee_name: text(t.assignee),
+  // The app writes `assigneeName`; `assignee` is only ever a transient field
+  // injected for stage matching. Reading the wrong one meant this column was
+  // always null.
+  assignee_name: text(t.assigneeName ?? t.assignee),
   date: date(t.date),
   start_time: text(t.startTime),
   end_time: text(t.endTime),
@@ -125,6 +152,12 @@ export const taskRow = (t) => ({
   work: obj(t.work),
   ai_verification: t.aiVerification ?? null,
   escalated: t.escalated ?? null,
+  // None of these appear in any task constructor — they are written by later
+  // partial updates as work progresses, which is how they were missed.
+  started_at: text(t.startedAt),
+  steps_done: arr(t.stepsDone),
+  block_note: text(t.blockNote),
+  last_feedback: text(t.lastFeedback),
   created_by: fk(t.createdBy),
   created_by_app_id: text(t.createdBy),
   completed_at: text(t.completedAt),
@@ -165,7 +198,7 @@ export const momIdeaRows = (m) => arr(m.ai?.ideas).map((i, seq) => ({
   by_name: text(i.by),
   idea: text(i.idea),
   impact: text(i.impact),
-  value: num(i.value),
+  value: int(i.value),
   why: text(i.why),
 }));
 
@@ -195,6 +228,7 @@ export const projectMessageRow = (c, projectId) => ({
   ok: typeof c.ok === "boolean" ? c.ok : null,
   files: arr(c.files),
   docs: arr(c.docs),
+  doc: c.doc ?? null,
 });
 
 export const assistantMessageRow = (m) => ({
@@ -202,7 +236,11 @@ export const assistantMessageRow = (m) => ({
   scope: "assistant",
   project_id: null,
   day: date(m.date),
-  at: at(m.at || (m.date && m.time ? `${m.date}T${m.time}:00.000Z` : null)),
+  // `date` is a UTC day but `time` is local wall-clock (App.jsx todayStr /
+  // nowHM), so concatenating them with a literal Z was wrong by the whole UTC
+  // offset — 5.5 hours in IST. Assistant and project messages share one table
+  // and are ordered by `at`, so that mis-stamp interleaved them wrongly.
+  at: at(m.at || localToIso(m.date, m.time)),
   time: text(m.time),
   who: text(m.who) || "me",
   by_app_id: text(m.by),
@@ -212,6 +250,8 @@ export const assistantMessageRow = (m) => ({
   ok: typeof m.ok === "boolean" ? m.ok : null,
   files: arr(m.files),
   docs: arr(m.docs),
+  // who === 'doc' messages carry the document the assistant produced.
+  doc: m.doc ?? null,
 });
 
 /* A note someone wrote, plus the AI-tidied version. Both are kept — `raw` is
@@ -241,10 +281,12 @@ export const workUpdateRow = (w) => ({
   user_app_id: text(w.userId),
   date: date(w.date),
   note: text(w.note),
-  score: num(w.score),
+  score: int(w.score),
   feedback: text(w.feedback),
   kpi_hits: arr(w.kpiHits),
-  created_at: at(w.createdAt),
+  // The app stamps `at`, never `createdAt`.
+  at: text(w.at),
+  created_at: at(w.at || w.createdAt),
 });
 
 export const trainingRow = (t) => ({
@@ -257,7 +299,8 @@ export const trainingRow = (t) => ({
   status: text(t.status) || "Assigned",
   assigned_by: fk(t.assignedBy),
   assigned_by_app_id: text(t.assignedBy),
-  created_at: at(t.createdAt),
+  at: text(t.at),
+  created_at: at(t.at || t.createdAt),
 });
 
 export const memoryRow = (m) => ({
@@ -268,6 +311,7 @@ export const memoryRow = (m) => ({
   file_name: text(m.fileName),
   created_by: text(m.createdBy),
   created_at: at(m.createdAt),
+  updated_at: text(m.updatedAt),
   // `embedding` is left alone. schema.sql already gives this table a
   // vector(1536) column and an ivfflat index; nothing computes embeddings yet,
   // so writing null here would be wrong — the column is simply not mentioned.
@@ -279,6 +323,29 @@ export const syncLogRow = (s) => ({
   detail: text(s.detail),
   at: at(s.at),
 });
+
+/* The stages a project's plan is broken into — and what every task's
+   `stage_id` actually points at. Without these rows that column is a dangling
+   reference: you can group by 'design' but nothing tells you its name, its
+   order, its owner or whether it is done.
+
+   `start` and `end` are renamed on the way out; `end` is a reserved word. */
+export const stageRows = (p) => arr(p.plan?.stages)
+  .filter((st) => st && st.id)
+  .map((st, seq) => ({
+    app_id: `${p.projectId}:${st.id}`,
+    project_id: String(p.projectId),
+    stage_id: String(st.id),
+    seq,
+    name: text(st.name),
+    status: text(st.status),
+    track: text(st.track),
+    start_on: date(st.start),
+    end_on: date(st.end),
+    owner_name: text(st.owner),
+    note: text(st.note),
+    evidence: arr(st.evidence),
+  }));
 
 /* Who is on a project. Also held as jsonb on `projects.team`, which is what
    the app reads; these rows are the joinable form, so "what is Jerom on" is a
@@ -297,10 +364,35 @@ export const teamRows = (p) => arr(p.team)
 
 /* ── the mirror ───────────────────────────────────────────────────────────── */
 
-const quoted = (v) => `"${String(v).replace(/"/g, '""')}"`;
+/* PostgREST parses a quoted list element with BACKSLASH escapes, not doubled
+   quotes. Getting this wrong is not cosmetic: a value ending in a backslash
+   escapes its own closing quote and swallows the rest of the list. */
+const quoted = (v) => `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
-/* Upsert `rows` into `table` on `key`, then delete anything in the table that
-   is no longer present. Never throws. */
+/* What this browser wrote last time, per table. The prune below deletes only
+   keys that WE wrote and have since removed — never "everything that is not
+   in my copy".
+
+   That distinction is the whole safety story:
+
+   • On the first save after a reload this is empty, so nothing is deleted. A
+     boot that silently came up on seed data — which happens when the blob read
+     returns no rows rather than an error — can no longer wipe the database.
+   • "Reset to seed data" is a local action again, not one that destroys the
+     shared mirror for the whole company.
+   • Two people with the app open no longer delete each other's rows on every
+     save. Each prunes only what it personally removed.
+   • The delete filter now lists only the removed keys, not every surviving
+     one, so it cannot outgrow the URL length limit at ~1,000 rows.
+
+   The trade is stale rows: a deletion made in another browser is not mirrored
+   until this one also sees it. Stale beats destroyed. */
+const lastWrote = new Map();
+
+const DELETE_CHUNK = 100;
+
+/* Upsert `rows` into `table`, then delete only the keys this browser wrote
+   before and no longer has. Never throws for a reason the caller can ignore. */
 async function mirror(sb, table, rows, key) {
   const seen = new Set();
   const unique = rows.filter((r) => {
@@ -315,13 +407,17 @@ async function mirror(sb, table, rows, key) {
     if (error) throw new Error(`${table}: ${error.message}`);
   }
 
-  // PostgREST has no "delete where not in (empty list)", so the two cases are
-  // written separately rather than building a filter that matches nothing.
-  const del = unique.length
-    ? sb.from(table).delete().not(key, "in", `(${unique.map((r) => quoted(r[key])).join(",")})`)
-    : sb.from(table).delete().not(key, "is", null);
-  const { error } = await del;
-  if (error) throw new Error(`${table}: ${error.message}`);
+  const before = lastWrote.get(table);
+  const gone = before ? [...before].filter((k) => !seen.has(k)) : [];
+  for (let i = 0; i < gone.length; i += DELETE_CHUNK) {
+    const batch = gone.slice(i, i + DELETE_CHUNK);
+    const { error } = await sb.from(table).delete()
+      .in(key, batch);
+    if (error) throw new Error(`${table}: ${error.message}`);
+  }
+  // Only recorded once the writes have actually landed, so a failed save does
+  // not make us forget rows we are still responsible for.
+  lastWrote.set(table, seen);
 
   return unique.length;
 }
@@ -362,6 +458,7 @@ export async function syncAll(sb, state = {}) {
   const jobs = [
     ["projects", projects.map(projectRow), "project_id"],
     ["team_assignments", projects.flatMap(teamRows), "app_id"],
+    ["project_stages", projects.flatMap(stageRows), "app_id"],
     ["clients", arr(state.clients).map(clientRow), "app_id"],
     ["scrum_notes", arr(state.notes).map(scrumNoteRow), "app_id"],
     ["tasks", arr(state.tasks).map(taskRow), "app_id"],
