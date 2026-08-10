@@ -33,6 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseInitError } from "./lib/supabase.js";
+import { syncAll } from "./lib/tableSync.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
@@ -5719,6 +5720,16 @@ export default function App() {
   useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
     try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
     try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog: assistantLog.slice(-200).filter((m) => !m.confirm) })); } catch (e) { }
+    // Mirror the workspace out as real rows — one per project, scrum note,
+    // task, MoM, chat line and so on — so it can be queried, joined and
+    // permissioned. One-way and best-effort: the blob above is the source of
+    // truth, and a failure here (migrations not run yet, offline) must not
+    // disturb the save.
+    if (supabaseEnabled) {
+      try {
+        await syncAll(supabase, { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, assistantLog });
+      } catch (e) { }
+    }
   }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster, assistantLog]);
   /* auth session (Supabase configured only) */
   useEffect(() => {
