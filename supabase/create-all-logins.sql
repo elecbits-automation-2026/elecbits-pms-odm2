@@ -73,13 +73,15 @@ begin
     );
 
     -- GoTrue needs an identities row for email/password sign-in to work.
+    -- auth.identities.email is a GENERATED column in Supabase (derived from
+    -- identity_data->>'email'), so it is not written directly.
     insert into auth.identities (
-      provider_id, user_id, identity_data, provider, email,
+      provider_id, user_id, identity_data, provider,
       last_sign_in_at, created_at, updated_at
     ) values (
       uid, uid,
       jsonb_build_object('sub', uid::text, 'email', lower(r.email), 'email_verified', true),
-      'email', lower(r.email), now(), now(), now()
+      'email', now(), now(), now()
     );
 
     -- Link the roster entry to this login.
