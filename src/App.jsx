@@ -5575,6 +5575,18 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
 
   const netErr = (m) => /failed to fetch|networkerror|load failed|fetch/i.test(m);
 
+  /* Supabase throws several shapes, and some carry no usable `message` at
+     all — those used to reach the screen as a bare "{}" or "[object Object]",
+     which tells a person nothing. Dig for a real sentence; if there isn't one,
+     say the most likely thing instead of showing them punctuation. */
+  const errText = (e, fallback) => {
+    const raw = [e?.message, e?.error_description, e?.msg, e?.error?.message,
+                 e?.error_message, typeof e === "string" ? e : ""]
+      .map((x) => String(x || "").trim())
+      .find((x) => x && x !== "{}" && x !== "[object Object]" && !/^[{[]/.test(x));
+    return raw || fallback;
+  };
+
   const submit = async () => {
     if (demo) { onDemoLogin("u-admin"); return; }
     const addr = email.trim().toLowerCase();
@@ -5583,7 +5595,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
     try {
       await signIn(addr, pw);                       // onAuthChange takes it from here
     } catch (e) {
-      const m = e?.message || "Sign-in failed";
+      const m = errText(e, "Sign-in failed");
       if (netErr(m)) {
         setErr("Can't reach Supabase. Check VITE_SUPABASE_URL is your exact project URL, the project isn't paused, and a VPN or ad-blocker isn't blocking supabase.co.");
       } else if (/invalid login credentials|email not confirmed/i.test(m)) {
@@ -5599,7 +5611,7 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
             setMsg(`Account created for ${addr}. Check that inbox for a confirmation link, then press Continue again — your password is still filled in.`);
           }
         } catch (e2) {
-          const m2 = e2?.message || m;
+          const m2 = errText(e2, m);
           // The workspace is invite-only and this email is not on the roster.
           if (/not_invited|database error saving new user|unexpected_failure/i.test(m2))
             setErr(`${addr} isn't on the team roster, so there's no account to make. Ask a project manager to add you under Resources, then sign in with this same email.`);
@@ -5607,7 +5619,15 @@ function Login({ dark, onToggleTheme, demo, onDemoLogin, recovery, onNewPassword
           else if (/valid email|invalid/i.test(m2)) setErr("That doesn't look like an email address.");
           else if (/rate|too many/i.test(m2)) setErr("Too many attempts just now. Wait a minute and try again.");
           else if (/signups? not allowed|disabled/i.test(m2)) setErr("New accounts are switched off for this workspace. Ask an admin to add you.");
-          else { setWrongPw(true); setErr(m2); }
+          else {
+            setWrongPw(true);
+            // Getting here means sign-in failed AND sign-up failed for a reason
+            // we can't name. By far the commonest cause is a wrong password on
+            // an account that already exists — say that, not the raw error.
+            setErr(/^(sign-in failed|unknown)/i.test(m2)
+              ? "That password doesn't match this email. Try again, or send yourself a reset link."
+              : m2);
+          }
         }
       } else if (/rate|too many/i.test(m)) {
         setErr("Too many attempts just now. Wait a minute and try again.");
