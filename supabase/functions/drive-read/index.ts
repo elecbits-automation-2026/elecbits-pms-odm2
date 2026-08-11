@@ -547,6 +547,48 @@ async function createFolder(token: string, parentId: string, name: string): Prom
   return await res.json() as GFile;
 }
 
+/* ── Managing a file that already exists ─────────────────────────────────────
+   Uploading was only half the job: "rename that" and "delete that" were dead
+   ends, and being told to go and do it in Drive by hand defeats the point of
+   asking. Both are one PATCH; the work is FINDING the file the person means.
+
+   `trash` moves the file to Drive's bin rather than deleting it outright. It
+   disappears from the folder either way, but a wrong guess about which file
+   was meant stays recoverable for 30 days instead of being gone. Nothing here
+   should be able to destroy work on a misread instruction.                   */
+
+/* Find one file by name inside a folder. Exact match wins; otherwise a unique
+   partial match, so "the LLD" finds "Eb-21-EL-287-01-1846 - LLD.docx". An
+   ambiguous name returns every candidate so the caller can ask which. */
+async function findFileIn(token: string, folderId: string, name: string): Promise<{ hit: GFile | null; candidates: GFile[] }> {
+  const kids = (await listChildren(token, folderId))
+    .filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
+  const want = norm(name);
+  const exact = kids.find((f) => norm(f.name) === want);
+  if (exact) return { hit: exact, candidates: [] };
+  const partial = kids.filter((f) => norm(f.name).includes(want) || want.includes(norm(f.name)));
+  if (partial.length === 1) return { hit: partial[0], candidates: [] };
+  return { hit: null, candidates: partial.length ? partial : kids.slice(0, 12) };
+}
+
+async function renameFile(token: string, fileId: string, newName: string): Promise<void> {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: newName }),
+  });
+  if (!res.ok) throw new Error(`rename failed: ${(await res.text()).slice(0, 200)}`);
+}
+
+async function trashFile(token: string, fileId: string): Promise<void> {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ trashed: true }),
+  });
+  if (!res.ok) throw new Error(`could not move to bin: ${(await res.text()).slice(0, 200)}`);
+}
+
 async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
@@ -587,7 +629,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string; newName?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -596,7 +638,8 @@ Deno.serve(async (req) => {
   // ODM folder") as long as there is something to search for — it used to be a
   // flat 400.
   // browsing needs neither a project nor a search term — the folder IS the ask
-  if (!needles.length && !String(body.search || "").trim() && body.action !== "write" && body.action !== "list") {
+  if (!needles.length && !String(body.search || "").trim()
+      && !["write", "list", "rename", "trash"].includes(String(body.action || ""))) {
     return json({ ok: true, digest: "", note: "no project or search term given" });
   }
 
@@ -699,6 +742,61 @@ Deno.serve(async (req) => {
       }
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
+    }
+
+    // ── rename / trash: { action:"rename"|"trash", projectId | folderPath,
+    //                      fileName, newName? } ──
+    if (body.action === "rename" || body.action === "trash") {
+      if (!body.fileName) return json({ error: "Tell me which file — its name." }, 400);
+      if (body.action === "rename" && !String(body.newName || "").trim()) {
+        return json({ error: "Tell me what to rename it to." }, 400);
+      }
+
+      // Same folder resolution as writing, so "rename the file you just saved"
+      // looks exactly where the file was just saved.
+      let folder: GFile | null = null;
+      let where = "";
+      const rawPath2 = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+      if (rawPath2) {
+        const { node, walked, missing } = await walkPath(rawPath2, false);
+        if (!node) return json({ error: `I couldn't open "${missing}" under /${walked.join("/")}/` }, 404);
+        folder = node; where = `/${walked.join("/")}/`;
+      } else {
+        const br2 = await resolveBranches(token);
+        let best2 = 9;
+        for (const root of searchOrder(br2, String(body.scope || "pm"))) {
+          if (outOfTime()) break;
+          const { hits, rank } = await findFolderUnder(token, root, String(body.projectId), root.id === br2.top?.id ? 4 : 2);
+          if (hits.length && rank < best2) { best2 = rank; folder = hits[0]; }
+          if (best2 === 0) break;
+        }
+        if (!folder) { const f = await findFolders(token, String(body.projectId)); folder = f[0] || null; }
+        if (!folder) {
+          return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — share it (Editor) with ${SA_EMAIL}` }, 404);
+        }
+        where = folder.name;
+      }
+
+      const { hit, candidates } = await findFileIn(token, folder.id, String(body.fileName));
+      if (!hit) {
+        // Naming the near-misses turns a dead end into one more question.
+        return json({
+          error: candidates.length
+            ? `I couldn't pin down "${body.fileName}" in ${where}. Did you mean: ${candidates.map((c) => c.name).join(", ")}?`
+            : `There's no file called "${body.fileName}" in ${where}.`,
+          candidates: candidates.map((c) => c.name),
+        }, 404);
+      }
+
+      if (body.action === "rename") {
+        const to = String(body.newName).trim();
+        await renameFile(token, hit.id, to);
+        return json({ ok: true, fileId: hit.id, from: hit.name, to, folder: where, savedAs: actingAs || "" });
+      }
+      await trashFile(token, hit.id);
+      // "Bin", not "deleted": it is recoverable for 30 days and saying so is
+      // the difference between a reversible action and a frightening one.
+      return json({ ok: true, fileId: hit.id, trashed: hit.name, folder: where, recoverable: true, savedAs: actingAs || "" });
     }
 
     // PMs look in Project Management first, engineers in PCB & Firmware —

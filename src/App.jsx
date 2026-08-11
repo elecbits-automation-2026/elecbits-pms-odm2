@@ -323,6 +323,34 @@ async function userJwt() {
   try { const s = await getSession(); return s?.access_token || ""; } catch { return ""; }
 }
 
+/* Rename or bin a file that is already in Drive. Uploading was only half the
+   job — "rename that" used to be a dead end that sent people to Drive to do
+   it by hand. `trash` goes to the bin, not oblivion: recoverable for 30 days,
+   because a misread instruction should never destroy work. */
+async function driveManageFile(action, { projectId, folderPath, fileName, newName, scope }) {
+  if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
+  if (!fileName) return "Tell me which file.";
+  const ctrl = new AbortController();
+  const bail = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action, projectId: projectId || "", folderPath: folderPath || "",
+        fileName, newName: newName || "", token: DRIVE_READ_TOKEN, userJwt: await userJwt(), scope: scope || "pm" }),
+    });
+    const d = await res.json().catch(() => ({}));
+    noteServiceAccount(d);
+    if (res.ok && d.ok) return d;
+    // The reader names the near-misses when a file name is ambiguous; passing
+    // that straight through turns a dead end into one more question.
+    return d.error || `Drive said no (${res.status}).`;
+  } catch (e) {
+    return e?.name === "AbortError" ? "Drive took too long to answer." : "Couldn't reach Drive.";
+  } finally { clearTimeout(bail); }
+}
+
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
   if ((!projectId && !opts.folderPath) || !fileName) return "I need somewhere to put it and a file name.";
@@ -466,6 +494,8 @@ const stepLabel = (name, input) => {
   switch (name) {
     case "read_drive": return `Looking in Drive${i.projectId ? ` at ${i.projectId}` : i.search ? ` for "${String(i.search).slice(0, 40)}"` : ""}…`;
     case "write_drive_file": return `Writing ${i.fileName} into ${i.folderPath || i.projectId}…`;
+    case "rename_drive_file": return `Renaming ${i.fileName} → ${i.newName}…`;
+    case "trash_drive_file": return `Moving ${i.fileName} to the bin…`;
     case "save_attachment": return `Filing ${i.name} into ${i.projectId}…`;
     case "list_projects": return "Checking the project list…";
     case "list_folder": return `Opening ${i.folderPath || "Eb-02-ODM"} in Drive…`;
@@ -526,6 +556,10 @@ const WORKSPACE_TOOLS = [
     { folderPath: str("the folder to open, e.g. 'Eb-02-ODM', 'Eb-02-ODM/Eb-ODM Execution', or 'Project Management/Eb-09-ML-432-01-1752'. Empty means the top of Eb-02-ODM.") }),
   tool("write_drive_file", "Write a file anywhere in the company Drive. Give a projectId for a project folder, or a folderPath to put it somewhere else entirely — any folder under Eb-02-ODM. Folders in the path that do not exist are created.",
     { projectId: str("a project's folder"), folderPath: str("where to put it instead, e.g. 'Eb-02-ODM/Templates' or 'Eb-ODM Execution/Engineering Services/Shared'"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["fileName", "content"]),
+  tool("rename_drive_file", "Rename a file that is already in Drive. Say which project folder (or folderPath) it is in, its current name, and the new name.",
+    { projectId: str("the project folder it is in"), folderPath: str("or an explicit folder path instead"), fileName: str("its current name — a partial name is fine if unambiguous"), newName: str("the new name, including the extension") }, ["fileName", "newName"]),
+  tool("trash_drive_file", "Move a Drive file to the bin. It leaves the folder but stays recoverable for 30 days. Use when asked to delete or remove a file.",
+    { projectId: str("the project folder it is in"), folderPath: str("or an explicit folder path instead"), fileName: str("its name — a partial name is fine if unambiguous") }, ["fileName"]),
   tool("save_attachment", "File something the user attached into a project's Drive folder, exactly as they sent it.",
     { name: str("the attached file's name"), projectId: str("which project's folder") }, ["name", "projectId"]),
   tool("list_projects", "The full project list with status, deadline, client, team and linked board ids. Cheap — call it whenever you need to be sure.", {}),
@@ -893,6 +927,7 @@ WHAT YOU CAN REACH
 NEVER INVENT A LIMIT
 If you are not sure whether you can do something, TRY IT. The tool will tell you, and its answer is the truth. Do not reason from what you imagine the system allows, do not describe permissions or policies you have not been told about, and never say something is "locked down" or "how the system was built" — you do not know that. "I tried and it refused, here is what it said" is always better than a guess about the rules.
 
+You can also RENAME a Drive file (rename_drive_file) and move one to the bin (trash_drive_file — recoverable for 30 days). Never tell anyone you cannot rename or delete a file in Drive; do it.
 You can write anywhere in the company Drive, not only into project folders: give write_drive_file or create_doc a folderPath and missing folders are created on the way.
 ${SERVICE_ACCOUNT
   ? `When a folder needs sharing, the address to share it with is EXACTLY ${SERVICE_ACCOUNT} — use that string verbatim.`
@@ -5193,6 +5228,27 @@ function AssistantModule() {
           line: saveResult(r, fileName, where),
           doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: r === true ? where : "" },
         };
+      }
+      case "rename_drive_file": {
+        const p = proj(a.projectId);
+        const r = await driveManageFile("rename", {
+          projectId: a.folderPath ? "" : (p?.projectId || a.projectId), folderPath: a.folderPath || "",
+          fileName: String(a.fileName || ""), newName: String(a.newName || "").replace(/[\\/:*?"<>|]/g, "-"),
+          scope: driveScope(my?.role),
+        });
+        if (typeof r === "string") return { ok: false, line: r };
+        if (p) sheetSync(`${pmPath(p.projectId)}`, `${r.from} renamed to ${r.to}`);
+        return { ok: true, line: `Renamed "${r.from}" to "${r.to}" in ${r.folder}.` };
+      }
+      case "trash_drive_file": {
+        const p = proj(a.projectId);
+        const r = await driveManageFile("trash", {
+          projectId: a.folderPath ? "" : (p?.projectId || a.projectId), folderPath: a.folderPath || "",
+          fileName: String(a.fileName || ""), scope: driveScope(my?.role),
+        });
+        if (typeof r === "string") return { ok: false, line: r };
+        if (p) sheetSync(`${pmPath(p.projectId)}`, `${r.trashed} moved to the Drive bin`);
+        return { ok: true, line: `Moved "${r.trashed}" to the Drive bin from ${r.folder}. It's recoverable there for 30 days.` };
       }
       case "create_doc": {
         const fileName = String(a.fileName || (a.title ? `${String(a.title).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.md` : "document.md")).replace(/[\\/:*?"<>|]/g, "-");
