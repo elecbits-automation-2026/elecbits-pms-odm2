@@ -547,15 +547,14 @@ async function createFolder(token: string, parentId: string, name: string): Prom
   return await res.json() as GFile;
 }
 
-/* ── Managing a file that already exists ─────────────────────────────────────
-   Uploading was only half the job: "rename that" and "delete that" were dead
-   ends, and being told to go and do it in Drive by hand defeats the point of
-   asking. Both are one PATCH; the work is FINDING the file the person means.
+/* ── Renaming a file that already exists ─────────────────────────────────────
+   Uploading was only half the job: "rename that" was a dead end, and being
+   told to go and do it in Drive by hand defeats the point of asking. The
+   rename itself is one PATCH; the work is FINDING the file the person means.
 
-   `trash` moves the file to Drive's bin rather than deleting it outright. It
-   disappears from the folder either way, but a wrong guess about which file
-   was meant stays recoverable for 30 days instead of being gone. Nothing here
-   should be able to destroy work on a misread instruction.                   */
+   Deletion is deliberately absent. Nothing reachable from a chat message
+   should be able to remove a file from Drive on a misread instruction — that
+   stays a deliberate act, done by a person, in Drive.                        */
 
 /* Find one file by name inside a folder. Exact match wins; otherwise a unique
    partial match, so "the LLD" finds "Eb-21-EL-287-01-1846 - LLD.docx". An
@@ -578,15 +577,6 @@ async function renameFile(token: string, fileId: string, newName: string): Promi
     body: JSON.stringify({ name: newName }),
   });
   if (!res.ok) throw new Error(`rename failed: ${(await res.text()).slice(0, 200)}`);
-}
-
-async function trashFile(token: string, fileId: string): Promise<void> {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
-    method: "PATCH",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ trashed: true }),
-  });
-  if (!res.ok) throw new Error(`could not move to bin: ${(await res.text()).slice(0, 200)}`);
 }
 
 async function writeFile(token: string, folderId: string, name: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
@@ -639,7 +629,7 @@ Deno.serve(async (req) => {
   // flat 400.
   // browsing needs neither a project nor a search term — the folder IS the ask
   if (!needles.length && !String(body.search || "").trim()
-      && !["write", "list", "rename", "trash"].includes(String(body.action || ""))) {
+      && !["write", "list", "rename"].includes(String(body.action || ""))) {
     return json({ ok: true, digest: "", note: "no project or search term given" });
   }
 
@@ -744,11 +734,10 @@ Deno.serve(async (req) => {
       return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
     }
 
-    // ── rename / trash: { action:"rename"|"trash", projectId | folderPath,
-    //                      fileName, newName? } ──
-    if (body.action === "rename" || body.action === "trash") {
+    // ── rename: { action:"rename", projectId | folderPath, fileName, newName } ──
+    if (body.action === "rename") {
       if (!body.fileName) return json({ error: "Tell me which file — its name." }, 400);
-      if (body.action === "rename" && !String(body.newName || "").trim()) {
+      if (!String(body.newName || "").trim()) {
         return json({ error: "Tell me what to rename it to." }, 400);
       }
 
@@ -788,15 +777,9 @@ Deno.serve(async (req) => {
         }, 404);
       }
 
-      if (body.action === "rename") {
-        const to = String(body.newName).trim();
-        await renameFile(token, hit.id, to);
-        return json({ ok: true, fileId: hit.id, from: hit.name, to, folder: where, savedAs: actingAs || "" });
-      }
-      await trashFile(token, hit.id);
-      // "Bin", not "deleted": it is recoverable for 30 days and saying so is
-      // the difference between a reversible action and a frightening one.
-      return json({ ok: true, fileId: hit.id, trashed: hit.name, folder: where, recoverable: true, savedAs: actingAs || "" });
+      const to = String(body.newName).trim();
+      await renameFile(token, hit.id, to);
+      return json({ ok: true, fileId: hit.id, from: hit.name, to, folder: where, savedAs: actingAs || "" });
     }
 
     // PMs look in Project Management first, engineers in PCB & Firmware —
