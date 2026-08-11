@@ -203,6 +203,13 @@ const AI_MODEL = import.meta.env.VITE_CLAUDE_MODEL || "claude-sonnet-4-5";
 const DRIVE_SYNC_URL = import.meta.env.VITE_DRIVE_SYNC_URL || "";
 const DRIVE_READ_URL = import.meta.env.VITE_DRIVE_READ_URL || "";
 const DRIVE_READ_TOKEN = import.meta.env.VITE_DRIVE_READ_TOKEN || "";
+/* The Drive reader reports which service account it runs as. Remembering it
+   means the assistant can answer "who do I share the folder with?" with the
+   real address instead of inventing a plausible one — an invented address
+   sends somebody to Drive to share a folder with nobody. */
+let SERVICE_ACCOUNT = "";
+const noteServiceAccount = (d) => { if (d?.serviceAccount) SERVICE_ACCOUNT = String(d.serviceAccount); };
+export const serviceAccountEmail = () => SERVICE_ACCOUNT;
 /* Fetch the real contents of the project's Drive folders. Works with either
    backend: the drive-read Supabase Edge Function (service account) or the
    Google Apps Script web app (runs as you — no service-account key needed).
@@ -251,6 +258,7 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
     // there is nothing to show. Say which of the three reasons it is instead
     // of shrugging. `root` only comes back from the current reader, so its
     // absence is itself the diagnosis.
+    noteServiceAccount(data);
     if (!String(data.digest || "").trim()) {
       const stale = !("root" in data);
       return {
@@ -258,7 +266,7 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
         error: stale
           ? "The Drive reader running on the server is an older build that can't search — redeploy supabase/functions/drive-read and try again."
           : !data.root
-            ? `I reached Drive but couldn't find ${DRIVE_CHAIN} — the service account can't see that folder. Share it with the service-account address (Editor) and try again.`
+            ? `I reached Drive but couldn't find ${DRIVE_CHAIN} — the service account can't see that folder. Share it (Editor) with ${SERVICE_ACCOUNT || "the service-account address shown in Supabase → Edge Functions → rapid-service → Secrets"} and try again.`
             : "",
         searchedRoot: data.root || "",
       };
@@ -886,6 +894,9 @@ NEVER INVENT A LIMIT
 If you are not sure whether you can do something, TRY IT. The tool will tell you, and its answer is the truth. Do not reason from what you imagine the system allows, do not describe permissions or policies you have not been told about, and never say something is "locked down" or "how the system was built" — you do not know that. "I tried and it refused, here is what it said" is always better than a guess about the rules.
 
 You can write anywhere in the company Drive, not only into project folders: give write_drive_file or create_doc a folderPath and missing folders are created on the way.
+${SERVICE_ACCOUNT
+  ? `When a folder needs sharing, the address to share it with is EXACTLY ${SERVICE_ACCOUNT} — use that string verbatim.`
+  : "If somebody asks which address to share a Drive folder with, say you do not have it in front of you and point them at Google Cloud Console → IAM & Admin → Service Accounts. NEVER invent an address that looks like one: a made-up address sends them to share a folder with nobody."}
 
 THE RULES ARE YOURS TO CHANGE
 System Memory below is the standing rulebook for this workspace — how things are named, what must happen before a review, anything this team has decided. It is data, not code. When somebody tells you a way of working has changed, change it: add_memory for a new rule, update_memory to reword one, delete_memory when it no longer applies. Read them back with list_memory. Never tell anyone a rule can only be changed by an admin or "on the backend" — you are how it gets changed. Where a rule here conflicts with your own defaults, the rule wins.

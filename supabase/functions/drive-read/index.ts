@@ -23,8 +23,12 @@ const cors = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+/* The service-account address is an identifier, not a credential: it is what
+   you add to a Drive folder's share list. Returning it on every response is
+   what stops the assistant from having to invent it when someone asks "who do
+   I share this with?" — and an invented one sends people down a dead end. */
 const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
+  new Response(JSON.stringify(typeof body === "object" && body ? { serviceAccount: SA_EMAIL, ...body } : body), { status, headers: { ...cors, "content-type": "application/json" } });
 
 const b64url = (data: ArrayBuffer | string) => {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
@@ -691,7 +695,7 @@ Deno.serve(async (req) => {
       }
       if (!folders.length) folders = await findFolders(token, String(body.projectId));
       if (!folders.length) {
-        return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — check the folder is shared with the service account` }, 404);
+        return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — share that folder (Editor) with ${SA_EMAIL}`, serviceAccount: SA_EMAIL }, 404);
       }
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
