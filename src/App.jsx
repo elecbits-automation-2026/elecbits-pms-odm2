@@ -231,7 +231,7 @@ async function driveReadDigest(projectId, linkedIds, opts = {}) {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       // scope picks which branch to look in first; search tells the reader what
       // to hunt for inside the folder, since file names are never consistent.
-      body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN, scope: opts.scope || "pm", search: opts.search || "" }),
+      body: JSON.stringify({ projectId, linkedIds: linkedIds || [], token: DRIVE_READ_TOKEN, userJwt: await userJwt(), scope: opts.scope || "pm", search: opts.search || "" }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -290,7 +290,7 @@ async function driveListFolder(folderPath) {
     const res = await fetch(DRIVE_READ_URL, {
       method: "POST", signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "list", folderPath: folderPath || "", token: DRIVE_READ_TOKEN }),
+      body: JSON.stringify({ action: "list", folderPath: folderPath || "", token: DRIVE_READ_TOKEN, userJwt: await userJwt() }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
@@ -303,6 +303,16 @@ async function driveListFolder(folderPath) {
   } catch (e) {
     return { listing: "", error: e?.name === "AbortError" ? "Drive took too long to answer." : "Drive isn't reachable right now." };
   } finally { clearTimeout(bail); }
+}
+
+/* The signed-in person's Supabase access token. Sent with Drive calls so the
+   function can create files AS THEM — owned by them, their name on "Last
+   modified by" — instead of as one shared robot account. It travels in the
+   body rather than a header on purpose: the request is text/plain so it needs
+   no CORS preflight, and the token is verified server-side either way. */
+async function userJwt() {
+  if (!supabaseEnabled) return "";
+  try { const s = await getSession(); return s?.access_token || ""; } catch { return ""; }
 }
 
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
@@ -318,7 +328,7 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
       method: "POST",
       signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, userJwt: await userJwt(), ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.ok) return true;

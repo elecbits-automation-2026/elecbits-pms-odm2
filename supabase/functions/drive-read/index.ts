@@ -87,14 +87,72 @@ const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
         odm@elecbits.in). The service account then acts as them and files are
         owned by them, on their quota. Needs domain-wide delegation switched
         on for this service account, with the drive scope.                   */
-const IMPERSONATE = (Deno.env.get("GOOGLE_IMPERSONATE_USER") ?? "").trim();
+const IMPERSONATE = (Deno.env.get("GOOGLE_IMPERSONATE_USER") ?? "").trim().toLowerCase();
 
-async function getAccessToken(): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
+/* ── Who gets the credit for an upload ───────────────────────────────────────
+   With domain-wide delegation the service account can act as ANY user in the
+   Workspace, so a file can be created as the person who actually uploaded it:
+   they own it, it counts against their quota, and Drive shows their name in
+   "Owner" and "Last modified by" instead of one shared robot account.
+
+   The identity is taken from the caller's SUPABASE ACCESS TOKEN, verified
+   against Supabase on every request. It is never read from a field the browser
+   supplies — otherwise anyone could impersonate anyone in the domain and write
+   anywhere in Drive. A verified token is the only thing that grants it.
+
+   Only addresses in the Workspace domain can be impersonated (Google would
+   refuse anything else anyway). A contractor on a personal address, or a call
+   with no token at all, falls back to GOOGLE_IMPERSONATE_USER.               */
+// `||`, not `??`: an env var that is SET BUT EMPTY is unset in every way that
+// matters here, and `??` would keep the empty string — silently disabling
+// per-person attribution with no error to notice.
+const WORKSPACE_DOMAIN = ((Deno.env.get("GOOGLE_WORKSPACE_DOMAIN") || "").trim()
+  || IMPERSONATE.split("@")[1] || "").toLowerCase();
+const SUPABASE_URL = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/+$/, "");
+const SUPABASE_ANON = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+
+async function callerEmail(req: Request, bodyJwt?: string): Promise<string> {
+  const hdr = req.headers.get("authorization") ?? "";
+  // Header when the client can send one; body otherwise — the app posts
+  // text/plain on purpose to avoid a CORS preflight, and both are equally safe
+  // because the token is verified server-side either way.
+  const jwt = /^bearer /i.test(hdr) ? hdr.slice(7).trim() : String(bodyJwt ?? "").trim();
+  if (!jwt || !SUPABASE_URL || !SUPABASE_ANON) return "";
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: SUPABASE_ANON, authorization: `Bearer ${jwt}` },
+    });
+    if (!r.ok) return "";
+    const u = await r.json();
+    return String(u?.email ?? "").trim().toLowerCase();
+  } catch { return ""; }
+}
+
+/* Which address this request should act as. */
+function subjectFor(email: string): string {
+  if (email && WORKSPACE_DOMAIN && email.endsWith("@" + WORKSPACE_DOMAIN)) return email;
+  return IMPERSONATE;
+}
+
+/* One access token per impersonated subject, reused until it is nearly stale.
+   Without this every request re-mints and re-exchanges a JWT. */
+const tokenCache = new Map<string, { token: string; exp: number }>();
+/* Subjects Google has refused to let us impersonate (delegation not granted,
+   account suspended, not in the domain). Remembered so one bad address does
+   not cost a failed round-trip on every single request. */
+const noDelegation = new Set<string>();
+
+async function getAccessToken(subject = IMPERSONATE): Promise<string> {
+  const sub = noDelegation.has(subject) ? IMPERSONATE : subject;
+  const nowMs = Date.now();
+  const hit = tokenCache.get(sub);
+  if (hit && hit.exp > nowMs + 60_000) return hit.token;
+
+  const now = Math.floor(nowMs / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = b64url(JSON.stringify({
     iss: SA_EMAIL,
-    ...(IMPERSONATE ? { sub: IMPERSONATE } : {}),
+    ...(sub ? { sub } : {}),
     scope: DRIVE_SCOPE,
     aud: "https://oauth2.googleapis.com/token",
     iat: now, exp: now + 3600,
@@ -109,8 +167,18 @@ async function getAccessToken(): Promise<string> {
     body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(`token exchange failed: ${JSON.stringify(data)}`);
-  return data.access_token as string;
+  if (!res.ok) {
+    // Delegation refused for THIS person: remember it and fall back to the
+    // shared account rather than failing the upload outright.
+    if (sub && sub !== IMPERSONATE) {
+      noDelegation.add(sub);
+      return getAccessToken(IMPERSONATE);
+    }
+    throw new Error(`token exchange failed: ${JSON.stringify(data)}`);
+  }
+  const token = data.access_token as string;
+  tokenCache.set(sub, { token, exp: nowMs + (Number(data.expires_in ?? 3600) * 1000) });
+  return token;
 }
 
 type GFile = { id: string; name: string; mimeType: string; modifiedTime?: string; size?: string; parents?: string[]; webViewLink?: string };
@@ -515,7 +583,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -532,8 +600,12 @@ Deno.serve(async (req) => {
   kidsCache = new Map();
   deadline = Date.now() + BUDGET_MS;
 
+  // Act as the signed-in person when we can, so uploads carry their name.
+  const who = await callerEmail(req, body.userJwt);
+  const actingAs = subjectFor(who);
+
   try {
-    const token = await getAccessToken();
+    const token = await getAccessToken(actingAs);
 
     /* Walk a slash-separated path down from Eb-02-ODM. `make` creates the
        folders that are missing; without it a missing folder just stops the
@@ -603,7 +675,7 @@ Deno.serve(async (req) => {
         const { node, walked, missing } = await walkPath(rawPath, true);
         if (!node) return json({ error: `I couldn't open or create "${missing}" under /${walked.join("/")}/` }, 502);
         const fid = await writeFile(token, node.id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
-        return json({ ok: true, fileId: fid, folder: node.name, path: `/${walked.join("/")}/` });
+        return json({ ok: true, fileId: fid, folder: node.name, path: `/${walked.join("/")}/`, savedAs: actingAs || "" });
       }
 
       // Same address, and the same best-match rule, as the read side — so a
@@ -622,7 +694,7 @@ Deno.serve(async (req) => {
         return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — check the folder is shared with the service account` }, 404);
       }
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
-      return json({ ok: true, fileId: id, folder: folders[0].name });
+      return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
     }
 
     // PMs look in Project Management first, engineers in PCB & Firmware —
