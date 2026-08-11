@@ -629,7 +629,7 @@ Deno.serve(async (req) => {
   // flat 400.
   // browsing needs neither a project nor a search term — the folder IS the ask
   if (!needles.length && !String(body.search || "").trim()
-      && !["write", "list", "rename"].includes(String(body.action || ""))) {
+      && !["write", "list", "rename", "read_file"].includes(String(body.action || ""))) {
     return json({ ok: true, digest: "", note: "no project or search term given" });
   }
 
@@ -734,6 +734,59 @@ Deno.serve(async (req) => {
       return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
     }
 
+    /* Where a file-level action should look: an explicit path, else the
+       project's folder, found the same way writing finds it — so "rename the
+       file you just saved" looks exactly where it was just saved. */
+    const locateFolder = async (b: typeof body, tk: string): Promise<{ folder: GFile; where: string } | { error: string }> => {
+      const raw = String(b.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+      if (raw) {
+        const { node, walked, missing } = await walkPath(raw, false);
+        if (!node) return { error: `I couldn't open "${missing}" under /${walked.join("/")}/` };
+        return { folder: node, where: `/${walked.join("/")}/` };
+      }
+      const br = await resolveBranches(tk);
+      let pick: GFile | null = null, best = 9;
+      for (const root of searchOrder(br, String(b.scope || "pm"))) {
+        if (outOfTime()) break;
+        const { hits, rank } = await findFolderUnder(tk, root, String(b.projectId), root.id === br.top?.id ? 4 : 2);
+        if (hits.length && rank < best) { best = rank; pick = hits[0]; }
+        if (best === 0) break;
+      }
+      if (!pick) pick = (await findFolders(tk, String(b.projectId)))[0] || null;
+      if (!pick) return { error: `I couldn't find a folder called ${b.projectId} anywhere under ${ROOT_PATH} — share it (Editor) with ${SA_EMAIL}` };
+      return { folder: pick, where: pick.name };
+    };
+
+    // ── read_file: { action:"read_file", projectId | folderPath, fileName } ──
+    // The digest gives ~1800 characters per file, which is right for "what is
+    // in this folder" and useless for "change the third paragraph". This
+    // returns one file whole, so editing can be a real read-then-write rather
+    // than a guess.
+    if (body.action === "read_file") {
+      if (!body.fileName) return json({ error: "Tell me which file to read." }, 400);
+      const f = await locateFolder(body, token);
+      if ("error" in f) return json({ error: f.error }, 404);
+      const { hit, candidates } = await findFileIn(token, f.folder.id, String(body.fileName));
+      if (!hit) {
+        return json({
+          error: candidates.length
+            ? `I couldn't pin down "${body.fileName}" in ${f.where}. Did you mean: ${candidates.map((c) => c.name).join(", ")}?`
+            : `There's no file called "${body.fileName}" in ${f.where}.`,
+          candidates: candidates.map((c) => c.name),
+        }, 404);
+      }
+      const text = await extractText(token, hit, 100_000);
+      // Whether the same bytes can be written BACK is a different question
+      // from whether they can be read, and the caller needs to know which.
+      const editable = /^text\/|json|csv/.test(hit.mimeType || "")
+        || hit.mimeType === "application/vnd.google-apps.document";
+      return json({
+        ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: f.where,
+        text, editable,
+        note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
+      });
+    }
+
     // ── rename: { action:"rename", projectId | folderPath, fileName, newName } ──
     if (body.action === "rename") {
       if (!body.fileName) return json({ error: "Tell me which file — its name." }, 400);
@@ -741,30 +794,9 @@ Deno.serve(async (req) => {
         return json({ error: "Tell me what to rename it to." }, 400);
       }
 
-      // Same folder resolution as writing, so "rename the file you just saved"
-      // looks exactly where the file was just saved.
-      let folder: GFile | null = null;
-      let where = "";
-      const rawPath2 = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
-      if (rawPath2) {
-        const { node, walked, missing } = await walkPath(rawPath2, false);
-        if (!node) return json({ error: `I couldn't open "${missing}" under /${walked.join("/")}/` }, 404);
-        folder = node; where = `/${walked.join("/")}/`;
-      } else {
-        const br2 = await resolveBranches(token);
-        let best2 = 9;
-        for (const root of searchOrder(br2, String(body.scope || "pm"))) {
-          if (outOfTime()) break;
-          const { hits, rank } = await findFolderUnder(token, root, String(body.projectId), root.id === br2.top?.id ? 4 : 2);
-          if (hits.length && rank < best2) { best2 = rank; folder = hits[0]; }
-          if (best2 === 0) break;
-        }
-        if (!folder) { const f = await findFolders(token, String(body.projectId)); folder = f[0] || null; }
-        if (!folder) {
-          return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — share it (Editor) with ${SA_EMAIL}` }, 404);
-        }
-        where = folder.name;
-      }
+      const loc = await locateFolder(body, token);
+      if ("error" in loc) return json({ error: loc.error }, 404);
+      const folder = loc.folder, where = loc.where;
 
       const { hit, candidates } = await findFileIn(token, folder.id, String(body.fileName));
       if (!hit) {

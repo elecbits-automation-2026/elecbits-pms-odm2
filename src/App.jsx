@@ -328,6 +328,11 @@ async function userJwt() {
    hand. Deletion is deliberately not offered here: removing a file stays a
    deliberate act done by a person in Drive, not something a chat message can
    trigger. */
+async function driveReadFile({ projectId, folderPath, fileName, scope }) {
+  const r = await driveManageFile("read_file", { projectId, folderPath, fileName, scope });
+  return r;
+}
+
 async function driveManageFile(action, { projectId, folderPath, fileName, newName, scope }) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
   if (!fileName) return "Tell me which file.";
@@ -495,6 +500,7 @@ const stepLabel = (name, input) => {
   switch (name) {
     case "read_drive": return `Looking in Drive${i.projectId ? ` at ${i.projectId}` : i.search ? ` for "${String(i.search).slice(0, 40)}"` : ""}…`;
     case "write_drive_file": return `Writing ${i.fileName} into ${i.folderPath || i.projectId}…`;
+    case "read_file": return `Reading ${i.fileName}…`;
     case "rename_drive_file": return `Renaming ${i.fileName} → ${i.newName}…`;
     case "save_attachment": return `Filing ${i.name} into ${i.projectId}…`;
     case "list_projects": return "Checking the project list…";
@@ -556,6 +562,8 @@ const WORKSPACE_TOOLS = [
     { folderPath: str("the folder to open, e.g. 'Eb-02-ODM', 'Eb-02-ODM/Eb-ODM Execution', or 'Project Management/Eb-09-ML-432-01-1752'. Empty means the top of Eb-02-ODM.") }),
   tool("write_drive_file", "Write a file anywhere in the company Drive. Give a projectId for a project folder, or a folderPath to put it somewhere else entirely — any folder under Eb-02-ODM. Folders in the path that do not exist are created.",
     { projectId: str("a project's folder"), folderPath: str("where to put it instead, e.g. 'Eb-02-ODM/Templates' or 'Eb-ODM Execution/Engineering Services/Shared'"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["fileName", "content"]),
+  tool("read_file", "Read ONE Drive file in full — the whole text, not the folder digest. Use this before editing a file, or whenever you need its actual contents rather than a summary.",
+    { projectId: str("the project folder it is in"), folderPath: str("or an explicit folder path instead"), fileName: str("its name — a partial name is fine if unambiguous") }, ["fileName"]),
   tool("rename_drive_file", "Rename a file that is already in Drive. Say which project folder (or folderPath) it is in, its current name, and the new name.",
     { projectId: str("the project folder it is in"), folderPath: str("or an explicit folder path instead"), fileName: str("its current name — a partial name is fine if unambiguous"), newName: str("the new name, including the extension") }, ["fileName", "newName"]),
   tool("save_attachment", "File something the user attached into a project's Drive folder, exactly as they sent it.",
@@ -926,6 +934,8 @@ NEVER INVENT A LIMIT
 If you are not sure whether you can do something, TRY IT. The tool will tell you, and its answer is the truth. Do not reason from what you imagine the system allows, do not describe permissions or policies you have not been told about, and never say something is "locked down" or "how the system was built" — you do not know that. "I tried and it refused, here is what it said" is always better than a guess about the rules.
 
 You can RENAME a Drive file (rename_drive_file) — never tell anyone you cannot rename a file; do it.
+EDITING a Drive file: read_file gives you one file's full text. For a TEXT file (.md, .txt, .csv, or a Google Doc) you can then edit it properly — write_drive_file with the SAME name replaces it, so the change lands in the original file, not a copy. Do that when asked to edit one; do not offer a "fresh copy" instead.
+For a .docx, .xlsx, .pptx or .pdf you can READ the text but cannot write that format back. Say exactly that in one line, and offer the two real options: they edit it in Drive, or you save the revised text as a new .md file alongside. Never imply a copy is the same as editing the original.
 Deleting files is deliberately NOT something you can do. If asked, say so plainly and in one line — the person deletes it in Drive themselves. Do not apologise at length, and do not offer a workaround that quietly amounts to deleting it.
 You can write anywhere in the company Drive, not only into project folders: give write_drive_file or create_doc a folderPath and missing folders are created on the way.
 ${SERVICE_ACCOUNT
@@ -5228,6 +5238,22 @@ function AssistantModule() {
           doc: { title: a.title || fileName, fileName, content: content.slice(0, 12000), savedTo: r === true ? where : "" },
         };
       }
+      case "read_file": {
+        const p = proj(a.projectId);
+        const r = await driveReadFile({
+          projectId: a.folderPath ? "" : (p?.projectId || a.projectId), folderPath: a.folderPath || "",
+          fileName: String(a.fileName || ""), scope: driveScope(my?.role),
+        });
+        if (typeof r === "string") return { ok: false, line: r };
+        return {
+          ok: true,
+          line: `Read ${r.fileName} (${String(r.text || "").length} characters).`,
+          // The model needs the text itself, and it needs to know whether the
+          // same format can be written back — reading a .docx does not mean
+          // it can save one.
+          data: `FILE ${r.fileName} in ${r.folder}\nEDITABLE IN PLACE: ${r.editable ? "yes" : "no"}${r.note ? " — " + r.note : ""}\n"""${String(r.text || "").slice(0, 60000)}"""`,
+        };
+      }
       case "rename_drive_file": {
         const p = proj(a.projectId);
         const r = await driveManageFile("rename", {
@@ -5296,7 +5322,7 @@ function AssistantModule() {
     // What actually changed, kept so the person sees a record and not only the
     // model's summary of itself. Reads are not changes and are left out.
     const changed = []; let anyFailed = false;
-    const READS = new Set(["read_drive", "list_projects"]);
+    const READS = new Set(["read_drive", "list_projects", "read_file", "list_folder"]);
 
     /* One tool call. Everything the model should see next comes back as text;
        side effects on the workspace happen here. */
@@ -5319,6 +5345,10 @@ function AssistantModule() {
         if (r.ok === false) anyFailed = true;
       }
       if (r.drive) return `Drive contents:\n${r.drive}`;
+      // A read that fetched real content has to hand the CONTENT back, not the
+      // one-line summary — the summary is for the person watching, the content
+      // is what the model needs in order to act on it.
+      if (r.data) return r.data;
       return r.line || (r.ok === false ? "That did not work." : "Done.");
     };
 
