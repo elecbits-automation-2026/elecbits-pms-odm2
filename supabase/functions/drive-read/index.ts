@@ -647,28 +647,31 @@ Deno.serve(async (req) => {
     /* Walk a slash-separated path down from Eb-02-ODM. `make` creates the
        folders that are missing; without it a missing folder just stops the
        walk and the caller is told how far it got. */
+    /* `last` is the deepest folder that DID exist when a walk dies — the
+       caller uses it to say what's actually in there instead of a bare 404. */
     const walkPath = async (rawPath: string, make: boolean) => {
       const parts = rawPath.split("/").map((x) => x.trim()).filter(Boolean);
       const top = await searchFolders(token, ROOT_CHAIN[0]);
       let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
-      if (!node) return { node: null, walked: [] as string[], missing: ROOT_CHAIN[0] };
+      if (!node) return { node: null, walked: [] as string[], missing: ROOT_CHAIN[0], last: null as GFile | null };
       const walked: string[] = [ROOT_CHAIN[0]];
       // a path that does not start at the top is taken from Engineering Services
       if (parts.length && norm(parts[0]) === norm(ROOT_CHAIN[0])) parts.shift();
       else if (parts.length) {
         for (let i = 1; node && i < ROOT_CHAIN.length; i++) {
-          node = await childFolder(token, node.id, ROOT_CHAIN[i]);
-          if (node) walked.push(node.name);
+          const next = await childFolder(token, node.id, ROOT_CHAIN[i]);
+          if (next) { node = next; walked.push(next.name); } else { node = null; }
         }
-        if (!node) return { node: null, walked, missing: ROOT_CHAIN.join("/") };
+        if (!node) return { node: null, walked, missing: ROOT_CHAIN.join("/"), last: null as GFile | null };
       }
       for (const part of parts) {
         const kid: GFile | null = await childFolder(token, node!.id, part);
-        node = kid || (make ? await createFolder(token, node!.id, part) : null);
-        if (!node) return { node: null, walked, missing: part };
+        const found = kid || (make ? await createFolder(token, node!.id, part) : null);
+        if (!found) return { node: null, walked, missing: part, last: node };
+        node = found;
         walked.push(node.name);
       }
-      return { node, walked, missing: "" };
+      return { node, walked, missing: "", last: node };
     };
 
     /* ── list action: what is actually in a folder ──
@@ -677,11 +680,37 @@ Deno.serve(async (req) => {
        only tool was a search confined to the Engineering Services branches. */
     if (body.action === "list") {
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
-      const { node, walked, missing } = await walkPath(rawPath, false);
+      const { node, walked, missing, last } = await walkPath(rawPath, false);
       if (!node) {
-        return json({ error: missing === ROOT_CHAIN[0]
-          ? `I can't see ${ROOT_CHAIN[0]} in Drive at all — share it with the service account.`
-          : `There's no folder called "${missing}" under /${walked.join("/")}/.` }, 404);
+        if (missing === ROOT_CHAIN[0]) {
+          return json({ error: `I can't see ${ROOT_CHAIN[0]} in Drive at all — share it with the service account.` }, 404);
+        }
+        // "Not found" alone sends the caller away with nothing. Say what IS
+        // in the deepest folder we reached, closest names first, so the next
+        // step is obvious instead of a guessing game: project folders rarely
+        // carry the full formal ID — often just the tail number or the name.
+        const siblings = last ? (await listSafe(token, last.id)).filter(isFolder).map((k) => k.name) : [];
+        const tail = (missing.match(/\d{3,}/g) || []).pop() || "";
+        const nm = norm(missing);
+        const score = (n: string) => {
+          const nn = norm(n);
+          if (nn === nm) return 0;
+          if (tail && nn.includes(tail)) return 1;         // same project number
+          if (nn.includes(nm) || nm.includes(nn)) return 2;
+          const head = nm.slice(0, 12);
+          if (head && nn.startsWith(head)) return 3;       // same ID family
+          return 9;
+        };
+        const near = siblings.filter((n) => score(n) < 9).sort((a, b) => score(a) - score(b)).slice(0, 5);
+        return json({
+          error: `There's no folder called "${missing}" under /${walked.join("/")}/.`
+            + (near.length
+              ? ` Closest existing folder(s): ${near.map((n) => `"${n}"`).join(", ")} — one of these is probably it.`
+              : siblings.length
+                ? ` That folder holds ${siblings.length} folder(s); none look related. List it to see them all.`
+                : ""),
+          nearby: near, siblings: siblings.length,
+        }, 404);
       }
       const kids = await listSafe(token, node.id);
       const folders = kids.filter(isFolder).map((k) => k.name).sort();
@@ -728,7 +757,16 @@ Deno.serve(async (req) => {
       }
       if (!folders.length) folders = await findFolders(token, String(body.projectId));
       if (!folders.length) {
-        return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH} — share that folder (Editor) with ${SA_EMAIL}`, serviceAccount: SA_EMAIL }, 404);
+        // A project folder is often named by its tail number alone. Look for
+        // that before giving up — but for a WRITE, never guess silently: name
+        // the candidates and let the caller aim the next call precisely.
+        const tail = (String(body.projectId).match(/\d{3,}/g) || []).pop() || "";
+        const maybe = tail ? (await findFolders(token, tail)).map((f) => f.name).slice(0, 4) : [];
+        return json({ error: `I couldn't find a folder called ${body.projectId} anywhere under ${ROOT_PATH}`
+          + (maybe.length
+            ? ` — but ${maybe.map((n) => `"${n}"`).join(", ")} exist(s); if one of those is this project, write again with that folder as folderPath.`
+            : ` — if the folder exists under another name, list its parent to find it; otherwise share it (Editor) with ${SA_EMAIL}.`),
+          nearby: maybe, serviceAccount: SA_EMAIL }, 404);
       }
       const id = await writeFile(token, folders[0].id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
       return json({ ok: true, fileId: id, folder: folders[0].name, savedAs: actingAs || "" });
@@ -740,8 +778,14 @@ Deno.serve(async (req) => {
     const locateFolder = async (b: typeof body, tk: string): Promise<{ folder: GFile; where: string } | { error: string }> => {
       const raw = String(b.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
       if (raw) {
-        const { node, walked, missing } = await walkPath(raw, false);
-        if (!node) return { error: `I couldn't open "${missing}" under /${walked.join("/")}/` };
+        const { node, walked, missing, last } = await walkPath(raw, false);
+        if (!node) {
+          const sibs = last ? (await listSafe(tk, last.id)).filter(isFolder).map((k) => k.name) : [];
+          const t = (missing.match(/\d{3,}/g) || []).pop() || "";
+          const near = sibs.filter((n) => (t && norm(n).includes(t)) || norm(n).includes(norm(missing)) || norm(missing).includes(norm(n))).slice(0, 4);
+          return { error: `I couldn't open "${missing}" under /${walked.join("/")}/`
+            + (near.length ? ` — closest folder(s) there: ${near.map((n) => `"${n}"`).join(", ")}.` : sibs.length ? ` — it holds ${sibs.length} folder(s); list it to see them.` : "") };
+        }
         return { folder: node, where: `/${walked.join("/")}/` };
       }
       const br = await resolveBranches(tk);
@@ -753,7 +797,14 @@ Deno.serve(async (req) => {
         if (best === 0) break;
       }
       if (!pick) pick = (await findFolders(tk, String(b.projectId)))[0] || null;
-      if (!pick) return { error: `I couldn't find a folder called ${b.projectId} anywhere under ${ROOT_PATH} — share it (Editor) with ${SA_EMAIL}` };
+      if (!pick) {
+        // Reads and renames may follow the tail number — the worst case is
+        // reading the wrong folder and saying so, not writing into it.
+        const tail = (String(b.projectId).match(/\d{3,}/g) || []).pop() || "";
+        if (tail && tail !== String(b.projectId)) pick = (await findFolders(tk, tail))[0] || null;
+        if (pick) return { folder: pick, where: `${pick.name} (matched by project number ${tail})` };
+        return { error: `I couldn't find a folder called ${b.projectId} anywhere under ${ROOT_PATH} — if it exists under another name, list its parent to find it; otherwise share it (Editor) with ${SA_EMAIL}` };
+      }
       return { folder: pick, where: pick.name };
     };
 

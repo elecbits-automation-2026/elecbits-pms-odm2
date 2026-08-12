@@ -5201,12 +5201,13 @@ function AssistantModule() {
         if (!pid && !term.trim()) return { line: "" };
         const { digest, error } = await driveReadDigest(pid, p?.linkedIds, { scope: driveScope(my?.role), search: term });
         const asked = pid || `"${term}"`;
-        return {
-          ok: !!digest,
-          line: digest ? "" : (error
-            || `I searched ${DRIVE_CHAIN} for ${asked} and nothing there matched. Try the exact folder or file name, or tell me which project it sits under.`),
-          drive: digest,
-        };
+        if (digest) return { line: "", drive: digest };
+        // Same rule as list_folder: an empty search result goes to the model,
+        // which already knows what the user actually wanted and can either try
+        // the next sensible place or ask — once, politely, without a banner.
+        return { line: "", data: (error
+          || `Nothing under ${DRIVE_CHAIN} matched ${asked}.`)
+          + ` If a project folder seems missing, list_folder the parent to see the real names before concluding it doesn't exist.` };
       }
       case "save_attachment": {
         const want = normId(a.name);
@@ -5223,7 +5224,10 @@ function AssistantModule() {
       }
       case "list_folder": {
         const { listing, error } = await driveListFolder(a.folderPath || "");
-        if (error) return { ok: false, line: error };
+        // A folder that isn't there is an ANSWER, not a failure. Give it to the
+        // model to work with; the model tells the user once, in sentences —
+        // no red banner shouting the same thing a second time.
+        if (error) return { line: "", data: `That didn't work: ${error} Use list_folder on the parent to see what IS there, then continue with the closest real folder.` };
         return { line: "", drive: listing || "That folder is empty." };
       }
       case "write_drive_file": {
@@ -5245,7 +5249,7 @@ function AssistantModule() {
           projectId: a.folderPath ? "" : (p?.projectId || a.projectId), folderPath: a.folderPath || "",
           fileName: String(a.fileName || ""), scope: driveScope(my?.role),
         });
-        if (typeof r === "string") return { ok: false, line: r };
+        if (typeof r === "string") return { line: "", data: `That didn't work: ${r} If the file name might differ, list_folder its folder and read the closest real file.` };
         return {
           ok: true,
           line: `Read ${r.fileName} (${String(r.text || "").length} characters).`,
