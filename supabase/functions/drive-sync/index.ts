@@ -108,12 +108,16 @@ async function appendToSheet(row: string[]): Promise<void> {
 
 async function recordInSupabase(target: string, detail: string, at: string): Promise<void> {
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error("supabase env not present");
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/drive_sync_log`, {
+  // The log moved from public.drive_sync_log to core.sync_log when the
+  // database was split into per-tool schemas. PostgREST reaches a non-default
+  // schema through Content-Profile, not through the path.
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/sync_log`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
       authorization: `Bearer ${SUPABASE_KEY}`,
       "content-type": "application/json",
+      "content-profile": "core",
       prefer: "return=minimal",
     },
     body: JSON.stringify({ target, detail, at }),
