@@ -1,4 +1,4 @@
-import { tbl, tableName } from "./tables.js";
+import { tbl, tableName, ensureLayout, usingLegacyLayout } from "./tables.js";
 
 /* ─── REAL ROWS, ALONGSIDE THE BLOB ──────────────────────────────────────────
    App.jsx persists the whole workspace as two JSON strings in `pms.workspace`.
@@ -126,8 +126,11 @@ export const scrumNoteRow = (n) => ({
   raw: text(n.raw),
   organized: n.organized ?? null,
   origin: text(n.origin) || "manual",
-  by: fk(n.by),
-  by_app_id: text(n.by),
+  // The one column the reorganisation renamed: `by` became `author_id`.
+  // Send whichever this database actually has, or the whole batch bounces.
+  ...(usingLegacyLayout()
+    ? { by: fk(n.by), by_app_id: text(n.by) }
+    : { author_id: fk(n.by), author_app_id: text(n.by) }),
   project_id: text(n.projectId),
   created_at: at(n.createdAt),
 });
@@ -435,6 +438,8 @@ async function mirror(sb, table, rows, key) {
    is a save path that must not be interrupted by a backend hiccup. A failure
    in one table does not stop the others. */
 export async function syncAll(sb, state = {}) {
+  // Decide once which layout this database is in; every job then goes there.
+  await ensureLayout(sb);
   const out = { ok: true, wrote: {}, errors: [] };
   if (!sb) return { ok: false, wrote: {}, errors: ["no client"] };
 

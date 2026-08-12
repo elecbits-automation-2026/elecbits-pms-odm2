@@ -1,4 +1,4 @@
-import { tbl } from "./tables.js";
+import { tbl, withLayoutRetry } from "./tables.js";
 import { supabase } from "./supabase.js";
 
 /* ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -95,7 +95,8 @@ export async function fetchProfiles() {
   if (!supabase) return [];
   let rows = [];
   try {
-    const { data, error } = await tbl(supabase, "people").select("*").order("created_at");
+    const { data, error } = await withLayoutRetry(supabase, () =>
+      tbl(supabase, "people").select("*").order("created_at"));
     if (!error && data) rows = data;
   } catch { /* ignore */ }
   if (!rows.length) {

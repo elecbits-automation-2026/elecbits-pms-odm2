@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { tbl } from "./tables.js";
+import { tbl, withLayoutRetry } from "./tables.js";
 
 /* ─── SUPABASE CLIENT ─────────────────────────────────────────────────────────
    Robust init: auto-repair the most common env-var mistakes (surrounding
@@ -54,21 +54,26 @@ export const supabaseAnonKey = anonKey;
 export const supabaseEnabled = Boolean(client);
 export const supabaseInitError = initError;
 
-/* Key-value store backed by `pms.workspace` (was `public.app_kv` before the
-   schemas were split — see supabase/schemas/00-one-structure.sql). */
+/* Key-value store for the workspace blob. Lives in `pms.workspace` after the
+   schema split, `public.app_kv` before it — withLayoutRetry finds out which
+   this database is and goes there, so the app works on either, and keeps
+   working if the migration runs (or is rolled back) mid-session. */
 export function supabaseStorage(sb) {
   return {
     get: async (key) => {
-      const { data, error } = await tbl(sb, "workspace").select("value").eq("key", key).maybeSingle();
+      const { data, error } = await withLayoutRetry(sb, () =>
+        tbl(sb, "workspace").select("value").eq("key", key).maybeSingle());
       if (error) throw error;
       return data ? { value: data.value } : null;
     },
     set: async (key, value) => {
-      const { error } = await tbl(sb, "workspace").upsert({ key, value, updated_at: new Date().toISOString() });
+      const { error } = await withLayoutRetry(sb, () =>
+        tbl(sb, "workspace").upsert({ key, value, updated_at: new Date().toISOString() }));
       if (error) throw error;
     },
     delete: async (key) => {
-      const { error } = await tbl(sb, "workspace").delete().eq("key", key);
+      const { error } = await withLayoutRetry(sb, () =>
+        tbl(sb, "workspace").delete().eq("key", key));
       if (error) throw error;
     },
   };
