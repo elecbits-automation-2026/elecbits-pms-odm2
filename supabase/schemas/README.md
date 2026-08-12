@@ -70,6 +70,13 @@ hit Redeploy. Minutes, not hours.
 
 Steps 6–14 add new objects only and are safe to run at any pace afterwards.
 
+**If step 3 goes wrong, `00-rollback.sql` puts everything back.** It is the
+exact inverse of the move — verified to restore the same 19 tables, 24
+policies, 58 indexes, 4 foreign keys and byte-identical data — and the old app
+works again the moment it finishes. It refuses to run once step 7 has given
+`core` tables of its own, because past that point the way back is a backup
+restore, not a script. Have it open in a tab before you start step 3.
+
 ---
 
 ## The final table list
