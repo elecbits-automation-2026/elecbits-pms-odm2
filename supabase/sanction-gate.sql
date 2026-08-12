@@ -13,12 +13,12 @@
 --
 --   1. NOTHING IS RENAMED, NOTHING IS DROPPED, NOTHING BECOMES REQUIRED.
 --      Every change is an added column, an added table, or an added view.
---      `public.projects` keeps every column it has, including the old
+--      `core.projects` keeps every column it has, including the old
 --      `sanctioned` boolean the ODM app derives from status. The mirror in
 --      src/lib/tableSync.js keeps writing exactly the same columns it writes
 --      today and keeps succeeding.
 --
---   2. THE ODM APP IS NOT ASKED TO CHANGE. It writes `public.projects`; the
+--   2. THE ODM APP IS NOT ASKED TO CHANGE. It writes `core.projects`; the
 --      new tools read `core.projects`, which is a VIEW over that same physical
 --      table. There is no second copy of a project and nothing to keep in
 --      sync. Truth has one home.
@@ -27,12 +27,12 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 
--- ═══ 1. THE SPINE — additive columns on public.projects ════════════════════
+-- ═══ 1. THE SPINE — additive columns on core.projects ════════════════════
 -- These are the four facts the company needs about a project that the ODM app
 -- alone never had to know: is it sanctioned, who decided that, which delivery
 -- tool owns it, and what did it come out of.
 
-alter table public.projects
+alter table core.projects
   -- ULM's decision. This is a STATE, not a derivation. The ODM app's
   -- `sanctioned` boolean stays where it is and keeps meaning what it always
   -- meant to that app ("status is past Planning"); it is no longer what the
@@ -65,42 +65,42 @@ alter table public.projects
 do $$
 begin
   if not exists (select 1 from pg_constraint where conname = 'projects_sanction_state_ck') then
-    alter table public.projects
+    alter table core.projects
       add constraint projects_sanction_state_ck
       check (sanction_state in ('draft','requested','sanctioned','unsanctioned','on_hold','closed'))
       not valid;
   end if;
   if not exists (select 1 from pg_constraint where conname = 'projects_kind_ck') then
-    alter table public.projects
+    alter table core.projects
       add constraint projects_kind_ck
       check (kind is null or kind in ('odm','boxbuild','product'))
       not valid;
   end if;
   if not exists (select 1 from pg_constraint where conname = 'projects_parent_fk') then
-    alter table public.projects
+    alter table core.projects
       add constraint projects_parent_fk foreign key (parent_id)
-      references public.projects(id) on delete set null not valid;
+      references core.projects(id) on delete set null not valid;
   end if;
 end $$;
 
 -- THE gate every other tool reads. Generated, so it can never disagree with
 -- the state, and can never be written by accident — not by the ODM mirror,
 -- not by a new tool, not by hand.
-alter table public.projects
+alter table core.projects
   add column if not exists is_sanctioned boolean
   generated always as (sanction_state = 'sanctioned') stored;
 
-create index if not exists projects_gate_idx   on public.projects (is_sanctioned, kind);
-create index if not exists projects_state_idx  on public.projects (sanction_state);
-create index if not exists projects_parent_idx on public.projects (parent_id);
+create index if not exists projects_gate_idx   on core.projects (is_sanctioned, kind);
+create index if not exists projects_state_idx  on core.projects (sanction_state);
+create index if not exists projects_parent_idx on core.projects (parent_id);
 
-comment on column public.projects.sanctioned is
+comment on column core.projects.sanctioned is
   'LEGACY / ODM-app only: derived from status <> ''Planning'' by src/lib/tableSync.js. '
   'Do NOT read this outside the ODM app — read is_sanctioned, which reflects ULM''s decision.';
-comment on column public.projects.sanction_state is
+comment on column core.projects.sanction_state is
   'ULM-owned lifecycle: draft → requested → sanctioned ⇄ unsanctioned/on_hold → closed. '
   'Written only through ulm.decide(); never by a delivery tool.';
-comment on column public.projects.is_sanctioned is
+comment on column core.projects.is_sanctioned is
   'The gate. True only while ULM has the project sanctioned. Generated — never written.';
 
 -- ── Anything born in a delivery tool lands in ULM's inbox ──────────────────
@@ -120,8 +120,8 @@ begin
   return new;
 end $$;
 
-drop trigger if exists projects_intake on public.projects;
-create trigger projects_intake before insert on public.projects
+drop trigger if exists projects_intake on core.projects;
+create trigger projects_intake before insert on core.projects
   for each row execute function public.projects_default_intake();
 
 
@@ -131,11 +131,11 @@ create trigger projects_intake before insert on public.projects
 -- Planning is treated as raised-but-not-yet-decided, which is exactly what
 -- Planning has always meant here.
 
-update public.projects
+update core.projects
 set kind = coalesce(kind, 'odm')
 where kind is null;
 
-update public.projects
+update core.projects
 set sanction_state = case
       when coalesce(status,'Planning') = 'Planning' then 'requested'
       when status in ('Completed','Delivered','Closed')  then 'closed'
@@ -182,46 +182,12 @@ on conflict (key) do update
   set name = excluded.name, sees_kinds = excluded.sees_kinds,
       sees_states = excluded.sees_states, sort_order = excluded.sort_order;
 
--- The project, as the company sees it. A plain updatable view over the one
--- physical table — no copy, no drift, no sync job.
-create or replace view core.projects
-with (security_invoker = true) as
-select
-  p.id,
-  p.project_id,
-  p.name,
-  p.description,
-  p.kind,
-  p.sanction_state,
-  p.is_sanctioned          as sanctioned,
-  p.sanctioned_at,
-  p.sanctioned_by,
-  p.unsanctioned_at,
-  p.sanction_reason,
-  p.parent_id,
-  p.org_id,
-  p.client_id,
-  p.client_name,
-  p.status,
-  p.start_date,
-  p.deadline,
-  p.team,
-  p.requested_by,
-  p.requested_at,
-  p.created_at,
-  p.updated_at
-from public.projects p;
+-- core.projects IS the physical table now (00-one-structure.sql moved it out of
+-- `public`), so there is no view to define — the façade and the storage are
+-- the same object. That is the end state this design was always aiming at:
+-- one project, one row, one name, and nobody keeping two copies in step.
 
-comment on view core.projects is
-  'The company-wide project. Backed by public.projects so the ODM app is untouched. '
-  'Every tool reads this; no tool reads another tool''s tables.';
-
--- People, minus the columns no delivery tool has any business seeing.
-create or replace view core.people
-with (security_invoker = true) as
-select id, auth_id, name, email, role, title, resource_role, dept,
-       skills, max_projects, color, created_at
-from public.profiles;
+-- core.people is likewise the roster table itself, not a view over it.
 
 -- WHO IS ON WHAT — the only relation HR actually has to a project.
 -- HR's subject is the person: payroll, leave, appraisal, headcount. It does
@@ -248,9 +214,9 @@ select
   pr.name          as person_name,
   pr.dept,
   pr.title
-from public.team_assignments ta
-join public.projects  p  on p.app_id = ta.project_app_id
-left join public.profiles pr on pr.id = ta.user_id;
+from core.assignments ta
+join core.projects  p  on p.app_id = ta.project_app_id
+left join core.people pr on pr.id = ta.user_id;
 
 comment on view core.staffing is
   'People × projects. HR reads this instead of a project list; the PMS tools '
@@ -286,7 +252,7 @@ create table if not exists ulm.sanction_events (
   -- if a project is ever deleted in a delivery tool, the delete still succeeds
   -- (so the ODM app's sync is never rejected) and the decision history
   -- survives it. An audit trail that a project manager can erase is not one.
-  project_id  uuid references public.projects(id) on delete set null,
+  project_id  uuid references core.projects(id) on delete set null,
   project_code text,
   action      text not null check (action in
                 ('request','sanction','unsanction','hold','resume','route','close','reopen')),
@@ -306,7 +272,7 @@ comment on table ulm.sanction_events is
 -- Where a sanctioned project was sent, and to whom.
 create table if not exists ulm.allocations (
   id          uuid primary key default gen_random_uuid(),
-  project_id  uuid not null references public.projects(id) on delete cascade,
+  project_id  uuid not null references core.projects(id) on delete cascade,
   tool_key    text not null references core.tools(key),
   owner_id    uuid,                       -- the PM who takes delivery
   allocated_by uuid,
@@ -320,7 +286,7 @@ create unique index if not exists allocations_live_idx
 -- The architecture pass: how a sanctioned project breaks into work.
 create table if not exists ulm.work_packages (
   id          uuid primary key default gen_random_uuid(),
-  project_id  uuid not null references public.projects(id) on delete cascade,
+  project_id  uuid not null references core.projects(id) on delete cascade,
   seq         int  not null default 0,
   title       text not null,
   discipline  text,                       -- hardware | firmware | mechanical | test | …
@@ -341,16 +307,16 @@ create or replace function ulm.decide(
   p_kind    text default null,
   p_reason  text default null,
   p_by      uuid default null
-) returns public.projects
+) returns core.projects
 language plpgsql security definer set search_path = public, ulm, core as $$
 declare
-  cur  public.projects;
+  cur  core.projects;
   nxt  text;
 begin
   -- Lets the guard trigger below know this write is the sanctioned route in.
   perform set_config('ulm.deciding', '1', true);
 
-  select * into cur from public.projects where id = p_project for update;
+  select * into cur from core.projects where id = p_project for update;
   if not found then raise exception 'no such project: %', p_project; end if;
 
   nxt := case p_action
@@ -376,7 +342,7 @@ begin
   values (p_project, cur.project_id, p_action, cur.sanction_state, nxt,
           coalesce(p_kind, cur.kind), p_reason, p_by);
 
-  update public.projects set
+  update core.projects set
     sanction_state  = nxt,
     kind            = coalesce(p_kind, kind),
     sanction_reason = coalesce(p_reason, sanction_reason),
@@ -408,7 +374,7 @@ comment on function ulm.decide is
   'claims or releases the delivery-tool allocation in one transaction.';
 
 -- ── Make "only ULM decides" true, not just intended ────────────────────────
--- Without this, any tool with an UPDATE grant on public.projects could quietly
+-- Without this, any tool with an UPDATE grant on core.projects could quietly
 -- sanction itself a project and leave no trace in the ledger. This refuses the
 -- write unless it came through ulm.decide(). The ODM app never touches
 -- sanction_state, so it never meets this trigger.
@@ -429,8 +395,8 @@ begin
   return new;
 end $$;
 
-drop trigger if exists projects_guard_sanction on public.projects;
-create trigger projects_guard_sanction before update on public.projects
+drop trigger if exists projects_guard_sanction on core.projects;
+create trigger projects_guard_sanction before update on core.projects
   for each row execute function public.guard_sanction_state();
 
 -- Backfill the ledger so the 12 live projects have an origin story rather than
@@ -438,7 +404,7 @@ create trigger projects_guard_sanction before update on public.projects
 insert into ulm.sanction_events (project_id, project_code, action, from_state, to_state, kind, reason, decided_at)
 select p.id, p.project_id, 'sanction', 'requested', 'sanctioned', p.kind,
        'backfilled at sanction-gate rollout', coalesce(p.sanctioned_at, p.created_at)
-from public.projects p
+from core.projects p
 where p.sanction_state = 'sanctioned'
   and not exists (select 1 from ulm.sanction_events e where e.project_id = p.id);
 
@@ -446,7 +412,7 @@ insert into ulm.allocations (project_id, tool_key, allocated_at)
 select p.id,
        case p.kind when 'odm' then 'pms_odm' when 'boxbuild' then 'pms_bb' else 'pms_product' end,
        coalesce(p.sanctioned_at, p.created_at)
-from public.projects p
+from core.projects p
 where p.sanction_state = 'sanctioned'
   and not exists (select 1 from ulm.allocations a where a.project_id = p.id and a.released_at is null);
 
@@ -502,5 +468,5 @@ group by t.sort_order, t.name
 order by t.sort_order;
 
 select project_id, name, kind, sanction_state, is_sanctioned, sanctioned_at::date
-from public.projects
+from core.projects
 order by sanction_state, project_id;

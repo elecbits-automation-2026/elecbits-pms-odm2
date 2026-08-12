@@ -14,7 +14,7 @@
 --   it does not reach into fin.
 --
 -- Nothing here touches the running ODM app. `core.orgs` is a view over
--- public.clients, which the app already writes, so customers have one home.
+-- core.orgs, which the app already writes, so customers have one home.
 --
 -- Idempotent: safe to re-run.
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -44,11 +44,12 @@ on conflict (key) do update
 
 
 -- ═══ 1. ORGANISATIONS — customers, vendors, partners ═══════════════════════
--- public.clients is the ODM app's table and it stays that. These columns are
--- what the rest of the company needs and the app never had; all nullable, so
--- the app's writes keep working untouched.
+-- core.orgs is the roster of customers the ODM app has always written (it was
+-- public.clients until 00-one-structure.sql moved it). These columns are what
+-- the rest of the company needs and the app never had; all nullable, so the
+-- app's writes keep working untouched.
 
-alter table public.clients
+alter table core.orgs
   add column if not exists kind        text,        -- customer | vendor | partner | internal
   add column if not exists gstin       text,
   add column if not exists pan         text,
@@ -60,26 +61,20 @@ alter table public.clients
   add column if not exists active      boolean not null default true,
   add column if not exists notes       text;
 
-update public.clients set kind = 'customer' where kind is null;
+update core.orgs set kind = 'customer' where kind is null;
 
-create index if not exists clients_kind_idx on public.clients (kind) where active;
+create index if not exists clients_kind_idx on core.orgs (kind) where active;
 
-create or replace view core.orgs
-with (security_invoker = true) as
-select id, client_id as code, name, kind, industry, org_size, gstin, pan,
-       website, address, payment_terms_days, credit_limit, owner_id, active,
-       notes, created_at
-from public.clients;
-
-comment on view core.orgs is
-  'Every company we deal with — customer, vendor, partner. Backed by '
-  'public.clients so the ODM app is untouched and there is one customer list.';
+comment on table core.orgs is
+  'Every company we deal with — customer, vendor, partner. One list, shared by
+   Sales, the three PMS tools and Finance. `client_id` is the human-readable
+   code the ODM app has always used.';
 
 -- A named human at an organisation. The ODM app keeps a `contact` blob on the
 -- project; this is the company-wide address book that Sales and Finance need.
 create table if not exists core.contacts (
   id         uuid primary key default gen_random_uuid(),
-  org_id     uuid references public.clients(id) on delete cascade,
+  org_id     uuid references core.orgs(id) on delete cascade,
   name       text not null,
   role       text,
   email      text,
@@ -100,9 +95,9 @@ create unique index if not exists contacts_primary_idx
 
 create table if not exists core.documents (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
-  org_id       uuid references public.clients(id) on delete set null,
+  org_id       uuid references core.orgs(id) on delete set null,
   tool_key     text references core.tools(key),      -- who produced it
   kind         text not null,                        -- lld | bom | quote | po | invoice | report | …
   title        text not null,
@@ -136,7 +131,7 @@ create table if not exists core.events (
   tool_key    text references core.tools(key),
   entity      text not null,          -- 'project' | 'order' | 'invoice' | …
   entity_id   uuid,
-  project_id  uuid references public.projects(id) on delete set null,
+  project_id  uuid references core.projects(id) on delete set null,
   verb        text not null,          -- 'created' | 'sanctioned' | 'shipped' | …
   actor_id    uuid,
   payload     jsonb not null default '{}'::jsonb

@@ -20,12 +20,12 @@ create schema if not exists hr;
 
 
 -- ═══ THE EMPLOYEE ══════════════════════════════════════════════════════════
--- public.profiles is the roster the ODM app already maintains. This does not
+-- core.people is the roster the ODM app already maintains. This does not
 -- duplicate it — it hangs the employment facts off it, one row per person.
 
 create table if not exists hr.employees (
   id            uuid primary key default gen_random_uuid(),
-  person_id     uuid unique references public.profiles(id) on delete set null,
+  person_id     uuid unique references core.people(id) on delete set null,
   emp_code      text unique,
   legal_name    text,
   personal_email text,
@@ -260,7 +260,7 @@ select pr.id                     as person_id,
           and count(s.project_id) filter (where s.project_live) > pr.max_projects then 'over'
          else 'ok'
        end                                                as load
-from public.profiles pr
+from core.people pr
 left join core.staffing s on s.person_id = pr.id
 group by pr.id, pr.name, pr.dept, pr.title, pr.max_projects;
 
@@ -316,18 +316,18 @@ do $$
 begin
   if not exists (select 1 from pg_policies where schemaname='hr' and tablename='employees' and policyname='employees_self') then
     create policy employees_self on hr.employees for select to authenticated
-      using (person_id in (select id from public.profiles where auth_id = auth.uid()));
+      using (person_id in (select id from core.people where auth_id = auth.uid()));
   end if;
   if not exists (select 1 from pg_policies where schemaname='hr' and tablename='leave_requests' and policyname='leave_self') then
     create policy leave_self on hr.leave_requests for select to authenticated
       using (employee_id in (select e.id from hr.employees e
-                             join public.profiles p on p.id = e.person_id
+                             join core.people p on p.id = e.person_id
                              where p.auth_id = auth.uid()));
   end if;
   if not exists (select 1 from pg_policies where schemaname='hr' and tablename='payslips' and policyname='payslip_self') then
     create policy payslip_self on hr.payslips for select to authenticated
       using (employee_id in (select e.id from hr.employees e
-                             join public.profiles p on p.id = e.person_id
+                             join core.people p on p.id = e.person_id
                              where p.auth_id = auth.uid()));
   end if;
 end $$;
@@ -343,6 +343,6 @@ grant select on all tables in schema hr to authenticated;   -- RLS above is what
 -- with the 24 people rather than an empty table. Nothing is overwritten.
 insert into hr.employees (person_id, legal_name, status)
 select p.id, p.name, 'active'
-from public.profiles p
+from core.people p
 where coalesce(p.email,'') <> ''
   and not exists (select 1 from hr.employees e where e.person_id = p.id);

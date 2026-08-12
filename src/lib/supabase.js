@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { tbl } from "./tables.js";
 
 /* ─── SUPABASE CLIENT ─────────────────────────────────────────────────────────
    Robust init: auto-repair the most common env-var mistakes (surrounding
@@ -53,20 +54,21 @@ export const supabaseAnonKey = anonKey;
 export const supabaseEnabled = Boolean(client);
 export const supabaseInitError = initError;
 
-/* Key-value store backed by the `app_kv` Postgres table (see supabase/schema.sql). */
+/* Key-value store backed by `pms.workspace` (was `public.app_kv` before the
+   schemas were split — see supabase/schemas/00-one-structure.sql). */
 export function supabaseStorage(sb) {
   return {
     get: async (key) => {
-      const { data, error } = await sb.from("app_kv").select("value").eq("key", key).maybeSingle();
+      const { data, error } = await tbl(sb, "workspace").select("value").eq("key", key).maybeSingle();
       if (error) throw error;
       return data ? { value: data.value } : null;
     },
     set: async (key, value) => {
-      const { error } = await sb.from("app_kv").upsert({ key, value, updated_at: new Date().toISOString() });
+      const { error } = await tbl(sb, "workspace").upsert({ key, value, updated_at: new Date().toISOString() });
       if (error) throw error;
     },
     delete: async (key) => {
-      const { error } = await sb.from("app_kv").delete().eq("key", key);
+      const { error } = await tbl(sb, "workspace").delete().eq("key", key);
       if (error) throw error;
     },
   };

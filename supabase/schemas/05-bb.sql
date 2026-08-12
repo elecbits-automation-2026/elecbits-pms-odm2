@@ -22,9 +22,9 @@ select * from core.visible('pms_bb');
 -- ═══ THE ORDER ═════════════════════════════════════════════════════════════
 create table if not exists bb.orders (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
-  org_id       uuid references public.clients(id) on delete set null,
+  org_id       uuid references core.orgs(id) on delete set null,
   po_ref       text,                            -- the customer's PO number
   po_date      date,
   qty          int not null check (qty > 0),
@@ -49,7 +49,7 @@ create index if not exists bb_orders_status_idx  on bb.orders (status, target_da
 
 create table if not exists bb.boms (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   name         text not null,
   revision     text not null default 'A',
@@ -85,7 +85,7 @@ create table if not exists bb.procurement (
   order_id     uuid references bb.orders(id) on delete cascade,
   bom_line_id  uuid references bb.bom_lines(id) on delete set null,
   part_no      text not null,
-  vendor_id    uuid references public.clients(id) on delete set null,
+  vendor_id    uuid references core.orgs(id) on delete set null,
   qty_needed   numeric(12,3) not null,
   qty_ordered  numeric(12,3) not null default 0,
   qty_received numeric(12,3) not null default 0,

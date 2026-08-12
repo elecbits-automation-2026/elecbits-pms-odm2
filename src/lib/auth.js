@@ -1,3 +1,4 @@
+import { tbl } from "./tables.js";
 import { supabase } from "./supabase.js";
 
 /* ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -88,13 +89,13 @@ const RESOURCE_TITLES = {
 };
 const PALETTE = ["#2563eb", "#7c3aed", "#ea580c", "#0891b2", "#16a34a", "#d97706", "#db2777", "#0d9488", "#9333ea", "#dc2626", "#4f46e5", "#0284c7"];
 
-/* Roster. Prefers `profiles`; falls back to the existing `users` table (the
-   org roster) when profiles is empty/absent, so the real team shows post-login. */
+/* Roster. Prefers `core.people`; falls back to the legacy `public.users` table
+   when it is empty or absent, so the real team shows post-login. */
 export async function fetchProfiles() {
   if (!supabase) return [];
   let rows = [];
   try {
-    const { data, error } = await supabase.from("profiles").select("*").order("created_at");
+    const { data, error } = await tbl(supabase, "people").select("*").order("created_at");
     if (!error && data) rows = data;
   } catch { /* ignore */ }
   if (!rows.length) {

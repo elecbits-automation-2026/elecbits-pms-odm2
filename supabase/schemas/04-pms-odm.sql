@@ -1,22 +1,18 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- pms — PMS ODM. Engineering services through to samples (50–100 units).
 --
--- This tool already exists and already has its data. Its tables live in
--- `public` because that is where they were built, and moving them would break
--- the running app for no gain. So `pms` creates NO tables: it is the ODM
--- tool's namespace over what is already there, scoped to sanctioned ODM work.
+-- The tables are already here: 00-one-structure.sql moved them out of
+-- `public`, where they were built when there was only one tool, and gave them
+-- the names they should have had —
 --
--- Why bother, then? Because the moment Box Build and Product exist, "the
--- tasks table" is ambiguous. `pms.tasks` is not — it is ODM's tasks, and it
--- cannot accidentally return a Box Build project's rows.
+--     pms.workspace   pms.tasks       pms.stages     pms.scrum_notes
+--     pms.meetings    pms.meeting_ideas / _decisions / _challenges
+--     pms.messages    pms.intel       pms.work_updates   pms.kpi_log
 --
--- Every view is security_invoker and read-only in practice: the app keeps
--- writing public.* through its mirror exactly as it does today. Nothing here
--- changes a single byte the app reads or writes.
+-- So this file adds only what a tool needs on top of its own tables: the
+-- project list it is allowed to see, and the one view it publishes outward.
 --
--- Requires: sanction-gate.sql, 01-core.sql, and the earlier table migrations
---           (projects-into-a-real-table, every-table-filled,
---            nested-data-into-tables, plan-and-stages).
+-- Requires: 00-one-structure.sql, sanction-gate.sql, 01-core.sql
 -- Idempotent: safe to re-run.
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -24,117 +20,36 @@ create schema if not exists pms;
 
 
 -- ═══ THE TOOL'S PROJECT LIST ═══════════════════════════════════════════════
--- Sanctioned, kind = odm. Nothing else, ever. A project ULM has not sanctioned
--- simply is not in this tool.
+-- Sanctioned, kind = odm. Nothing else, ever. A project ULM has not
+-- sanctioned simply is not in this tool.
+--
+-- Note what this is NOT: core.projects still holds every project in the
+-- company, Box Build and Product included. This view is the ODM tool's window
+-- onto it, and the window is the sanction gate.
 
 create or replace view pms.projects
 with (security_invoker = true) as
 select * from core.visible('pms_odm');
 
 comment on view pms.projects is
-  'PMS ODM''s world. Un-sanction a project in ULM and it leaves this view '
-  'the same second — without being deleted.';
+  'PMS ODM''s world. Un-sanction a project in ULM and it leaves this view the '
+  'same second — without being deleted.';
 
--- The project codes in scope, used by every view below. Kept as its own view
--- so the scoping rule is written once.
-create or replace view pms.scope
-with (security_invoker = true) as
-select project_id as id, project_code from (
-  select id as project_id, project_id as project_code from core.visible('pms_odm')
-) s;
-
-
--- ═══ DELIVERY ══════════════════════════════════════════════════════════════
-create or replace view pms.tasks
-with (security_invoker = true) as
-select t.* from public.tasks t
-join pms.scope s on s.project_code = t.project_id;
-
-create or replace view pms.stages
-with (security_invoker = true) as
-select st.* from public.project_stages st
-join pms.scope s on s.project_code = st.project_id;
-
+-- Who is on those projects. core.staffing is company-wide; this is ODM's slice.
 create or replace view pms.team
 with (security_invoker = true) as
-select cs.* from core.staffing cs
-join pms.scope s on s.id = cs.project_id;
-
-
--- ═══ THE DAILY RECORD ══════════════════════════════════════════════════════
--- Scrum notes that name a project are scoped to it; notes that name none are
--- the standup itself and belong to the whole ODM team, so they stay.
-
-create or replace view pms.scrum_notes
-with (security_invoker = true) as
-select n.* from public.scrum_notes n
-left join pms.scope s on s.project_code = n.project_id
-where n.project_id is null or n.project_id = '' or s.project_code is not null;
-
-create or replace view pms.work_updates
-with (security_invoker = true) as
-select * from public.work_updates;
-
-create or replace view pms.kpi_log
-with (security_invoker = true) as
-select * from public.kpi_log;
-
-create or replace view pms.trainings
-with (security_invoker = true) as
-select * from public.trainings;
-
-
--- ═══ MEETINGS AND WHAT CAME OUT OF THEM ════════════════════════════════════
-create or replace view pms.moms
-with (security_invoker = true) as
-select m.* from public.moms m
-join pms.scope s on s.project_code = m.project_id;
-
-create or replace view pms.mom_ideas
-with (security_invoker = true) as
-select i.* from public.mom_ideas i
-join public.moms m on m.app_id = i.mom_app_id
-join pms.scope s on s.project_code = m.project_id;
-
-create or replace view pms.mom_decisions
-with (security_invoker = true) as
-select d.* from public.mom_decisions d
-join public.moms m on m.app_id = d.mom_app_id
-join pms.scope s on s.project_code = m.project_id;
-
-create or replace view pms.mom_challenges
-with (security_invoker = true) as
-select c.* from public.mom_challenges c
-join public.moms m on m.app_id = c.mom_app_id
-join pms.scope s on s.project_code = m.project_id;
-
-
--- ═══ CONVERSATION AND WHAT THE TOOL LEARNED ════════════════════════════════
--- public.messages holds project chat, global chat and the assistant log in one
--- table, separated by `scope`. Project-scoped messages follow the project;
--- global and assistant messages belong to the tool as a whole.
-
-create or replace view pms.messages
-with (security_invoker = true) as
-select msg.* from public.messages msg
-left join pms.scope s on s.project_code = msg.project_id
-where msg.scope <> 'project' or s.project_code is not null;
-
-create or replace view pms.project_intel
-with (security_invoker = true) as
-select pi.* from public.project_intel pi
-join pms.scope s on s.project_code = pi.project_id;
-
-create or replace view pms.documents
-with (security_invoker = true) as
-select d.* from core.documents d
-join pms.scope s on s.id = d.project_id;
+select s.* from core.staffing s
+join pms.projects p on p.id = s.project_id;
 
 
 -- ═══ WHAT THE ODM TOOL PUBLISHES TO EVERYONE ELSE ══════════════════════════
--- Other tools do not read pms.*. They read this: where each ODM project has
--- got to, in numbers rather than prose. Finance uses it to decide a milestone
--- is billable; ULM uses it to see whether a sanction is being delivered on.
+-- Other tools do not read pms.*. They read this: where each project has got
+-- to, in numbers rather than prose. Finance uses it to decide a milestone is
+-- billable; ULM uses it to see whether a sanction is being delivered on.
+--
+-- It covers every project, not just ODM ones, so that when Box Build and
+-- Product ship they can publish into the same shape rather than inventing a
+-- second one.
 
 create or replace view core.delivery_status
 with (security_invoker = true) as
@@ -148,14 +63,15 @@ select
   p.deadline,
   count(t.*) filter (where t.status is distinct from 'done')                  as tasks_open,
   count(t.*) filter (where t.status = 'done')                                 as tasks_done,
-  count(t.*) filter (where t.status is distinct from 'done' and t.date < current_date) as tasks_overdue,
+  count(t.*) filter (where t.status is distinct from 'done'
+                       and t.date < current_date)                             as tasks_overdue,
   max(t.completed_at)                                                         as last_completion,
-  (select count(*) from public.project_stages st
+  (select count(*) from pms.stages st
      where st.project_id = p.project_id and st.status = 'done')               as stages_done,
-  (select count(*) from public.project_stages st
+  (select count(*) from pms.stages st
      where st.project_id = p.project_id)                                      as stages_total
-from public.projects p
-left join public.tasks t on t.project_id = p.project_id
+from core.projects p
+left join pms.tasks t on t.project_id = p.project_id
 group by p.id, p.project_id, p.kind, p.sanction_state, p.status, p.start_date, p.deadline;
 
 comment on view core.delivery_status is
@@ -164,9 +80,10 @@ comment on view core.delivery_status is
 
 
 -- ═══ PERMISSIONS ═══════════════════════════════════════════════════════════
--- Views only, and security_invoker, so each caller still sees exactly what
--- public.*'s own row-level policies allow them to see. Nothing is widened.
+-- The tables' own grants and policies came with them in 00-one-structure.sql.
+-- These two views are security_invoker, so each caller still sees exactly what
+-- core.projects' own policies allow. Nothing is widened.
 
 grant usage on schema pms to authenticated;
-grant select on all tables in schema pms to authenticated;
+grant select on pms.projects, pms.team to authenticated;
 grant select on core.delivery_status to authenticated;

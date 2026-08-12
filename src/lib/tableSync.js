@@ -1,5 +1,8 @@
+import { tbl, tableName } from "./tables.js";
+
 /* ─── REAL ROWS, ALONGSIDE THE BLOB ──────────────────────────────────────────
-   App.jsx persists the whole workspace as two JSON strings in `app_kv`. That is
+   App.jsx persists the whole workspace as two JSON strings in `pms.workspace`.
+   That is
    fine for the app's own reads, but nothing else can ask a question of it: no
    "which projects are overdue", no join to an invoice, no per-row permissions,
    and — because it is one row — no way to hide anything from anyone.
@@ -7,9 +10,9 @@
    So every save also mirrors the workspace out to the real tables, one row per
    thing. The blob stays authoritative; this is a one-way mirror:
 
-     App state ──► app_kv blob        (authoritative, unchanged)
-               └─► projects, clients, scrum_notes, tasks,
-                   moms + mom_ideas / mom_decisions / mom_challenges,
+     App state ──► pms.workspace blob (authoritative, unchanged)
+               └─► core.projects, core.orgs, pms.scrum_notes, pms.tasks,
+                   pms.meetings + its ideas / decisions / challenges,
                    messages (project chat AND the assistant, one table),
                    project_intel, kpi_log, work_updates, trainings,
                    memory, drive_sync_log      (a queryable copy)
@@ -406,17 +409,17 @@ async function mirror(sb, table, rows, key) {
   });
 
   if (unique.length) {
-    const { error } = await sb.from(table).upsert(unique, { onConflict: key });
-    if (error) throw new Error(`${table}: ${error.message}`);
+    const { error } = await tbl(sb, table).upsert(unique, { onConflict: key });
+    if (error) throw new Error(`${tableName(table)}: ${error.message}`);
   }
 
   const before = lastWrote.get(table);
   const gone = before ? [...before].filter((k) => !seen.has(k)) : [];
   for (let i = 0; i < gone.length; i += DELETE_CHUNK) {
     const batch = gone.slice(i, i + DELETE_CHUNK);
-    const { error } = await sb.from(table).delete()
+    const { error } = await tbl(sb, table).delete()
       .in(key, batch);
-    if (error) throw new Error(`${table}: ${error.message}`);
+    if (error) throw new Error(`${tableName(table)}: ${error.message}`);
   }
   // Only recorded once the writes have actually landed, so a failed save does
   // not make us forget rows we are still responsible for.
@@ -458,25 +461,26 @@ export async function syncAll(sb, state = {}) {
   }
   for (const m of arr(state.assistantLog)) messages.push(assistantMessageRow(m));
 
+  // Logical names, resolved to schema + table by src/lib/tables.js.
   const jobs = [
     ["projects", projects.map(projectRow), "project_id"],
-    ["team_assignments", projects.flatMap(teamRows), "app_id"],
-    ["project_stages", projects.flatMap(stageRows), "app_id"],
-    ["clients", arr(state.clients).map(clientRow), "app_id"],
+    ["assignments", projects.flatMap(teamRows), "app_id"],
+    ["stages", projects.flatMap(stageRows), "app_id"],
+    ["orgs", arr(state.clients).map(clientRow), "app_id"],
     ["scrum_notes", arr(state.notes).map(scrumNoteRow), "app_id"],
     ["tasks", arr(state.tasks).map(taskRow), "app_id"],
-    // moms before its children, so the foreign key has something to point at.
-    ["moms", moms, "app_id"],
-    ["mom_ideas", ideas, "app_id"],
-    ["mom_decisions", decisions, "app_id"],
-    ["mom_challenges", challenges, "app_id"],
+    // meetings before its children, so the foreign key has something to point at.
+    ["meetings", moms, "app_id"],
+    ["meeting_ideas", ideas, "app_id"],
+    ["meeting_decisions", decisions, "app_id"],
+    ["meeting_challenges", challenges, "app_id"],
     ["messages", messages, "app_id"],
-    ["project_intel", intel, "app_id"],
+    ["intel", intel, "app_id"],
     ["kpi_log", arr(state.kpiLog).map(kpiRow), "app_id"],
     ["work_updates", arr(state.workUpdates).map(workUpdateRow), "app_id"],
     ["trainings", arr(state.trainings).map(trainingRow), "app_id"],
     ["memory", arr(state.memory).map(memoryRow), "app_id"],
-    ["drive_sync_log", arr(state.syncLog).map(syncLogRow), "app_id"],
+    ["sync_log", arr(state.syncLog).map(syncLogRow), "app_id"],
   ];
 
   for (const [table, rows, key] of jobs) {

@@ -4,7 +4,7 @@
 -- Sales owns the lead, the quote and the ask. It does NOT create projects.
 -- The last thing it does is raise a REQUEST, which lands in ULM's inbox; ULM
 -- decides. That is the whole reason the sanction gate exists, so this schema
--- has no write path into public.projects at all.
+-- has no write path into core.projects at all.
 --
 -- Requires: 01-core.sql
 -- Idempotent: safe to re-run.
@@ -16,7 +16,7 @@ create schema if not exists sales;
 -- ═══ LEADS ═════════════════════════════════════════════════════════════════
 create table if not exists sales.leads (
   id            uuid primary key default gen_random_uuid(),
-  org_id        uuid references public.clients(id) on delete set null,
+  org_id        uuid references core.orgs(id) on delete set null,
   org_name      text,                       -- before the org exists in core
   contact_id    uuid references core.contacts(id) on delete set null,
   title         text not null,
@@ -54,7 +54,7 @@ create table if not exists sales.quotes (
   id          uuid primary key default gen_random_uuid(),
   quote_no    text unique,                  -- core.next_number('quote')
   lead_id     uuid references sales.leads(id) on delete set null,
-  org_id      uuid references public.clients(id) on delete set null,
+  org_id      uuid references core.orgs(id) on delete set null,
   title       text not null,
   kind        text check (kind is null or kind in ('odm','boxbuild','product')),
   qty         int,
@@ -99,7 +99,7 @@ create table if not exists sales.requests (
   id            uuid primary key default gen_random_uuid(),
   lead_id       uuid references sales.leads(id) on delete set null,
   quote_id      uuid references sales.quotes(id) on delete set null,
-  org_id        uuid references public.clients(id) on delete set null,
+  org_id        uuid references core.orgs(id) on delete set null,
   title         text not null,
   summary       text,
   proposed_kind text check (proposed_kind is null or proposed_kind in ('odm','boxbuild','product')),
@@ -111,7 +111,7 @@ create table if not exists sales.requests (
   status        text not null default 'submitted'
                   check (status in ('draft','submitted','accepted','rejected','withdrawn')),
   -- Filled in by ULM when it accepts: the project this became.
-  project_id    uuid references public.projects(id) on delete set null,
+  project_id    uuid references core.projects(id) on delete set null,
   decided_at    timestamptz,
   decided_by    uuid,
   decision_note text,
@@ -122,7 +122,7 @@ create index if not exists requests_status_idx on sales.requests (status, submit
 
 comment on table sales.requests is
   'Sales'' outbox and ULM''s inbox. The only bridge between the two tools; '
-  'sales has no write path into public.projects.';
+  'sales has no write path into core.projects.';
 
 
 -- ── How ULM sees it, without reading sales' tables ────────────────────────
@@ -140,7 +140,7 @@ select r.id, r.title, r.summary, r.proposed_kind, r.qty, r.target_date,
        r.org_id, o.name as org_name,
        r.submitted_by, r.submitted_at, r.decided_at, r.decided_by, r.decision_note
 from sales.requests r
-left join public.clients o on o.id = r.org_id;
+left join core.orgs o on o.id = r.org_id;
 
 comment on view core.intake is
   'ULM''s inbox. The only part of the Sales tool anything else can see.';

@@ -44,6 +44,12 @@ async function caller(req: Request): Promise<{ id: string; email: string } | nul
   return u?.id ? { id: u.id, email: u.email ?? "" } : null;
 }
 
+/* The roster moved from public.profiles to core.people when the database was
+   split into per-tool schemas. PostgREST reaches a non-default schema through
+   the Accept-Profile / Content-Profile headers, not through the path. */
+const READ_CORE = { ...svc, "accept-profile": "core" };
+const WRITE_CORE = { ...svc, "content-profile": "core" };
+
 /* Is that person an admin on the roster? Match by auth_id (post-migration),
    by id (pre-migration workspaces), or by email as the last resort. */
 async function isAdmin(id: string, email: string): Promise<boolean> {
@@ -51,8 +57,8 @@ async function isAdmin(id: string, email: string): Promise<boolean> {
   const ors = [`auth_id.eq.${id}`, `id.eq.${id}`];
   if (email) ors.push(`email.ilike.${email.replace(/[%,()]/g, "")}`);
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?select=role&or=(${enc(ors.join(","))})`,
-    { headers: svc },
+    `${SUPABASE_URL}/rest/v1/people?select=role&or=(${enc(ors.join(","))})`,
+    { headers: READ_CORE },
   );
   if (!r.ok) return false;
   const rows: Array<{ role?: string }> = await r.json();
@@ -109,9 +115,9 @@ Deno.serve(async (req) => {
   // Attach the login to the roster entry with the same email, so the app
   // knows this row is them. Best-effort: the signup trigger also does this.
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/profiles?email=ilike.${encodeURIComponent(email.replace(/[%,()]/g, ""))}`, {
+    await fetch(`${SUPABASE_URL}/rest/v1/people?email=ilike.${encodeURIComponent(email.replace(/[%,()]/g, ""))}`, {
       method: "PATCH",
-      headers: { ...svc, "content-type": "application/json", prefer: "return=minimal" },
+      headers: { ...WRITE_CORE, "content-type": "application/json", prefer: "return=minimal" },
       body: JSON.stringify({ auth_id: userId }),
     });
   } catch { /* not fatal — attachment also happens at first sign-in */ }

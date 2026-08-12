@@ -25,7 +25,7 @@ create schema if not exists ulm;
 create table if not exists ulm.reviews (
   id            uuid primary key default gen_random_uuid(),
   request_id    uuid,                        -- core.intake.id, when it came from Sales
-  project_id    uuid references public.projects(id) on delete set null,
+  project_id    uuid references core.projects(id) on delete set null,
   project_code  text,
   proposed_kind text check (proposed_kind is null or proposed_kind in ('odm','boxbuild','product')),
 
@@ -47,7 +47,7 @@ create index if not exists reviews_project_idx on ulm.reviews (project_id);
 
 create table if not exists ulm.risks (
   id          uuid primary key default gen_random_uuid(),
-  project_id  uuid references public.projects(id) on delete set null,
+  project_id  uuid references core.projects(id) on delete set null,
   project_code text,
   title       text not null,
   detail      text,
@@ -71,7 +71,7 @@ create index if not exists risks_open_idx on ulm.risks (project_id, status, seve
 
 create table if not exists ulm.resource_plan (
   id          uuid primary key default gen_random_uuid(),
-  project_id  uuid references public.projects(id) on delete set null,
+  project_id  uuid references core.projects(id) on delete set null,
   project_code text,
   discipline  text not null,               -- hardware | firmware | mechanical | test | pm
   slot        text,                        -- 'Sr. Hardware Engineer', matching the roster
@@ -96,7 +96,7 @@ select p.id           as project_id,
        p.sanction_state,
        coalesce(sum(rp.fte), 0)                     as planned_fte,
        (select count(*) from core.staffing s where s.project_id = p.id) as people_booked
-from public.projects p
+from core.projects p
 left join ulm.resource_plan rp on rp.project_id = p.id
 group by p.id, p.project_id, p.name, p.kind, p.sanction_state;
 
@@ -116,11 +116,11 @@ create or replace function ulm.accept_request(
   p_deadline date default null,
   p_by       uuid default null,
   p_note     text default null
-) returns public.projects
+) returns core.projects
 language plpgsql security definer set search_path = ulm, core, sales, public as $$
 declare
   req  core.intake;
-  proj public.projects;
+  proj core.projects;
   code text;
 begin
   select * into req from core.intake where id = p_request;
@@ -136,12 +136,12 @@ begin
 
   -- Born already decided: the intake trigger's 'requested' default is
   -- overridden here, because ULM is the thing that decides.
-  insert into public.projects
+  insert into core.projects
     (project_id, name, client_id, client_name, status, deadline,
      sanction_state, kind, requested_by, requested_at, org_id)
   values
     (code, coalesce(nullif(trim(p_name), ''), req.title),
-     (select client_id from public.clients where id = req.org_id),
+     (select client_id from core.orgs where id = req.org_id),
      req.org_name, 'Planning', coalesce(p_deadline, req.target_date),
      'requested', p_kind, req.submitted_by, req.submitted_at, req.org_id)
   returning * into proj;

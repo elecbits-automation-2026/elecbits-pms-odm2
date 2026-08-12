@@ -29,7 +29,7 @@ create table if not exists prod.skus (
   category     text,
   -- The project this came out of. Nullable and ON DELETE SET NULL on purpose:
   -- a product outlives the project that created it.
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   status       text not null default 'development'
                  check (status in ('development','active','eol','withdrawn')),
@@ -76,7 +76,7 @@ create table if not exists prod.builds (
   id          uuid primary key default gen_random_uuid(),
   sku_id      uuid not null references prod.skus(id) on delete cascade,
   variant_id  uuid references prod.variants(id) on delete set null,
-  project_id  uuid references public.projects(id) on delete set null,
+  project_id  uuid references core.projects(id) on delete set null,
   mode        text not null check (mode in ('skd','cbu')),
   batch_no    text,
   qty_planned int not null check (qty_planned > 0),
@@ -105,7 +105,7 @@ create table if not exists prod.units (
                 check (status in ('in_stock','shipped','installed','returned','scrapped')),
   shipped_on  date,
   warranty_until date,
-  org_id      uuid references public.clients(id) on delete set null
+  org_id      uuid references core.orgs(id) on delete set null
 );
 create index if not exists prod_units_sku_idx    on prod.units (sku_id, status);
 create index if not exists prod_units_serial_idx on prod.units (serial_no);
@@ -142,8 +142,8 @@ create index if not exists prod_moves_sku_idx on prod.stock_moves (sku_id, at de
 create table if not exists prod.shipments (
   id           uuid primary key default gen_random_uuid(),
   sku_id       uuid references prod.skus(id) on delete set null,
-  org_id       uuid references public.clients(id) on delete set null,
-  project_id   uuid references public.projects(id) on delete set null,
+  org_id       uuid references core.orgs(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   mode         text check (mode is null or mode in ('skd','cbu')),
   qty          int not null check (qty > 0),
   dc_no        text,

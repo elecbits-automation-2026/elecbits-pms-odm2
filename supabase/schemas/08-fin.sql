@@ -27,13 +27,13 @@ language plpgsql as $$
 declare st text;
 begin
   if new.project_id is null then return new; end if;   -- overheads have no project
-  select sanction_state into st from public.projects where id = new.project_id;
+  select sanction_state into st from core.projects where id = new.project_id;
   if st is null then
     raise exception 'no such project: %', new.project_id;
   end if;
   if st in ('draft','requested') then
     raise exception 'project % is not sanctioned yet (%): money cannot be committed to it',
-      (select project_id from public.projects where id = new.project_id), st
+      (select project_id from core.projects where id = new.project_id), st
       using errcode = '42501';
   end if;
   return new;
@@ -47,7 +47,7 @@ comment on function fin.require_sanction is
 -- ═══ BUDGET ════════════════════════════════════════════════════════════════
 create table if not exists fin.budgets (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   version      int not null default 1,
   currency     text not null default 'INR',
@@ -68,7 +68,7 @@ create index if not exists fin_budgets_project_idx on fin.budgets (project_id, v
 -- Payment milestones — what may be invoiced, and when it becomes billable.
 create table if not exists fin.milestones (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   seq          int not null default 0,
   title        text not null,                 -- 'Design freeze', 'On dispatch'
@@ -90,9 +90,9 @@ create index if not exists fin_milestones_project_idx on fin.milestones (project
 create table if not exists fin.purchase_orders (
   id           uuid primary key default gen_random_uuid(),
   po_no        text unique,                   -- core.next_number('po')
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
-  vendor_id    uuid references public.clients(id) on delete set null,
+  vendor_id    uuid references core.orgs(id) on delete set null,
   po_date      date not null default current_date,
   currency     text not null default 'INR',
   subtotal     numeric(14,2) not null default 0,
@@ -126,7 +126,7 @@ create index if not exists fin_po_lines_idx on fin.po_lines (po_id, seq);
 
 create table if not exists fin.expenses (
   id           uuid primary key default gen_random_uuid(),
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   person_id    uuid,
   date         date not null default current_date,
@@ -147,9 +147,9 @@ create index if not exists fin_expenses_project_idx on fin.expenses (project_id,
 create table if not exists fin.invoices (
   id           uuid primary key default gen_random_uuid(),
   invoice_no   text unique,                   -- core.next_number('invoice')
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
-  org_id       uuid references public.clients(id) on delete set null,
+  org_id       uuid references core.orgs(id) on delete set null,
   milestone_id uuid references fin.milestones(id) on delete set null,
   invoice_date date not null default current_date,
   due_date     date,
@@ -207,7 +207,7 @@ create index if not exists fin_payments_invoice_idx on fin.payments (invoice_id)
 
 create table if not exists fin.cost_entries (
   id           bigserial primary key,
-  project_id   uuid references public.projects(id) on delete set null,
+  project_id   uuid references core.projects(id) on delete set null,
   project_code text,
   at           timestamptz not null default now(),
   kind         text not null check (kind in ('material','labour','expense','overhead','adjust')),
@@ -240,7 +240,7 @@ select
   case when coalesce(i.invoiced, 0) > 0
        then round((coalesce(i.invoiced,0) - coalesce(c.cost,0)) / i.invoiced * 100, 2)
   end                      as margin_pct
-from public.projects p
+from core.projects p
 left join lateral (
   select budget_total, revenue from fin.budgets b2
   where b2.project_id = p.id order by version desc limit 1

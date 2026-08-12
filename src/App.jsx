@@ -33,6 +33,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
+import { tbl } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
@@ -5897,12 +5898,12 @@ export default function App() {
     // Straight to the table — window.storage falls back to localStorage on
     // failure, and a stale local copy fed into the merge would read as "the
     // server deleted these" and drop live rows.
-    const { data, error } = await supabase.from("app_kv").select("value").eq("key", key).maybeSingle();
+    const { data, error } = await tbl(supabase, "workspace").select("value").eq("key", key).maybeSingle();
     if (error) throw error;
     return data?.value ? JSON.parse(data.value) : null;
   }, []);
   const cloudSet = useCallback(async (key, value) => {
-    const { error } = await supabase.from("app_kv").upsert({ key, value, updated_at: new Date().toISOString() });
+    const { error } = await tbl(supabase, "workspace").upsert({ key, value, updated_at: new Date().toISOString() });
     if (error) throw error;
     try { localStorage.setItem(key, value); } catch (e) { }   // offline mirror
   }, []);
@@ -6052,9 +6053,9 @@ export default function App() {
     // auth_id is only there once the workspace has run fix-resource-creation.sql.
     // Send it when we know it, and drop it if the column does not exist yet, so
     // an un-migrated workspace still saves the rest of the record.
-    let { error } = await supabase.from("profiles").upsert({ ...row, auth_id: u.authId || null });
+    let { error } = await tbl(supabase, "people").upsert({ ...row, auth_id: u.authId || null });
     if (error && /auth_id/.test(error.message || "")) {
-      ({ error } = await supabase.from("profiles").upsert(row));
+      ({ error } = await tbl(supabase, "people").upsert(row));
     }
     return error;
   };
@@ -6101,7 +6102,7 @@ export default function App() {
   const removeUser = useCallback(async (id, nameLabel) => {
     applyRoster((rs) => rs.filter((x) => x.id !== id));
     setProjects((ps) => ps.map((p) => ({ ...p, team: (p.team || []).filter((t) => t.userId !== id) })));
-    if (supabaseEnabled) { try { await supabase.from("profiles").delete().eq("id", id); } catch (e) { } }
+    if (supabaseEnabled) { try { await tbl(supabase, "people").delete().eq("id", id); } catch (e) { } }
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
