@@ -735,16 +735,87 @@ const memCtx = (memory) => {
   return out;
 };
 const memSize = (memory) => memCtx(memory).length;
+/* "PM", "project manager", "sr. hardware engineer" → the person filling that
+   slot on THIS project. Slots read like "PM (Project Manager)" or
+   "Jr. Firmware Engineer", so match on the words that carry the meaning. */
+export const personInSlot = (phrase, project, users) => {
+  const said = String(phrase || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!said) return null;
+  const words = said.split(" ").filter((w) => !["the", "of", "on", "for", "their", "a"].includes(w));
+  if (!words.length) return null;
+  const seniority = words.find((w) => ["sr", "senior", "jr", "junior", "lead"].includes(w)) || "";
+  const craft = words.find((w) => ["pm", "manager", "hardware", "firmware", "mechanical", "test", "tester", "qa", "architect", "designer"].includes(w));
+  if (!craft) return null;
+  const scored = (project.team || []).map((m) => {
+    const slot = String(m.slot || "").toLowerCase();
+    let score = 0;
+    if (craft === "pm" || craft === "manager") score += /\bpm\b|manager/.test(slot) ? 3 : 0;
+    else if (craft === "tester" || craft === "qa" || craft === "test") score += /test|qa/.test(slot) ? 3 : 0;
+    else score += slot.includes(craft) ? 3 : 0;
+    if (!score) return null;
+    // "senior PM" must not resolve to the junior one when both are on the team.
+    if (seniority) score += new RegExp(seniority === "senior" ? "sr|senior" : seniority === "junior" ? "jr|junior" : seniority).test(slot) ? 2 : -1;
+    else score += /\bsr\.?\b|senior|\bjr\.?\b|junior/.test(slot) ? 0 : 1;   // prefer the plain slot
+    return { m, score };
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
+  if (!scored.length) return null;
+  return users.find((x) => String(x.id) === String(scored[0].m.userId)) || null;
+};
+
+/* A model may answer with "2026-08-14", "14/08/2026" or prose. Only a real
+   ISO day is trusted; anything else falls back to the note's own date. */
+export const isoDay = (v) => {
+  const s = String(v || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s))) return s;
+  return "";
+};
+
+/* Who is actually on a project, by slot. Without this the model cannot answer
+   "give the PM of 1752" — it sees a roster full of people with PM-ish titles
+   and picks one, which is how a task for FMS-200 landed on the PM of a
+   different project entirely. */
+export const teamLine = (p, users) => {
+  const members = (p?.team || [])
+    .map((m) => {
+      const u = users.find((x) => String(x.id) === String(m.userId));
+      return u ? `${u.name} = ${m.slot}` : null;
+    })
+    .filter(Boolean);
+  return members.length ? ` · team: ${members.join("; ")}` : " · team: (nobody assigned yet)";
+};
+
 const scrumPrompt = (raw, date, users, projects, memory) => `You are the Elecbits ODM daily-scrum organiser.
 ${memCtx(memory)}
 TEAM ROSTER: ${users.map((u) => `${u.name} (${u.title})`).join(", ")}
-ACTIVE PROJECTS: ${projects.map((p) => `${p.projectId} — ${p.name} [${p.status}]`).join("; ") || "none"}
-DATE: ${date}
+ACTIVE PROJECTS (with who is on each one):
+${projects.map((p) => `  ${p.projectId} — ${p.name} [${p.status}]${teamLine(p, users)}`).join("\n") || "  none"}
+DATE (the day this note was written): ${date}
 Raw scrum note:
 """${raw}"""
-Extract every actionable task. Rules: match people to the roster (first names ok); match project IDs to active projects when close (e.g. esp-32-123 ≈ ESP32-123); convert times to 24h HH:MM; capture every if/else contingency as a condition with a timebox in minutes when stated ("in an hour" = 60); keep steps short and imperative.
+Extract every actionable task.
+
+WHO — match people to the roster (first names ok). A ROLE reference such as
+"the PM of 1752", "pm of X", "the hardware engineer on Y", "their tester" means
+THE PERSON HOLDING THAT SLOT ON THAT PROJECT: read the name off that project's
+team list above. Never substitute someone with a similar title from the roster
+at large — the PM of one project is not the PM of another. If the project has
+nobody in that slot, leave assignee empty rather than guessing.
+
+WHEN — resolve the day and put it in "date" as YYYY-MM-DD: "today" or no day
+mentioned = ${date}; "tomorrow" = the day after ${date}; a weekday name = the
+next such day on or after ${date}. If the note gives a time or a window,
+startTime and endTime MUST be filled in 24h HH:MM — "3 to 4pm" is
+startTime 15:00, endTime 16:00; "by 2pm" is endTime 14:00. Never leave the time
+fields empty and mention the time only inside a step; the step text is not a
+schedule and nothing downstream can read it.
+
+WHAT — match project IDs to active projects when close (e.g. esp-32-123 ≈
+ESP32-123, or a bare tail number like 1752 ≈ Eb-09-ML-432-01-1752); capture
+every if/else contingency as a condition with a timebox in minutes when stated
+("in an hour" = 60); keep steps short and imperative.
+
 Respond ONLY with valid JSON, no markdown, exactly this shape:
-{"summary":"one line","tasks":[{"projectId":"","title":"","assignee":"","startTime":"","endTime":"","steps":[""],"conditions":[{"if":"","then":"","timeboxMinutes":60}]}]}`;
+{"summary":"one line","tasks":[{"projectId":"","title":"","assignee":"","date":"YYYY-MM-DD","startTime":"","endTime":"","steps":[""],"conditions":[{"if":"","then":"","timeboxMinutes":60}]}]}`;
 const questionsPrompt = (t, work, memory) => `You are a strict QA gate for Elecbits ODM task closure.
 ${memCtx(memory)}
 TASK: "${t.title}" on project ${t.projectId || "(unlinked)"} | steps: ${(t.steps || []).join("; ") || "—"} | window ${t.startTime || "?"}–${t.endTime || "?"} | contingencies: ${(t.conditions || []).map((c) => `if ${c.if} then ${c.then}`).join("; ") || "none"}
@@ -798,6 +869,11 @@ RISKS & OPEN POINTS
 Derived from: ${cLLD.slice(0, 400)}…`;
 const fallbackScrum = (raw, date, users, projects) => {
   const sentences = raw.split(/(?<=[.;\n])\s+/).map((s) => s.trim()).filter(Boolean);
+  // "tomorrow" in the note means tomorrow, offline too.
+  const dayFor = (s) => {
+    if (/\btomorrow\b/i.test(s)) { const d = new Date(date + "T00:00:00"); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); }
+    return date;
+  };
   const pidM = raw.match(/project\s*id\s*[-:—]*\s*([\w-]+)/i);
   let pid = pidM ? pidM[1] : "";
   const match = projects.find((p) => normId(p.projectId) === normId(pid));
@@ -807,9 +883,9 @@ const fallbackScrum = (raw, date, users, projects) => {
     const person = users.find((u) => new RegExp(`\\b${u.name.split(" ")[0]}\\b`, "i").test(s));
     if (!person) continue;
     const times = [...s.matchAll(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/gi)].map((m) => { let h = +m[1] % 12; if (m[3].toLowerCase() === "pm") h += 12; return String(h).padStart(2, "0") + ":" + (m[2] || "00"); });
-    tasks.push({ projectId: pid, title: s.slice(0, 90), assignee: person.name, startTime: times[0] || "", endTime: times[1] || "", steps: [s.slice(0, 140)], conditions: /\bif\b/i.test(s) ? [{ if: s.split(/\bif\b/i)[1]?.slice(0, 80) || "condition in note", then: "follow the contingency written in the note", timeboxMinutes: 60 }] : [] });
+    tasks.push({ projectId: pid, title: s.slice(0, 90), assignee: person.name, date: dayFor(s), startTime: times[0] || "", endTime: times[1] || "", steps: [s.slice(0, 140)], conditions: /\bif\b/i.test(s) ? [{ if: s.split(/\bif\b/i)[1]?.slice(0, 80) || "condition in note", then: "follow the contingency written in the note", timeboxMinutes: 60 }] : [] });
   }
-  if (!tasks.length) tasks.push({ projectId: pid, title: raw.slice(0, 90), assignee: "", startTime: "", endTime: "", steps: [raw.slice(0, 160)], conditions: [] });
+  if (!tasks.length) tasks.push({ projectId: pid, title: raw.slice(0, 90), assignee: "", date: dayFor(raw), startTime: "", endTime: "", steps: [raw.slice(0, 160)], conditions: [] });
   return { summary: "Offline basic parse — AI was unreachable, review before pushing.", tasks };
 };
 /* Drive intelligence — read the PM + PCB folders and say what's going on. */
@@ -2977,10 +3053,26 @@ function ScrumModule() {
     summary: res.summary || "",
     engine: res.engine || "ai",
     tasks: (res.tasks || []).map((t) => {
-      const first = String(t.assignee || "").toLowerCase().split(" ")[0];
-      const u = users.find((x) => x.name.toLowerCase().split(" ")[0] === first) || users.find((x) => first && x.name.toLowerCase().includes(first));
+      const said = String(t.assignee || "").trim();
+      const first = said.toLowerCase().split(" ")[0];
       const p = projects.find((x) => normId(x.projectId) === normId(t.projectId));
-      return { ...t, id: uid(), include: true, assigneeId: u?.id || "", projectId: p ? p.projectId : (t.projectId || ""), linked: !!p };
+      let u = users.find((x) => x.name.toLowerCase().split(" ")[0] === first)
+        || users.find((x) => first && x.name.toLowerCase().includes(first));
+      // The model sometimes answers with the ROLE rather than the name ("PM",
+      // "hardware engineer"). Resolve that against THIS project's team, which
+      // is the only place the answer actually lives.
+      if (!u && p) u = personInSlot(said, p, users);
+      const onTeam = !!(u && p && (p.team || []).some((m) => String(m.userId) === String(u.id)));
+      return {
+        ...t, id: uid(), include: true,
+        assigneeId: u?.id || "",
+        // A day the note names ("tomorrow") is the task's day — not the day the
+        // note was written.
+        date: isoDay(t.date) || date,
+        projectId: p ? p.projectId : (t.projectId || ""),
+        linked: !!p,
+        offTeam: !!(u && p && !onTeam),
+      };
     }),
   });
 
@@ -3000,10 +3092,12 @@ function ScrumModule() {
     if (pushTasks && preview) {
       const newTasks = preview.tasks.filter((t) => t.include).map((t) => ({
         id: uid(), projectId: t.projectId, linked: t.linked, title: t.title, assigneeId: t.assigneeId, assigneeName: t.assignee || "",
-        date, startTime: t.startTime || "", endTime: t.endTime || "", steps: t.steps || [], conditions: t.conditions || [],
+        // The day the work is FOR, which is not always the day the note was
+        // written — "tomorrow 3 to 4pm" has to land on tomorrow.
+        date: t.date || date, startTime: t.startTime || "", endTime: t.endTime || "", steps: t.steps || [], conditions: t.conditions || [],
         status: "pending", origin: "scrum", noteId: note.id, createdBy: me, createdAt: new Date().toISOString(), work: {},
         // filed straight under the right stage of that project's plan
-        stageId: guessStageId(projects.find((x) => x.projectId === t.projectId)?.plan?.stages || [], { title: t.title, date, assigneeName: t.assignee || "" }),
+        stageId: guessStageId(projects.find((x) => x.projectId === t.projectId)?.plan?.stages || [], { title: t.title, date: t.date || date, assigneeName: t.assignee || "" }),
       }));
       created = newTasks.length;
       setTasks((x) => [...newTasks, ...x]);
@@ -3048,10 +3142,24 @@ function ScrumModule() {
                           <option value="">— assignee —</option>
                           {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                         </select>
+                        {/* The day the task is FOR. A note written today can raise
+                            work for tomorrow, and that has to be visible and
+                            correctable before it is saved. */}
+                        <input type="date" className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.date || date} onChange={(e) => updPrev(i, { date: e.target.value })} />
                         <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.startTime} onChange={(e) => updPrev(i, { startTime: e.target.value })} />
                         <span style={{ color: "var(--txt3)" }}>→</span>
                         <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.endTime} onChange={(e) => updPrev(i, { endTime: e.target.value })} />
                       </div>
+                      {/* Assigning someone who is not on the project is usually a
+                          mis-read of "the PM of 1752" — say so before it is saved. */}
+                      {t.offTeam && (
+                        <div style={{ marginTop: 7, fontSize: 11.5, color: "var(--amber)", display: "flex", gap: 6, alignItems: "center" }}>
+                          <AlertTriangle size={11} /> {users.find((u) => u.id === t.assigneeId)?.name || "That person"} is not on {t.projectId}'s team — check this is who you meant.
+                        </div>
+                      )}
+                      {t.date && t.date !== date && (
+                        <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt2)" }}>Scheduled for {fmtDate(t.date)}, not the note's day.</div>
+                      )}
                       {t.steps?.length > 0 && (
                         <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
                           {t.steps.map((s, si) => <div key={si} style={{ fontSize: 12.5, color: "var(--txt2)", display: "flex", gap: 7 }}><span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{si + 1}.</span>{s}</div>)}
