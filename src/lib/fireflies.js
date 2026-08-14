@@ -146,6 +146,28 @@ export async function transcriptsForDay(date) {
   }
 }
 
+/* Every transcript kept between two days. The client-call log reads this —
+   a conversation with the people paying for the work is worth finding weeks
+   later, not just on the day it happened. */
+export async function transcriptsBetween(from, to) {
+  if (!supabase) return { rows: [], error: "" };
+  try {
+    const { data, error } = await withLayoutRetry(supabase, () =>
+      tbl(supabase, "transcripts")
+        .select("id, external_id, title, meeting_date, duration_min, meeting_link, word_count, attendees, project_id, note_app_id")
+        .gte("meeting_date", from)
+        .lte("meeting_date", to)
+        .order("meeting_date", { ascending: false }));
+    if (error) throw error;
+    return { rows: data || [], error: "" };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    // No migration yet simply means no transcripts — not a failure to report.
+    if (/does not exist|schema cache|PGRST(106|205)/i.test(msg)) return { rows: [], error: "" };
+    return { rows: [], error: msg };
+  }
+}
+
 /* The whole transcript of one meeting, on demand. */
 export async function transcriptText(externalId) {
   if (!supabase) return { text: "", error: "" };

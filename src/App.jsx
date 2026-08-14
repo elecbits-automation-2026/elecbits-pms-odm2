@@ -39,7 +39,8 @@ import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText,
-         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, sendNotetaker, NOTETAKER } from "./lib/fireflies.js";
+         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, sendNotetaker, NOTETAKER,
+         transcriptsBetween } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -819,6 +820,44 @@ every if/else contingency as a condition with a timebox in minutes when stated
 
 Respond ONLY with valid JSON, no markdown, exactly this shape:
 {"summary":"one line","tasks":[{"projectId":"","title":"","assignee":"","date":"YYYY-MM-DD","startTime":"","endTime":"","steps":[""],"conditions":[{"if":"","then":"","timeboxMinutes":60}]}]}`;
+/* A call with the client is not a stand-up. What matters is who owes what to
+   whom: our promises become our tasks, theirs become things we chase, and a
+   change to scope is worth more than either. Same JSON shape as the scrum so
+   one organiser and one preview serve both, plus the two lists that only a
+   client conversation produces. */
+const clientCallPrompt = (raw, date, users, projects, memory, ctx) => `You are the Elecbits ODM client-call organiser.
+${memCtx(memory)}
+TEAM ROSTER: ${users.map((u) => `${u.name} (${u.title})`).join(", ")}
+ACTIVE PROJECTS (with who is on each one):
+${projects.map((p) => `  ${p.projectId} — ${p.name} [${p.status}] · client ${p.clientName || "—"}${teamLine(p, users)}`).join("\n") || "  none"}
+DATE (the day this call happened): ${date}
+${ctx.projectId ? `THIS CALL IS ABOUT PROJECT: ${ctx.projectId}${ctx.clientName ? ` (client ${ctx.clientName})` : ""}. Use that project id for every task unless the transcript clearly names a different one.` : "The project was not stated — infer it from the transcript, and leave projectId empty if it is not clear."}
+Transcript of the call with the client:
+"""${raw}"""
+
+Split what was said into three buckets.
+
+OURS — anything ELECBITS committed to, was asked for, or must fix. These become
+tasks. Assign each one to the person on that project's team whose slot fits the
+work — a ROLE ("their PM", "the hardware guy") means the person holding that
+slot ON THIS PROJECT, read off the team list above. If the call names no owner,
+give it to that project's PM. Never invent a person.
+
+THEIRS — anything the CLIENT said they would send, decide, approve or pay.
+These are not our tasks; they go in "waitingOn" with who at the client owes it
+and when they said it would come.
+
+DECISIONS — anything that changed: scope, spec, dates, price, a rejected
+approach. Short factual lines, no interpretation.
+
+WHEN — resolve days into "date" as YYYY-MM-DD: "today" or unstated = ${date};
+"tomorrow" = the day after ${date}; a weekday = the next such day on or after
+${date}. Fill startTime/endTime in 24h HH:MM whenever a time is spoken.
+A deadline the client stated is the task's date — do not quietly move it.
+
+Respond ONLY with valid JSON, no markdown, exactly this shape:
+{"summary":"one line on what the call was about","decisions":[""],"waitingOn":[{"what":"","who":"","when":""}],"tasks":[{"projectId":"","title":"","assignee":"","date":"YYYY-MM-DD","startTime":"","endTime":"","steps":[""],"conditions":[{"if":"","then":"","timeboxMinutes":60}]}]}`;
+
 const questionsPrompt = (t, work, memory) => `You are a strict QA gate for Elecbits ODM task closure.
 ${memCtx(memory)}
 TASK: "${t.title}" on project ${t.projectId || "(unlinked)"} | steps: ${(t.steps || []).join("; ") || "—"} | window ${t.startTime || "?"}–${t.endTime || "?"} | contingencies: ${(t.conditions || []).map((c) => `if ${c.if} then ${c.then}`).join("; ") || "none"}
@@ -969,7 +1008,7 @@ The actions, with their fields:
 {"action":"write_drive_file","projectId":"EB-24-001","fileName":"Milestones.md","content":"the complete file content"}
 {"action":"save_attachment","name":"Datasheet.pdf","projectId":"EB-24-001"}   (puts a file they attached into that project's Drive folder)
 {"action":"create_doc","title":"Kickoff plan","fileName":"Kickoff-Plan.md","content":"the complete document","projectId":"EB-24-001"}   (writes a real document and shows it in the chat as an openable, downloadable card; projectId is optional — include it to also file the doc in that project's Drive folder)
-{"action":"open_page","page":"scrum"}    (pages: projects, scrum, tasks, resources, perf, memory)
+{"action":"open_page","page":"scrum"}    (pages: projects, scrum, client, tasks, resources, perf, memory — "client" is the client-call log and its transcripts)
 
 HOW TO DECIDE
 - If the person is telling you something that belongs in the daily scrum ("today Ravi will…", a stand-up dump, anything about who is doing what today) — put it in with add_scrum_note. Do not just reply about it.
@@ -3437,26 +3476,13 @@ function MeetingsPanel({ date, onUse }) {
   );
 }
 
-function ScrumModule() {
-  const { notes, setNotes, tasks, setTasks, projects, users, me, toast, sheetSync, memory, now } = useCtx();
-  const [date, setDate] = useState(todayStr());
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [preview, setPreview] = useState(null);
-  // Which recorded meetings fed this note, so the saved note can point back at
-  // the transcripts it came from.
-  const [fromMeetings, setFromMeetings] = useState([]);
-
-  /* A pulled meeting is APPENDED, never a replacement — a stand-up is often a
-     call plus a few things somebody typed, and silently eating what was
-     already in the box would be the worst possible behaviour here. */
-  const useMeeting = useCallback((text, meeting) => {
-    if (!String(text || "").trim()) return;
-    setDraft((d) => (d.trim() ? `${d.trim()}\n\n${text}` : text));
-    if (meeting?.id) setFromMeetings((m) => (m.includes(meeting.id) ? m : [...m, meeting.id]));
-  }, []);
-
-  const normalize = (res) => ({
+/* The AI's answer turned into rows a person can correct before anything is
+   saved: real people, real project ids, the day the work is actually for, and
+   a flag when the person named is not on that project's team. The daily scrum
+   and the client-call organiser both come through here — one set of rules,
+   two doorways. */
+function normalizeOrganised(res, { date, projects, users }) {
+  return {
     summary: res.summary || "",
     engine: res.engine || "ai",
     tasks: (res.tasks || []).map((t) => {
@@ -3481,7 +3507,95 @@ function ScrumModule() {
         offTeam: !!(u && p && !onTeam),
       };
     }),
-  });
+  };
+}
+
+/* The editable list of proposed tasks. Nothing here is saved — this is the
+   last place to fix a wrong assignee, a wrong project or a wrong day. */
+function OrganisedTasks({ preview, date, users, onPatch }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {preview.tasks.map((t, i) => (
+        <div key={t.id} style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 12, background: "var(--s2)", opacity: t.include ? 1 : 0.45 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <input type="checkbox" checked={t.include} onChange={(e) => onPatch(i, { include: e.target.checked })} style={{ marginTop: 3 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <input className="inp" style={{ fontWeight: 600, background: "var(--s1)", marginBottom: 8 }} value={t.title} onChange={(e) => onPatch(i, { title: e.target.value })} />
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                {t.linked ? <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill> : <Pill color="var(--amber)"><AlertTriangle size={10} /> {t.projectId || "no project"} · unlinked</Pill>}
+                <select className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)" }} value={t.assigneeId} onChange={(e) => onPatch(i, { assigneeId: e.target.value })}>
+                  <option value="">— assignee —</option>
+                  {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+                {/* The day the task is FOR. A note written today can raise
+                    work for tomorrow, and that has to be visible and
+                    correctable before it is saved. */}
+                <input type="date" className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.date || date} onChange={(e) => onPatch(i, { date: e.target.value })} />
+                <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.startTime} onChange={(e) => onPatch(i, { startTime: e.target.value })} />
+                <span style={{ color: "var(--txt3)" }}>→</span>
+                <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.endTime} onChange={(e) => onPatch(i, { endTime: e.target.value })} />
+              </div>
+              {/* Assigning someone who is not on the project is usually a
+                  mis-read of "the PM of 1752" — say so before it is saved. */}
+              {t.offTeam && (
+                <div style={{ marginTop: 7, fontSize: 11.5, color: "var(--amber)", display: "flex", gap: 6, alignItems: "center" }}>
+                  <AlertTriangle size={11} /> {users.find((u) => u.id === t.assigneeId)?.name || "That person"} is not on {t.projectId}'s team — check this is who you meant.
+                </div>
+              )}
+              {t.date && t.date !== date && (
+                <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt2)" }}>Scheduled for {fmtDate(t.date)}, not the note's day.</div>
+              )}
+              {t.steps?.length > 0 && (
+                <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {t.steps.map((s, si) => <div key={si} style={{ fontSize: 12.5, color: "var(--txt2)", display: "flex", gap: 7 }}><span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{si + 1}.</span>{s}</div>)}
+                </div>
+              )}
+              <ConditionRail conditions={t.conditions} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Preview rows → real tasks. Kept in one place so a task raised from a client
+   call is the same shape as one raised from the scrum, and lands under the
+   right stage of the project plan either way. */
+function tasksFromPreview(preview, { date, me, projects, noteId, origin }) {
+  return preview.tasks.filter((t) => t.include).map((t) => ({
+    id: uid(), projectId: t.projectId, linked: t.linked, title: t.title,
+    assigneeId: t.assigneeId, assigneeName: t.assignee || "",
+    // The day the work is FOR, which is not always the day the note was
+    // written — "tomorrow 3 to 4pm" has to land on tomorrow.
+    date: t.date || date, startTime: t.startTime || "", endTime: t.endTime || "",
+    steps: t.steps || [], conditions: t.conditions || [],
+    status: "pending", origin, noteId, createdBy: me, createdAt: new Date().toISOString(), work: {},
+    // filed straight under the right stage of that project's plan
+    stageId: guessStageId(projects.find((x) => x.projectId === t.projectId)?.plan?.stages || [], { title: t.title, date: t.date || date, assigneeName: t.assignee || "" }),
+  }));
+}
+
+function ScrumModule() {
+  const { notes, setNotes, tasks, setTasks, projects, users, me, toast, sheetSync, memory, now } = useCtx();
+  const [date, setDate] = useState(todayStr());
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+  // Which recorded meetings fed this note, so the saved note can point back at
+  // the transcripts it came from.
+  const [fromMeetings, setFromMeetings] = useState([]);
+
+  /* A pulled meeting is APPENDED, never a replacement — a stand-up is often a
+     call plus a few things somebody typed, and silently eating what was
+     already in the box would be the worst possible behaviour here. */
+  const useMeeting = useCallback((text, meeting) => {
+    if (!String(text || "").trim()) return;
+    setDraft((d) => (d.trim() ? `${d.trim()}\n\n${text}` : text));
+    if (meeting?.id) setFromMeetings((m) => (m.includes(meeting.id) ? m : [...m, meeting.id]));
+  }, []);
+
+  const normalize = (res) => normalizeOrganised(res, { date, projects, users });
 
   const organize = async () => {
     if (!draft.trim()) return;
@@ -3500,15 +3614,7 @@ function ScrumModule() {
       by: me, createdAt: new Date().toISOString() };
     let created = 0;
     if (pushTasks && preview) {
-      const newTasks = preview.tasks.filter((t) => t.include).map((t) => ({
-        id: uid(), projectId: t.projectId, linked: t.linked, title: t.title, assigneeId: t.assigneeId, assigneeName: t.assignee || "",
-        // The day the work is FOR, which is not always the day the note was
-        // written — "tomorrow 3 to 4pm" has to land on tomorrow.
-        date: t.date || date, startTime: t.startTime || "", endTime: t.endTime || "", steps: t.steps || [], conditions: t.conditions || [],
-        status: "pending", origin: "scrum", noteId: note.id, createdBy: me, createdAt: new Date().toISOString(), work: {},
-        // filed straight under the right stage of that project's plan
-        stageId: guessStageId(projects.find((x) => x.projectId === t.projectId)?.plan?.stages || [], { title: t.title, date: t.date || date, assigneeName: t.assignee || "" }),
-      }));
+      const newTasks = tasksFromPreview(preview, { date, me, projects, noteId: note.id, origin: "scrum" });
       created = newTasks.length;
       setTasks((x) => [...newTasks, ...x]);
       [...new Set(newTasks.filter((t) => t.linked).map((t) => t.projectId))].forEach((pid) =>
@@ -3540,48 +3646,7 @@ function ScrumModule() {
               <Pill color={preview.engine === "offline" ? "var(--amber)" : "var(--purple)"}>{preview.engine === "offline" ? "Offline parse — review carefully" : "AI organised"}</Pill>
               <span style={{ fontSize: 12.5, color: "var(--txt2)" }}>{preview.summary}</span>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {preview.tasks.map((t, i) => (
-                <div key={t.id} style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 12, background: "var(--s2)", opacity: t.include ? 1 : 0.45 }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                    <input type="checkbox" checked={t.include} onChange={(e) => updPrev(i, { include: e.target.checked })} style={{ marginTop: 3 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <input className="inp" style={{ fontWeight: 600, background: "var(--s1)", marginBottom: 8 }} value={t.title} onChange={(e) => updPrev(i, { title: e.target.value })} />
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                        {t.linked ? <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill> : <Pill color="var(--amber)"><AlertTriangle size={10} /> {t.projectId || "no project"} · unlinked</Pill>}
-                        <select className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)" }} value={t.assigneeId} onChange={(e) => updPrev(i, { assigneeId: e.target.value })}>
-                          <option value="">— assignee —</option>
-                          {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-                        </select>
-                        {/* The day the task is FOR. A note written today can raise
-                            work for tomorrow, and that has to be visible and
-                            correctable before it is saved. */}
-                        <input type="date" className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.date || date} onChange={(e) => updPrev(i, { date: e.target.value })} />
-                        <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.startTime} onChange={(e) => updPrev(i, { startTime: e.target.value })} />
-                        <span style={{ color: "var(--txt3)" }}>→</span>
-                        <input type="time" className="inp" style={{ width: 108, padding: "5px 9px", background: "var(--s1)", fontFamily: MONO }} value={t.endTime} onChange={(e) => updPrev(i, { endTime: e.target.value })} />
-                      </div>
-                      {/* Assigning someone who is not on the project is usually a
-                          mis-read of "the PM of 1752" — say so before it is saved. */}
-                      {t.offTeam && (
-                        <div style={{ marginTop: 7, fontSize: 11.5, color: "var(--amber)", display: "flex", gap: 6, alignItems: "center" }}>
-                          <AlertTriangle size={11} /> {users.find((u) => u.id === t.assigneeId)?.name || "That person"} is not on {t.projectId}'s team — check this is who you meant.
-                        </div>
-                      )}
-                      {t.date && t.date !== date && (
-                        <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt2)" }}>Scheduled for {fmtDate(t.date)}, not the note's day.</div>
-                      )}
-                      {t.steps?.length > 0 && (
-                        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-                          {t.steps.map((s, si) => <div key={si} style={{ fontSize: 12.5, color: "var(--txt2)", display: "flex", gap: 7 }}><span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{si + 1}.</span>{s}</div>)}
-                        </div>
-                      )}
-                      <ConditionRail conditions={t.conditions} />
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <OrganisedTasks preview={preview} date={date} users={users} onPatch={updPrev} />
             <div style={{ display: "flex", gap: 10, marginTop: 13, flexWrap: "wrap" }}>
               <Btn kind="ghost" onClick={() => save(false)}>Save note only</Btn>
               <Btn icon={ListChecks} onClick={() => save(true)}>Save note + create {preview.tasks.filter((t) => t.include).length} task(s)</Btn>
@@ -3600,6 +3665,361 @@ function ScrumModule() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ═══ CLIENT COMMUNICATION ═══════════════════════════════════════════════
+   Everything said to the people paying for the work, in one place. Start the
+   call from here or hand over the link they sent; the notetaker records it
+   either way; the transcript is kept; and then the same organiser that runs
+   the daily scrum turns the conversation into tasks against the right
+   project and the right people. The gap this closes is the one where a
+   client asks for something on a Teams call and it exists nowhere
+   afterwards. */
+function ClientCallsModule() {
+  const { projects, users, tasks, setTasks, me, toast, memory } = useCtx();
+  const [days, setDays] = useState(14);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  const from = useMemo(() => {
+    const d = new Date(); d.setDate(d.getDate() - days);
+    return d.toISOString().slice(0, 10);
+  }, [days]);
+
+  const load = useCallback(async () => {
+    if (!firefliesEnabled) return;
+    setLoading(true);
+    const { rows: r, error } = await transcriptsBetween(from, todayStr());
+    setRows(r); setErr(error || ""); setLoading(false);
+  }, [from]);
+  useEffect(() => { load(); }, [load]);
+
+  /* The transcript being turned into work. */
+  const [openCall, setOpenCall] = useState(null);   // { id, title, date, text }
+  const [projectId, setProjectId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+
+  const read = async (t) => {
+    const { text, error } = await transcriptText(t.external_id);
+    if (error) { toast(error, "amber"); return; }
+    if (!text) { toast("That call has no stored text yet — Fireflies may still be writing it.", "amber"); return; }
+    setOpenCall({ id: t.external_id, title: t.title || "Client call", date: t.meeting_date || todayStr(), text });
+    setProjectId(t.project_id || guessProjectFor(t, projects));
+    setPreview(null);
+  };
+
+  const organize = async () => {
+    if (!openCall) return;
+    setBusy(true); setPreview(null);
+    const p = projects.find((x) => x.projectId === projectId);
+    try {
+      // A call produces more than a stand-up note does — three lists instead
+      // of one — so it needs the room to answer.
+      const res = await claude(clientCallPrompt(openCall.text, openCall.date, users, projects, memory,
+        { projectId, clientName: p?.clientName || "" }), { maxTokens: 2500 });
+      setPreview({
+        ...normalizeOrganised(res, { date: openCall.date, projects, users }),
+        decisions: res.decisions || [],
+        waitingOn: res.waitingOn || [],
+      });
+    } catch (e) {
+      toast(`AI couldn't read that call: ${e?.message || e}`, "amber");
+    }
+    setBusy(false);
+  };
+
+  const updPrev = (i, patch) => setPreview((pv) => ({ ...pv, tasks: pv.tasks.map((t, j) => (j === i ? { ...t, ...patch } : t)) }));
+
+  const create = () => {
+    const made = tasksFromPreview(preview, {
+      date: openCall.date, me, projects,
+      // The transcript is the record this work came out of, so the task can
+      // always be traced back to the sentence that caused it.
+      noteId: openCall.id, origin: "client",
+    });
+    if (!made.length) { toast("Nothing ticked.", "amber"); return; }
+    setTasks((x) => [...made, ...x]);
+    toast(`${made.length} task(s) raised from ${openCall.title}`, "green");
+    setPreview(null); setOpenCall(null);
+  };
+
+  const taskCount = (t) => tasks.filter((x) => x.noteId === t.external_id).length;
+
+  if (!firefliesEnabled) {
+    return <div className="card"><Empty icon={Video} title="Client calls are not connected in this build"
+      sub="Set VITE_FIREFLIES_URL (and VITE_MEET_URL to start calls from here) in Vercel, then redeploy." /></div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="card" style={{ padding: 18 }}>
+        <SectionTitle icon={Video}>Talk to the client</SectionTitle>
+        <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 4 }}>
+          Start the call from here and it is recorded automatically. If the client sent their own
+          Teams or Zoom link, paste it instead — the notetaker joins that just as well.
+        </div>
+        <ClientMeetSetup projects={projects} users={users} onDone={load} />
+        <RecordAnyCall />
+      </div>
+
+      <div>
+        <SectionTitle icon={FileText} right={
+          <select className="inp" style={{ width: 150 }} value={days} onChange={(e) => setDays(Number(e.target.value))}>
+            <option value={7}>last 7 days</option>
+            <option value={14}>last 14 days</option>
+            <option value={30}>last 30 days</option>
+            <option value={90}>last 3 months</option>
+          </select>
+        }>
+          Calls on record <Pill color="var(--txt2)">{rows.length}</Pill>
+        </SectionTitle>
+        {err && <div className="card" style={{ padding: 14, fontSize: 12.5, color: "var(--red)" }}>{err}</div>}
+        {!err && rows.length === 0 && (
+          <div className="card"><Empty icon={Video} title={loading ? "Looking…" : "No calls recorded yet"}
+            sub="Every call the notetaker sits in is kept here with its full transcript — then organised into tasks." /></div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {rows.map((t) => {
+            const n = taskCount(t);
+            return (
+              <div key={t.id} className="card" style={{ padding: 14, borderLeft: "3px solid var(--purple)" }}>
+                <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+                  <Mic size={13} style={{ color: "var(--txt3)" }} />
+                  <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t.title || "(untitled call)"}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--txt2)" }}>{fmtDate(t.meeting_date)}</span>
+                  {t.duration_min != null && <Pill color="var(--txt2)">{t.duration_min} min</Pill>}
+                  {t.project_id && <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.project_id}</Pill>}
+                  {/* Whether this conversation ever became work. A call with no
+                      tasks out of it is the thing worth spotting here. */}
+                  <Pill color={n ? "var(--green)" : "var(--amber)"}>{n ? `${n} task(s) raised` : "nothing raised yet"}</Pill>
+                  <Btn kind="ghost" style={{ marginLeft: "auto", padding: "4px 10px", fontSize: 12 }}
+                       onClick={() => read(t)}>Open & organise</Btn>
+                </div>
+                {t.attendees?.length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt2)" }}>{t.attendees.join(", ")}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {openCall && (
+        <div className="card fade" style={{ padding: 18 }}>
+          <SectionTitle icon={Sparkles} right={<Btn kind="ghost" icon={X} onClick={() => { setOpenCall(null); setPreview(null); }}>Close</Btn>}>
+            {openCall.title} — {fmtDate(openCall.date)}
+          </SectionTitle>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>
+            <select className="inp" style={{ width: 280 }} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              <option value="">— which project is this call about? —</option>
+              {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}{p.clientName ? ` · ${p.clientName}` : ""}</option>)}
+            </select>
+            <Btn icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={organize} style={busy ? { pointerEvents: "none" } : {}}>
+              {busy ? "Reading the call…" : "Organise with AI"}
+            </Btn>
+          </div>
+          <textarea className="inp" rows={8} style={{ lineHeight: 1.6, fontSize: 12.5, fontFamily: MONO }}
+                    value={openCall.text} onChange={(e) => setOpenCall({ ...openCall, text: e.target.value })} />
+          <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 6 }}>
+            The whole transcript, as recorded. Trim anything irrelevant before organising — a shorter call reads better.
+          </div>
+
+          {preview && (
+            <div className="fade" style={{ marginTop: 14, borderTop: "1px dashed var(--bdr2)", paddingTop: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                <Pill color="var(--purple)">AI organised</Pill>
+                <span style={{ fontSize: 12.5, color: "var(--txt2)" }}>{preview.summary}</span>
+              </div>
+
+              {preview.decisions?.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>What changed</div>
+                  {preview.decisions.map((d, i) => (
+                    <div key={i} style={{ fontSize: 12.5, display: "flex", gap: 8, padding: "2px 0" }}>
+                      <span style={{ color: "var(--txt3)" }}>·</span>{d}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* What the CLIENT owes us. Not our tasks — but the thing most
+                  likely to stall the project, so it is not buried. */}
+              {preview.waitingOn?.length > 0 && (
+                <div style={{ marginBottom: 12, border: "1px solid var(--bdr)", borderRadius: 10, padding: 11, background: "var(--s2)" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--amber)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>Waiting on the client</div>
+                  {preview.waitingOn.map((w, i) => (
+                    <div key={i} style={{ fontSize: 12.5, display: "flex", gap: 8, padding: "2px 0", flexWrap: "wrap" }}>
+                      <span>{w.what}</span>
+                      {w.who && <Pill color="var(--txt2)">{w.who}</Pill>}
+                      {w.when && <span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{w.when}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>What we owe them</div>
+              {preview.tasks.length === 0
+                ? <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>Nothing was committed to on our side.</div>
+                : <OrganisedTasks preview={preview} date={openCall.date} users={users} onPatch={updPrev} />}
+              {preview.tasks.length > 0 && (
+                <div style={{ marginTop: 13 }}>
+                  <Btn icon={ListChecks} onClick={create}>Create {preview.tasks.filter((t) => t.include).length} task(s)</Btn>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Which project a recorded call was probably about, when nobody said. The
+   title is the only clue most calls carry, so match a project id or a client
+   name in it — and return nothing rather than a guess when neither is there. */
+function guessProjectFor(t, projects) {
+  const hay = `${t.title || ""} ${(t.attendees || []).join(" ")}`.toLowerCase();
+  const byId = projects.find((p) => p.projectId && hay.includes(normId(p.projectId)));
+  if (byId) return byId.projectId;
+  const tail = hay.match(/\b\d{4}\b/)?.[0];
+  const byTail = tail && projects.find((p) => normId(p.projectId).endsWith(tail));
+  if (byTail) return byTail.projectId;
+  const byClient = projects.find((p) => p.clientName && hay.includes(p.clientName.toLowerCase()));
+  return byClient?.projectId || "";
+}
+
+/* Setting up the call with the client. Their people are typed in — they are
+   not on our roster — and ours are picked off it. The notetaker is a guest
+   like everyone else, and the client sees it in the invitation. */
+function ClientMeetSetup({ projects, users, onDone }) {
+  const { toast } = useCtx();
+  const [open, setOpen] = useState(false);
+  const [f, setF] = useState({ title: "", date: todayStr(), startTime: "15:00", endTime: "16:00", projectId: "", record: true });
+  const [guests, setGuests] = useState("");
+  const [picked, setPicked] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [made, setMade] = useState(null);
+
+  const project = projects.find((p) => p.projectId === f.projectId);
+
+  /* Picking the project fills in the obvious: the client's own contact and a
+     title nobody has to think about. */
+  const pickProject = (id) => {
+    const p = projects.find((x) => x.projectId === id);
+    setF((v) => ({ ...v, projectId: id, title: v.title || (p ? `${p.clientName || p.name} — ${p.projectId}` : "") }));
+    if (p?.contact?.email && !guests.includes(p.contact.email)) {
+      setGuests((g) => (g.trim() ? `${g.trim()}, ${p.contact.email}` : p.contact.email));
+    }
+    // Their team should be in the room by default.
+    if (p) setPicked((cur) => (cur.length ? cur : (p.team || []).map((m) => String(m.userId)).filter((uid_) => users.some((u) => String(u.id) === uid_))));
+  };
+
+  const clientEmails = guests.split(/[,;\s]+/).map((s) => s.trim()).filter((s) => /.+@.+\..+/.test(s));
+  const toggle = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+
+  const go = async () => {
+    setBusy(true);
+    const ours = picked.map((id) => users.find((u) => String(u.id) === String(id))?.email).filter(Boolean);
+    const r = await createMeeting({
+      ...f, title: f.title || "Client call",
+      attendees: [...new Set([...ours, ...clientEmails])],
+      description: project ? `Client call for ${project.projectId} — ${project.name}` : "",
+    });
+    setBusy(false);
+    if (r.error) { toast(r.error, "amber"); return; }
+    setMade(r);
+    onDone?.();
+    if (r.warning) toast(r.warning, "amber");
+    else if (f.record && r.notetakerInvited === false) {
+      toast(`Call created, but ${r.notetaker || "the notetaker"} was dropped from the guest list — it will NOT be recorded.`, "amber");
+    } else toast(`Client call created — ${clientEmails.length} at the client, ${ours.length} of ours`, "green");
+  };
+
+  if (!meetEnabled) return null;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>Set up a call with the client</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>we send the invitation, we hold the recording</span>
+        <Btn kind="ghost" style={{ marginLeft: "auto" }} onClick={() => setOpen((v) => !v)}>{open ? "Close" : "New client call"}</Btn>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>
+          <select className="inp" style={{ maxWidth: 340 }} value={f.projectId} onChange={(e) => pickProject(e.target.value)}>
+            <option value="">— which project? —</option>
+            {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}{p.clientName ? ` · ${p.clientName}` : ""}</option>)}
+          </select>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input className="inp" style={{ flex: 1, minWidth: 190 }} placeholder="What is the call about?"
+                   value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+            <input type="date" className="inp" style={{ width: 150, fontFamily: MONO }} value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
+            <input type="time" className="inp" style={{ width: 108, fontFamily: MONO }} value={f.startTime} onChange={(e) => setF({ ...f, startTime: e.target.value })} />
+            <span style={{ color: "var(--txt3)", alignSelf: "center" }}>→</span>
+            <input type="time" className="inp" style={{ width: 108, fontFamily: MONO }} value={f.endTime} onChange={(e) => setF({ ...f, endTime: e.target.value })} />
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 5 }}>
+              The client's side — email addresses{project?.contact?.name ? ` (${project.contact.name} is their contact)` : ""}
+            </div>
+            <input className="inp" placeholder="rajesh@acme.dev, procurement@acme.dev"
+                   value={guests} onChange={(e) => setGuests(e.target.value)} />
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 5 }}>
+              Our side{project ? ` — ${project.projectId}'s team` : ""}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <div onClick={() => setF((v) => ({ ...v, record: !v.record }))}
+                   title={f.record ? `${NOTETAKER} is invited — it joins and writes the transcript` : `${NOTETAKER} is not invited — this call will not be recorded`}
+                   style={{ cursor: "pointer", fontSize: 12, padding: "4px 9px", borderRadius: 20,
+                            display: "flex", alignItems: "center", gap: 5,
+                            border: "1px solid " + (f.record ? "var(--acc)" : "var(--bdr)"),
+                            background: f.record ? "var(--soft)" : "var(--s1)",
+                            color: f.record ? "var(--acc)" : "var(--txt3)" }}>
+                <Mic size={11} />
+                Fred (Fireflies){f.record ? " ✓" : ""}
+              </div>
+              {users.filter((u) => u.email).map((u) => {
+                const on = picked.includes(String(u.id));
+                return (
+                  <div key={u.id} onClick={() => toggle(String(u.id))}
+                       style={{ cursor: "pointer", fontSize: 12, padding: "4px 9px", borderRadius: 20,
+                                border: "1px solid " + (on ? "var(--acc)" : "var(--bdr)"),
+                                background: on ? "var(--soft)" : "var(--s1)", color: on ? "var(--acc)" : "var(--txt2)" }}>
+                    {u.name}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+            <Btn icon={busy ? Loader2 : Video} disabled={busy || (!clientEmails.length && !picked.length)} onClick={go}>
+              {busy ? "Creating…" : "Create the call & invite everyone"}
+            </Btn>
+            <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>
+              {clientEmails.length} at the client · {picked.length} of ours{f.record ? " · recorded" : ""}
+            </span>
+          </div>
+
+          {made?.meetLink && (
+            <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+              <a href={made.meetLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", fontFamily: MONO }}>{made.meetLink}</a>
+              <Btn kind="ghost" style={{ padding: "3px 8px", fontSize: 11.5 }}
+                   onClick={() => { navigator.clipboard?.writeText(made.meetLink); toast("Link copied — send it to the client", "green"); }}>Copy</Btn>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -6116,6 +6536,9 @@ const NAV_GROUPS = [
     { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
     { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
   ]],
+  ["Clients", [
+    { id: "client", label: "Client Communication", icon: Video },
+  ]],
   ["Resources", [
     { id: "resources", label: "Resources", icon: Users },
   ]],
@@ -6134,6 +6557,7 @@ const TITLES = {
   projects: ["Projects", "Add or create a project · hard gates on Project ID + both LLDs · open one for its plan, files and chat"],
   mom: ["Brainstorming Sessions", "Brainstorms, challenges and how they were beaten — kept so the same mistake is never made twice, and so good ideas get credited"],
   scrum: ["Daily Scrum", "Write it as it comes — AI turns it into assigned, time-boxed, if/else-aware tasks"],
+  client: ["Client Communication", "Every call with the client — start it here or paste theirs, it gets recorded, and AI turns what was said into tasks"],
   tasks: ["My Projects & Tasks", "Start → work window → AI-gated closure · branch stuck work back to scrum"],
   resources: ["Resources", "Team roster, availability, deployment & efficiency"],
   perf: ["Performance & Training", "PM KPIs with red alerts · daily work updates scored against the KPI · trainings"],
@@ -6710,6 +7134,7 @@ export default function App() {
             {view === "assistant" && <AssistantModule />}
             {view === "projects" && <ProjectsModule />}
             {view === "scrum" && <ScrumModule />}
+            {view === "client" && <ClientCallsModule />}
             {view === "tasks" && <TasksModule />}
             {view === "mom" && <MomModule />}
             {view === "resources" && <ResourcesModule />}
