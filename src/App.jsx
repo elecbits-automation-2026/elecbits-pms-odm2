@@ -39,7 +39,7 @@ import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText,
-         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, NOTETAKER } from "./lib/fireflies.js";
+         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, sendNotetaker, NOTETAKER } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3238,6 +3238,22 @@ function MeetingsPanel({ date, onUse }) {
     refreshSoon();
   };
 
+  /* Being on the guest list is only an invitation; Fireflies acts on it only
+     if it recognises the organiser and its calendar link is healthy. This
+     tells Fireflies directly, which needs neither. It cannot dial into a room
+     that has not opened, so it is offered from the start time onward. */
+  const [sending, setSending] = useState("");
+  const bringFred = async (m) => {
+    setSending(m.eventId);
+    const { error, notetaker } = await sendNotetaker(m.meetLink, { title: m.title, durationMin: m.durationMin });
+    setSending("");
+    toast(error || `${notetaker} is joining ${m.title} — give it about a minute.`, error ? "amber" : "green");
+  };
+  const hasStarted = (m) => {
+    const t = Date.parse(m.start || "");
+    return !Number.isFinite(t) || t <= Date.now() + 2 * 60 * 1000;
+  };
+
   // Neither half switched on means nothing to show.
   if (!firefliesEnabled && !meetEnabled) return null;
 
@@ -3303,6 +3319,17 @@ function MeetingsPanel({ date, onUse }) {
                       between "we have the transcript" and "we thought we did". */}
                   <Pill color={m.recording ? "var(--green)" : "var(--txt2)"}>{m.recording ? "recording" : "not recorded"}</Pill>
                   <a href={m.meetLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>Join ↗</a>
+                  {firefliesEnabled && m.meetLink && (
+                    <Btn kind="ghost" icon={sending === m.eventId ? Loader2 : Mic}
+                         disabled={!!sending || !hasStarted(m)}
+                         title={hasStarted(m)
+                           ? "Ask Fireflies to send the notetaker into this call now"
+                           : "Available once the call has started"}
+                         onClick={() => bringFred(m)}
+                         style={{ padding: "3px 8px", fontSize: 11.5 }}>
+                      {sending === m.eventId ? "Sending…" : "Send Fred in"}
+                    </Btn>
+                  )}
                   <Btn kind="ghost" onClick={() => callOff(m)} style={{ padding: "3px 8px", fontSize: 11.5 }}>Cancel</Btn>
                 </div>
               ))}

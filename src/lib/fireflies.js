@@ -81,6 +81,16 @@ export async function upcomingMeetings(days = 7) {
   return r.error ? { meetings: [], error: r.error } : { meetings: r.meetings || [], notetaker: r.notetaker || "", error: "" };
 }
 
+/* Send the notetaker into a call that is running right now. The calendar
+   invitation only works when Fireflies recognises the organiser and its
+   calendar link is healthy; this asks Fireflies outright, so it works even
+   when that chain is broken. The call has to have started — Fred cannot wait
+   in an empty room. */
+export async function sendNotetaker(meetLink, { title = "", durationMin = 60 } = {}) {
+  const r = await call({ action: "join", meetLink, title, durationMin }, 60000);
+  return r.error ? { error: r.error } : { joined: true, notetaker: r.notetaker || NOTETAKER, error: "" };
+}
+
 export async function cancelMeeting(eventId) {
   const r = await callMeet({ action: "cancel", eventId });
   return r.error ? { error: r.error } : { error: "" };

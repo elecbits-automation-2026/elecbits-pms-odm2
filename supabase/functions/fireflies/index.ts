@@ -27,6 +27,8 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 // Fireflies signs its webhooks when you give it a secret; when it is set we
 // refuse anything that does not carry the right signature.
 const WEBHOOK_SECRET = (Deno.env.get("FIREFLIES_WEBHOOK_SECRET") ?? "").trim();
+// The notetaker's own address — the same one the `meet` function invites.
+const NOTETAKER = (Deno.env.get("FIREFLIES_NOTETAKER_EMAIL") || "fred@fireflies.ai").trim().toLowerCase();
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -58,6 +60,21 @@ async function callerId(req: Request, bodyJwt?: string): Promise<{ id: string; e
    WHOLE query for one unknown field. So: ask for everything useful, and if the
    server says a field does not exist, drop that field and ask again. A rename
    at their end costs a retry instead of an outage at ours. */
+/* Dropping an argument orphans its variable, and GraphQL rejects a declared
+   variable nobody uses. Take the declaration out too. */
+function dropUnusedVariables(q: string): string {
+  const head = q.match(/^\s*(query|mutation)\s+\w*\s*\(([^)]*)\)/);
+  if (!head) return q;
+  const body = q.slice(head[0].length);
+  const kept = head[2].split(",").map((s) => s.trim()).filter(Boolean)
+    .filter((d) => {
+      const name = d.match(/^\$([A-Za-z_]+)/)?.[1];
+      return name ? new RegExp(`\\$${name}\\b`).test(body) : true;
+    });
+  const sig = kept.length ? `(${kept.join(", ")})` : "";
+  return q.slice(0, head.index! + head[0].length).replace(/\([^)]*\)\s*$/, sig) + body;
+}
+
 async function fireflies(query: string, variables: Record<string, unknown>): Promise<{ data?: any; error?: string }> {
   if (!FIREFLIES_KEY) return { error: "FIREFLIES_API_KEY is not set on this function." };
   let q = query;
@@ -87,7 +104,12 @@ async function fireflies(query: string, variables: Record<string, unknown>): Pro
     const unknown = errs
       .map((e) => String(e.message || "").match(/Cannot query field ["']([A-Za-z_]+)["']/)?.[1])
       .filter(Boolean) as string[];
-    if (!unknown.length) return { error: errs[0]?.message || "Fireflies rejected the query." };
+    // "Unknown argument \"duration\" on field \"addToLiveMeeting\"." → same idea,
+    // but an argument, and its variable declaration has to go with it.
+    const badArgs = errs
+      .map((e) => String(e.message || "").match(/Unknown argument ["']([A-Za-z_]+)["']/)?.[1])
+      .filter(Boolean) as string[];
+    if (!unknown.length && !badArgs.length) return { error: errs[0]?.message || "Fireflies rejected the query." };
     const before = q;
     for (const f of unknown) {
       // Remove the field wherever it appears as its own token, including a
@@ -95,10 +117,22 @@ async function fireflies(query: string, variables: Record<string, unknown>): Pro
       q = q.replace(new RegExp(`\\b${f}\\s*\\{[^{}]*\\}`, "g"), "")
            .replace(new RegExp(`(^|\\s)${f}(?=\\s|$)`, "g"), "$1");
     }
+    for (const a of badArgs) q = q.replace(new RegExp(`,?\\s*\\b${a}:\\s*\\$[A-Za-z_]+`, "g"), "");
+    q = dropUnusedVariables(q);
     if (q === before) return { error: errs[0]?.message || "Fireflies rejected the query." };
   }
   return { error: "Fireflies kept rejecting the query." };
 }
+
+/* "Fred, join this call." The optional arguments are dropped automatically if
+   Fireflies does not know them, so a schema change costs a retry, not the
+   feature. */
+const JOIN_MUTATION = `
+mutation SendFred($link: String!, $title: String, $duration: Int) {
+  addToLiveMeeting(meeting_link: $link, title: $title, duration: $duration) {
+    success
+  }
+}`;
 
 const LIST_QUERY = `
 query Meetings($fromDate: DateTime, $toDate: DateTime, $limit: Int) {
@@ -298,6 +332,35 @@ Deno.serve(async (req) => {
       by: who.id,
     });
     return json(out, (out as any).error ? 502 : 200);
+  }
+
+  /* ── send the notetaker into a call that is happening now ─────────────────
+     Inviting fred@fireflies.ai to the calendar event is a hint, not a command:
+     Fireflies only acts on it if the organiser's address is one of its own
+     users and its calendar integration is live. When that chain is broken the
+     guest sits on the invitation and never dials in. This asks Fireflies
+     directly, which needs none of that — a link and a person who is in the
+     call is enough. */
+  if (body.action === "join") {
+    const link = String(body.meetLink || "").trim();
+    if (!/^https?:\/\//.test(link)) return json({ error: "Give me the Meet link to send Fred to." }, 400);
+    const { data, error } = await fireflies(JOIN_MUTATION, {
+      link,
+      title: String(body.title || "Elecbits meeting"),
+      duration: Number(body.durationMin) > 0 ? Math.min(Number(body.durationMin), 240) : 60,
+    });
+    if (error) {
+      // The notetaker API is a paid feature; say so instead of relaying
+      // "Forbidden" and leaving someone to guess.
+      const plan = /not authorized|permission|plan|upgrade|subscription/i.test(error)
+        ? " Sending the notetaker on demand needs a Fireflies Business plan or above."
+        : "";
+      return json({ error: error + plan }, 502);
+    }
+    const ok = data?.addToLiveMeeting?.success;
+    return ok === false
+      ? json({ error: "Fireflies took the request but would not join. Check that the call has started." }, 502)
+      : json({ ok: true, joined: true, notetaker: NOTETAKER });
   }
 
   return json({ error: `Unknown action "${body.action}".` }, 400);
