@@ -132,6 +132,8 @@ export const scrumNoteRow = (n) => ({
     ? { by: fk(n.by), by_app_id: text(n.by) }
     : { author_id: fk(n.by), author_app_id: text(n.by) }),
   project_id: text(n.projectId),
+  // Which recorded meetings this note was built from — empty for a typed one.
+  meeting_ids: arr(n.meetingIds).filter(Boolean).map(String),
   created_at: at(n.createdAt),
 });
 

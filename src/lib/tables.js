@@ -45,6 +45,9 @@ const WHERE = {
   intel:              ["pms", "intel"],               // was public.project_intel
   work_updates:       ["pms", "work_updates"],
   kpi_log:            ["pms", "kpi_log"],
+  // Meeting transcripts (Google Meet, captured by Fireflies). Added after the
+  // schema split, so it carries the same name in both layouts.
+  transcripts:        ["pms", "transcripts"],
 };
 
 /* The same tables before the reorganisation: all in `public`, and eleven of

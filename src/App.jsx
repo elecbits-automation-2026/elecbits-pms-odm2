@@ -27,7 +27,8 @@ import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
-  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search
+  Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
+  Video, Mic
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -37,6 +38,7 @@ import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
+import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3042,12 +3044,146 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
 const SCRUM_PLACEHOLDER = `e.g. — project ID esp-32-123: check the gerber file, rahul 12pm to 1pm. If the gerber is fine, great; if not, verify the schematic and submit a report in an hour. gargi checks the BoM 12 to 1pm.
 Ask akshay to have the client communicated by 2pm.`;
 
+/* ── The stand-up that nobody had to type ──────────────────────────────────
+   Fireflies sits in the Google Meet call and writes down what was said. This
+   panel brings that in: pick the meeting, its action items and summary land in
+   the scrum box, and "Organise with AI" turns them into assigned, time-boxed
+   tasks exactly as a typed note would. The full transcript is kept in its own
+   table — every line, with who said it — so "we agreed X" stays answerable
+   long after the box has been edited down.                                  */
+function MeetingsPanel({ date, onUse }) {
+  const { toast } = useCtx();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [meetings, setMeetings] = useState(null);
+  const [kept, setKept] = useState([]);
+  const [err, setErr] = useState("");
+  const [pulling, setPulling] = useState("");
+
+  // What has already been captured for this day, so a meeting is never pulled
+  // in twice without the person knowing.
+  const refreshKept = useCallback(async () => {
+    const { rows } = await transcriptsForDay(date);
+    setKept(rows || []);
+  }, [date]);
+  useEffect(() => { if (open) refreshKept(); }, [open, refreshKept]);
+
+  const find = async () => {
+    setBusy(true); setErr(""); setMeetings(null);
+    const { meetings: got, error } = await listMeetings(date);
+    if (error) setErr(error); else setMeetings(got);
+    setBusy(false);
+    refreshKept();
+  };
+
+  const pull = async (m) => {
+    setPulling(m.id); setErr("");
+    const r = await importMeeting(m.id, {});
+    setPulling("");
+    if (r.error) { setErr(r.error); return; }
+    onUse(r.text, m);
+    // Storing is best-effort; the meeting is still usable if it failed, and
+    // saying so is better than a silent gap in the record.
+    if (r.stored) toast(`${r.title || "Meeting"} added — transcript kept (${r.wordCount.toLocaleString()} words)`, "green");
+    else toast(`Added to the scrum, but the transcript wasn't stored — ${r.storeError || "check the fireflies function"}`, "amber");
+    refreshKept();
+  };
+
+  const readWhole = async (t) => {
+    const { text } = await transcriptText(t.external_id);
+    if (!text) { toast("That transcript has no stored text.", "amber"); return; }
+    onUse(text, { title: t.title });
+    toast("Full transcript put in the box — trim it before organising.", "green");
+  };
+
+  if (!firefliesEnabled) return null;
+
+  return (
+    <div style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 12, background: "var(--s2)", marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <Video size={15} style={{ color: "var(--acc)" }} />
+        <span style={{ fontWeight: 600, fontSize: 13 }}>Meeting transcripts</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>Google Meet, captured by Fireflies</span>
+        {kept.length > 0 && <Pill color="var(--green)">{kept.length} kept for this day</Pill>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          {open && <Btn kind="ghost" icon={busy ? Loader2 : Search} disabled={busy} onClick={find}>{busy ? "Looking…" : "Find meetings"}</Btn>}
+          <Btn kind="ghost" onClick={() => setOpen((v) => !v)}>{open ? "Hide" : "Show"}</Btn>
+        </div>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 11, display: "flex", flexDirection: "column", gap: 8 }}>
+          {err && <div style={{ fontSize: 12, color: "var(--red)" }}>{err}</div>}
+
+          {meetings?.length === 0 && !err && (
+            <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>
+              No meetings recorded on {fmtDate(date)}. Fireflies only sees calls it was invited to.
+            </div>
+          )}
+
+          {(meetings || []).map((m) => {
+            const already = kept.some((k) => k.external_id === m.id);
+            return (
+              <div key={m.id} style={{ border: "1px solid var(--bdr)", borderRadius: 9, padding: 10, background: "var(--s1)" }}>
+                <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+                  <Mic size={13} style={{ color: "var(--txt3)" }} />
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{m.title}</span>
+                  {m.durationMin != null && <Pill color="var(--txt2)">{m.durationMin} min</Pill>}
+                  {already && <Pill color="var(--green)">already captured</Pill>}
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 7 }}>
+                    {m.meetingLink && (
+                      <a href={m.meetingLink} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "var(--acc)", textDecoration: "none", alignSelf: "center" }}>Open Meet ↗</a>
+                    )}
+                    <Btn kind="ghost" icon={pulling === m.id ? Loader2 : ArrowRight} disabled={!!pulling}
+                         onClick={() => pull(m)}>{pulling === m.id ? "Pulling…" : already ? "Pull again" : "Pull into scrum"}</Btn>
+                  </div>
+                </div>
+                {m.attendees?.length > 0 && (
+                  <div style={{ marginTop: 5, fontSize: 11.5, color: "var(--txt2)" }}>{m.attendees.join(", ")}</div>
+                )}
+              </div>
+            );
+          })}
+
+          {kept.length > 0 && (
+            <div style={{ marginTop: 4, borderTop: "1px dashed var(--bdr2)", paddingTop: 9 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>
+                Kept for {fmtDate(date)}
+              </div>
+              {kept.map((t) => (
+                <div key={t.id} style={{ display: "flex", gap: 9, alignItems: "center", fontSize: 12.5, padding: "4px 0", flexWrap: "wrap" }}>
+                  <FileText size={12} style={{ color: "var(--txt3)" }} />
+                  <span>{t.title || "(untitled)"}</span>
+                  <span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{(t.word_count || 0).toLocaleString()} words</span>
+                  <Btn kind="ghost" onClick={() => readWhole(t)} style={{ padding: "3px 8px", fontSize: 11.5 }}>Put full text in the box</Btn>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScrumModule() {
   const { notes, setNotes, tasks, setTasks, projects, users, me, toast, sheetSync, memory, now } = useCtx();
   const [date, setDate] = useState(todayStr());
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null);
+  // Which recorded meetings fed this note, so the saved note can point back at
+  // the transcripts it came from.
+  const [fromMeetings, setFromMeetings] = useState([]);
+
+  /* A pulled meeting is APPENDED, never a replacement — a stand-up is often a
+     call plus a few things somebody typed, and silently eating what was
+     already in the box would be the worst possible behaviour here. */
+  const useMeeting = useCallback((text, meeting) => {
+    if (!String(text || "").trim()) return;
+    setDraft((d) => (d.trim() ? `${d.trim()}\n\n${text}` : text));
+    if (meeting?.id) setFromMeetings((m) => (m.includes(meeting.id) ? m : [...m, meeting.id]));
+  }, []);
 
   const normalize = (res) => ({
     summary: res.summary || "",
@@ -3087,7 +3223,10 @@ function ScrumModule() {
 
   const save = (pushTasks) => {
     const dayNotes = notes.filter((n) => n.date === date);
-    const note = { id: uid(), date, noteNo: dayNotes.length + 1, time: nowHM(), raw: draft, organized: preview, origin: "manual", by: me, createdAt: new Date().toISOString() };
+    const note = { id: uid(), date, noteNo: dayNotes.length + 1, time: nowHM(), raw: draft, organized: preview,
+      // A note built from a recorded call says so, and names the meetings.
+      origin: fromMeetings.length ? "meeting" : "manual", meetingIds: fromMeetings,
+      by: me, createdAt: new Date().toISOString() };
     let created = 0;
     if (pushTasks && preview) {
       const newTasks = preview.tasks.filter((t) => t.include).map((t) => ({
@@ -3106,7 +3245,7 @@ function ScrumModule() {
     }
     setNotes((x) => [note, ...x]);
     toast(created ? `Note ${note.noteNo} saved — ${created} task(s) created` : `Note ${note.noteNo} saved`, "green");
-    setDraft(""); setPreview(null);
+    setDraft(""); setPreview(null); setFromMeetings([]);
   };
 
   const dayNotes = notes.filter((n) => n.date === date).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -3117,6 +3256,7 @@ function ScrumModule() {
         <SectionTitle icon={NotebookPen} right={<input type="date" className="inp" style={{ width: 160 }} value={date} onChange={(e) => setDate(e.target.value)} />}>
           Daily scrum — write it as it comes
         </SectionTitle>
+        <MeetingsPanel date={date} onUse={useMeeting} />
         <textarea className="inp" rows={5} style={{ lineHeight: 1.6, fontSize: 13.5 }} placeholder={SCRUM_PLACEHOLDER} value={draft} onChange={(e) => setDraft(e.target.value)} />
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
           <Btn icon={busy ? Loader2 : Sparkles} disabled={busy || !draft.trim()} onClick={organize} style={busy ? { pointerEvents: "none" } : {}}>{busy ? "Organising…" : "Organise with AI"}</Btn>
