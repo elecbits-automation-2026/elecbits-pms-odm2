@@ -3052,6 +3052,82 @@ Ask akshay to have the client communicated by 2pm.`;
    tasks exactly as a typed note would. The full transcript is kept in its own
    table — every line, with who said it — so "we agreed X" stays answerable
    long after the box has been edited down.                                  */
+/* Which platform a meeting link belongs to. Fireflies' notetaker joins all
+   four of these, so a client's Teams call is no different from our own Meet
+   as far as getting a transcript is concerned. */
+const PLATFORMS = [
+  [/meet\.google\.com/i, "Google Meet"],
+  [/teams\.(microsoft|live)\.com|teams\.cloud\.microsoft/i, "Microsoft Teams"],
+  [/zoom\.(us|com)/i, "Zoom"],
+  [/webex\.com/i, "Webex"],
+];
+const platformOf = (link) => PLATFORMS.find(([re]) => re.test(link || ""))?.[1] || "";
+
+/* Clients run their calls on their own platform — usually Teams — and those
+   never touch our calendar, so nothing invites the notetaker and no
+   transcript ever exists. This is the way in: paste the link the client
+   sent, and Fireflies puts its notetaker in the room. Afterwards the call
+   turns up in "Find meetings" like any other. */
+function RecordAnyCall() {
+  const { toast } = useCtx();
+  const [open, setOpen] = useState(false);
+  const [link, setLink] = useState("");
+  const [title, setTitle] = useState("");
+  const [busy, setBusy] = useState(false);
+  const where = platformOf(link);
+  const looksLikeALink = /^https?:\/\/\S+$/.test(link.trim());
+
+  const send = async () => {
+    setBusy(true);
+    const { error, notetaker } = await sendNotetaker(link.trim(), { title: title.trim() || "Client call", durationMin: 90 });
+    setBusy(false);
+    if (error) { toast(error, "amber"); return; }
+    toast(`${notetaker} is joining the ${where || "call"} — give it about a minute.`, "green");
+    setLink(""); setTitle("");
+  };
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>Record a client's call</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>Teams, Zoom, Webex or Meet — their link, our transcript</span>
+        <Btn kind="ghost" style={{ marginLeft: "auto" }} onClick={() => setOpen((v) => !v)}>{open ? "Close" : "Paste a link"}</Btn>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 9, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input className="inp" style={{ flex: 2, minWidth: 240, fontFamily: MONO, fontSize: 12 }}
+                   placeholder="https://teams.microsoft.com/l/meetup-join/…"
+                   value={link} onChange={(e) => setLink(e.target.value)} />
+            <input className="inp" style={{ flex: 1, minWidth: 160 }}
+                   placeholder="What is this call? (optional)"
+                   value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Btn icon={busy ? Loader2 : Mic} disabled={busy || !looksLikeALink} onClick={send}>
+              {busy ? "Sending…" : "Send the notetaker"}
+            </Btn>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--txt2)" }}>
+            {link && !looksLikeALink
+              ? "That does not look like a meeting link yet."
+              : where
+                ? `${where} — join the call first, then send the notetaker; it cannot wait in a room that has not opened.`
+                : link
+                  ? "Fireflies joins Google Meet, Microsoft Teams, Zoom and Webex. It will try this link anyway."
+                  : "Join the call first, then paste its link here."}
+          </div>
+          {/* Recording someone else's call is their business too. The notetaker
+              joins as a named participant everyone can see, which is the point:
+              nobody is recorded without knowing. Say so before they click. */}
+          <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>
+            The notetaker appears in the participant list like anyone else, so the client can see the call is being recorded.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* Schedule the call, right here. The event lands on the caller's own calendar,
    everyone picked is invited by email, and the Fireflies notetaker is invited
    with them — which is what makes the transcript come back into this same
@@ -3351,6 +3427,8 @@ function MeetingsPanel({ date, onUse }) {
               ))}
             </div>
           )}
+
+          {firefliesEnabled && <RecordAnyCall />}
 
           <ScheduleMeet date={date} projects={projects} users={users} onScheduled={refreshSoon} />
         </div>
