@@ -98,6 +98,55 @@ export async function cancelMeeting(eventId) {
   return r.error ? { error: r.error } : { error: "" };
 }
 
+/* ── a recording made outside the system ─────────────────────────────────── */
+
+export const RECORDINGS_BUCKET = "recordings";
+/* What Fireflies can actually transcribe. Anything else is a wasted upload
+   and a confusing error twenty minutes later. */
+export const AUDIO_TYPES = ".mp3,.m4a,.wav,.webm,.ogg,.mp4,audio/*";
+
+/* Put the file somewhere Fireflies can fetch it from, then ask it to
+   transcribe. The bucket is private; the server mints a signed link that
+   expires, so the audio is never sitting on a guessable public URL.
+
+   Transcription is not instant — this returns once Fireflies has ACCEPTED the
+   recording, and the transcript arrives later through the same webhook that
+   handles a recorded call. */
+export async function uploadRecording(file, { title = "", date = "", attendees = [], onProgress } = {}) {
+  if (!supabase) return { error: "Not signed in." };
+  if (!file) return { error: "Pick a file first." };
+  // 500 MB is the bucket's own limit; catching it here saves a long upload
+  // that fails at the very end.
+  if (file.size > 500 * 1024 * 1024) {
+    return { error: `That file is ${(file.size / 1048576).toFixed(0)} MB — the limit is 500 MB.` };
+  }
+
+  const safe = file.name.replace(/[^\w.\-]+/g, "-").slice(-80);
+  const day = (date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const path = `${day}/${Date.now()}-${safe}`;
+
+  try {
+    onProgress?.("Uploading the recording…");
+    const { error: upErr } = await supabase.storage
+      .from(RECORDINGS_BUCKET)
+      .upload(path, file, { contentType: file.type || "audio/mpeg", upsert: false });
+    if (upErr) {
+      const m = String(upErr.message || upErr);
+      // The one failure worth naming precisely: the bucket was never made.
+      if (/bucket not found|not found/i.test(m)) {
+        return { error: "There is nowhere to put recordings yet — run supabase/add-recordings-bucket.sql." };
+      }
+      if (/mime|content type/i.test(m)) return { error: `${file.type || "That file type"} is not an audio file this accepts.` };
+      return { error: `Upload failed: ${m}` };
+    }
+  } catch (e) { return { error: `Upload failed: ${e?.message || e}` }; }
+
+  onProgress?.("Handing it to Fireflies…");
+  const r = await call({ action: "upload", path, title: title || file.name, date: day, attendees }, 120000);
+  if (r.error) return { error: r.error, path };
+  return { error: "", queued: true, path, title: r.title || title || file.name };
+}
+
 /* Which meetings happened on this day. `date` is YYYY-MM-DD in local terms —
    the offset goes with it so "today" means the caller's today, not UTC's. */
 export async function listMeetings(date) {

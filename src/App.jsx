@@ -40,7 +40,7 @@ import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js"
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText,
          meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, sendNotetaker, NOTETAKER,
-         transcriptsBetween } from "./lib/fireflies.js";
+         transcriptsBetween, uploadRecording, AUDIO_TYPES } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3476,7 +3476,10 @@ function MeetingsPanel({ date, onUse }) {
 
           {/* Recording someone else's call lives in Client Communication —
               that is whose calls they are. The scrum panel stays about the
-              stand-up: find today's, pull it in, or start one. */}
+              stand-up: find today's, pull it in, start one, or hand over a
+              recording of one that happened off the books. */}
+          <UploadRecording date={date} defaultTitle={`Stand-up ${date}`} onQueued={refreshKept}
+                           hint="a stand-up that was recorded but not by Fireflies" />
           <ScheduleMeet date={date} projects={projects} users={users} onScheduled={refreshSoon} />
         </div>
       )}
@@ -3775,6 +3778,8 @@ function ClientCallsModule() {
         </div>
         <ClientMeetSetup projects={projects} users={users} onDone={load} />
         <RecordAnyCall />
+        <UploadRecording date={todayStr()} onQueued={load}
+                         hint="an MP3 of a client call — a phone call, a site visit, a meeting recorded on someone's laptop" />
       </div>
 
       <div>
@@ -3920,6 +3925,59 @@ function groupByClient(projects) {
     m.get(k).push(p);
   }
   return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+/* Some calls happen where the notetaker cannot go: a client rings a phone, a
+   site visit is caught on a handset, somebody recorded the meeting on their
+   laptop and only thought about the transcript afterwards. The audio exists,
+   so hand it over. Fireflies transcribes it in the background and it arrives
+   like any other call — which is why this says "queued", not "done". */
+function UploadRecording({ date, defaultTitle = "", attendees = [], onQueued, hint }) {
+  const { toast } = useCtx();
+  const [file, setFile] = useState(null);
+  const [title, setTitle] = useState("");
+  const [busy, setBusy] = useState("");
+  const input = useRef(null);
+
+  const go = async () => {
+    setBusy("Uploading the recording…");
+    const r = await uploadRecording(file, {
+      title: title.trim() || defaultTitle || file.name,
+      date, attendees, onProgress: setBusy,
+    });
+    setBusy("");
+    if (r.error) { toast(r.error, "amber"); return; }
+    toast(`${r.title} is with Fireflies — the transcript appears here once it has been written, usually a few minutes.`, "green");
+    setFile(null); setTitle("");
+    if (input.current) input.current.value = "";
+    onQueued?.(r);
+  };
+
+  if (!firefliesEnabled) return null;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>Upload a recording</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{hint || "an MP3 of a call nobody recorded — a phone call, a site visit"}</span>
+      </div>
+      <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input ref={input} type="file" accept={AUDIO_TYPES} className="inp"
+               style={{ flex: 1, minWidth: 220, padding: "7px 9px", fontSize: 12 }}
+               onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        <input className="inp" style={{ flex: 1, minWidth: 170 }} placeholder="What was this call? (optional)"
+               value={title} onChange={(e) => setTitle(e.target.value)} />
+        <Btn icon={busy ? Loader2 : Upload} disabled={!file || !!busy} onClick={go}>
+          {busy ? "Working…" : "Transcribe it"}
+        </Btn>
+      </div>
+      {(busy || file) && (
+        <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt2)" }}>
+          {busy || `${file.name} · ${(file.size / 1048576).toFixed(1)} MB — Fireflies takes a few minutes to write it up, then it turns up in the list on its own.`}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* Which projects a recorded call was probably about, when nobody said. The

@@ -29,6 +29,9 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const WEBHOOK_SECRET = (Deno.env.get("FIREFLIES_WEBHOOK_SECRET") ?? "").trim();
 // The notetaker's own address — the same one the `meet` function invites.
 const NOTETAKER = (Deno.env.get("FIREFLIES_NOTETAKER_EMAIL") || "fred@fireflies.ai").trim().toLowerCase();
+// Where a recording somebody uploaded is kept. Private — see
+// supabase/add-recordings-bucket.sql.
+const RECORDINGS_BUCKET = (Deno.env.get("RECORDINGS_BUCKET") || "recordings").trim();
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -105,11 +108,31 @@ async function fireflies(query: string, variables: Record<string, unknown>): Pro
       .map((e) => String(e.message || "").match(/Cannot query field ["']([A-Za-z_]+)["']/)?.[1])
       .filter(Boolean) as string[];
     // "Unknown argument \"duration\" on field \"addToLiveMeeting\"." → same idea,
-    // but an argument, and its variable declaration has to go with it.
-    const badArgs = errs
-      .map((e) => String(e.message || "").match(/Unknown argument ["']([A-Za-z_]+)["']/)?.[1])
+    // but an argument, and its variable declaration has to go with it. An
+    // input-object field Fireflies has never heard of reads differently
+    // ("Field X is not defined by type Y") and is dropped the same way.
+    const badArgs = errs.flatMap((e) => {
+      const m = String(e.message || "");
+      return [
+        m.match(/Unknown argument ["']([A-Za-z_]+)["']/)?.[1],
+        m.match(/Field ["']([A-Za-z_]+)["'] is not defined by type/)?.[1],
+      ].filter(Boolean) as string[];
+    });
+    // "Unknown type \"AudioUploadAttendeeInput\"." — a type name we guessed at.
+    // Take out every variable declared with it, and everywhere it was used, so
+    // the call goes through without that optional extra instead of failing.
+    const badTypes = errs
+      .map((e) => String(e.message || "").match(/Unknown type ["']([A-Za-z_]+)["']/)?.[1])
       .filter(Boolean) as string[];
-    if (!unknown.length && !badArgs.length) return { error: errs[0]?.message || "Fireflies rejected the query." };
+    for (const t of badTypes) {
+      for (const d of q.matchAll(new RegExp(`\\$([A-Za-z_]+)\\s*:\\s*\\[?${t}\\b`, "g"))) {
+        badArgs.push(d[1]);
+        q = q.replace(new RegExp(`\\$${d[1]}\\s*:\\s*\\[?${t}\\b\\]?!?`, "g"), "");
+      }
+    }
+    if (!unknown.length && !badArgs.length && !badTypes.length) {
+      return { error: errs[0]?.message || "Fireflies rejected the query." };
+    }
     const before = q;
     for (const f of unknown) {
       // Remove the field wherever it appears as its own token, including a
@@ -131,6 +154,17 @@ const JOIN_MUTATION = `
 mutation SendFred($link: String!, $title: String, $duration: Int) {
   addToLiveMeeting(meeting_link: $link, title: $title, duration: $duration) {
     success
+  }
+}`;
+
+/* Hand Fireflies a recording to transcribe. It fetches the audio itself, so
+   what it gets is a URL — hence the signed link rather than the bytes. */
+const UPLOAD_MUTATION = `
+mutation UploadRecording($url: String!, $title: String, $attendees: [AudioUploadAttendeeInput]) {
+  uploadAudio(input: { url: $url, title: $title, attendees: $attendees }) {
+    success
+    title
+    message
   }
 }`;
 
@@ -361,6 +395,58 @@ Deno.serve(async (req) => {
     return ok === false
       ? json({ error: "Fireflies took the request but would not join. Check that the call has started." }, 502)
       : json({ ok: true, joined: true, notetaker: NOTETAKER });
+  }
+
+  /* ── a recording somebody made themselves ─────────────────────────────────
+     Not every call can have the notetaker in it: a client rings a phone, a
+     site visit is caught on a handset, a meeting was recorded before anyone
+     thought about transcripts. The audio is uploaded to the private
+     `recordings` bucket; this hands Fireflies a signed link to fetch it with,
+     which expires. Transcription is not instant — Fireflies calls the webhook
+     above when it is done, and the transcript lands like any other. */
+  if (body.action === "upload") {
+    const path = String(body.path || "").replace(/^\/+/, "");
+    if (!path) return json({ error: "Tell me which uploaded file to transcribe." }, 400);
+    if (!SERVICE_KEY) return json({ error: "This function has no service key, so it cannot read the upload." }, 500);
+
+    // Six hours is far longer than a fetch needs and far shorter than forever.
+    const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${RECORDINGS_BUCKET}/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_KEY}`, apikey: SERVICE_KEY },
+      body: JSON.stringify({ expiresIn: 6 * 60 * 60 }),
+    });
+    const signed = await signRes.json().catch(() => ({} as any));
+    if (!signRes.ok || !signed?.signedURL) {
+      return json({ error: signRes.status === 404
+        ? `That recording is not in storage — has the ${RECORDINGS_BUCKET} bucket been created? Run supabase/add-recordings-bucket.sql.`
+        : `Couldn't get a link to the recording (${signRes.status}). ${signed?.message || ""}`.trim() }, 502);
+    }
+    const url = `${SUPABASE_URL}/storage/v1${signed.signedURL}`;
+
+    const attendees = (Array.isArray(body.attendees) ? body.attendees : [])
+      .map((a: any) => (typeof a === "string" ? { email: a } : a))
+      .filter((a: any) => a?.email)
+      .map((a: any) => ({ email: String(a.email), displayName: String(a.displayName || a.name || "") }));
+
+    const { data, error } = await fireflies(UPLOAD_MUTATION, {
+      url,
+      title: String(body.title || "Recording").slice(0, 200),
+      attendees,
+    });
+    if (error) {
+      const plan = /not authorized|permission|plan|upgrade|subscription/i.test(error)
+        ? " Uploading audio for transcription needs a Fireflies paid plan."
+        : "";
+      return json({ error: error + plan }, 502);
+    }
+    const r = data?.uploadAudio;
+    if (r?.success === false) {
+      return json({ error: r?.message || "Fireflies would not take that recording." }, 502);
+    }
+    // Deliberately not "done": Fireflies transcribes in the background and
+    // calls the webhook when it has finished. Saying otherwise would send
+    // someone looking for a transcript that is still minutes away.
+    return json({ ok: true, queued: true, title: r?.title || body.title || "", message: r?.message || "" });
   }
 
   return json({ error: `Unknown action "${body.action}".` }, 400);
