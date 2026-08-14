@@ -3474,8 +3474,9 @@ function MeetingsPanel({ date, onUse }) {
             </div>
           )}
 
-          {firefliesEnabled && <RecordAnyCall />}
-
+          {/* Recording someone else's call lives in Client Communication —
+              that is whose calls they are. The scrum panel stays about the
+              stand-up: find today's, pull it in, or start one. */}
           <ScheduleMeet date={date} projects={projects} users={users} onScheduled={refreshSoon} />
         </div>
       )}
