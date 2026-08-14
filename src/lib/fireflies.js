@@ -11,20 +11,22 @@ import { tbl, withLayoutRetry } from "./tables.js";
 const URL_ = (import.meta.env.VITE_FIREFLIES_URL || "").trim();
 export const firefliesEnabled = Boolean(URL_);
 
+/* The `meet` function — scheduling the call, as opposed to reading it back. */
+const MEET_URL = (import.meta.env.VITE_MEET_URL || "").trim();
+export const meetEnabled = Boolean(MEET_URL);
+
 async function userJwt() {
   if (!supabase) return "";
   try { return (await supabase.auth.getSession())?.data?.session?.access_token || ""; }
   catch { return ""; }
 }
 
-async function call(payload, ms = 45000) {
-  if (!URL_) {
-    return { error: "Fireflies isn't connected in this build — set VITE_FIREFLIES_URL." };
-  }
+async function post(endpoint, payload, ms, missing) {
+  if (!endpoint) return { error: missing };
   const ctrl = new AbortController();
   const bail = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(URL_, {
+    const res = await fetch(endpoint, {
       method: "POST",
       signal: ctrl.signal,
       // text/plain on purpose: it avoids a CORS preflight, and the token in the
@@ -35,15 +37,46 @@ async function call(payload, ms = 45000) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
       return { error: data.error || (res.status === 404
-        ? "The fireflies function isn't deployed yet."
-        : `Fireflies wouldn't answer (${res.status}).`) };
+        ? "That function isn't deployed yet."
+        : `Google/Fireflies wouldn't answer (${res.status}).`) };
     }
     return data;
   } catch (e) {
     return { error: e?.name === "AbortError"
-      ? "Fireflies took too long to answer — try again."
-      : `Couldn't reach the meeting recorder: ${e?.message || e}` };
+      ? "It took too long to answer — try again."
+      : `Couldn't reach the meeting service: ${e?.message || e}` };
   } finally { clearTimeout(bail); }
+}
+
+const call = (payload, ms = 45000) =>
+  post(URL_, payload, ms, "Fireflies isn't connected in this build — set VITE_FIREFLIES_URL.");
+const callMeet = (payload, ms = 45000) =>
+  post(MEET_URL, payload, ms, "Google Meet isn't connected in this build — set VITE_MEET_URL.");
+
+/* ── scheduling ──────────────────────────────────────────────────────────── */
+
+/* Create the call. It lands on the caller's own calendar, invitees are
+   emailed, and — when asked — the Fireflies notetaker is invited too, which
+   is what makes the transcript come back on its own afterwards. */
+export async function createMeeting({ title, date, startTime, endTime, attendees = [], projectId = "", description = "", record = true }) {
+  const r = await callMeet({
+    action: "create", title, date, startTime, endTime, attendees, projectId, description,
+    recordWithFireflies: record,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata",
+  }, 60000);
+  return r.error ? { error: r.error } : { ...r, error: "" };
+}
+
+/* The caller's next calls that actually have a Meet link. Google Calendar is
+   the store — we do not keep a second copy of anyone's diary. */
+export async function upcomingMeetings(days = 7) {
+  const r = await callMeet({ action: "upcoming", days });
+  return r.error ? { meetings: [], error: r.error } : { meetings: r.meetings || [], notetaker: r.notetaker || "", error: "" };
+}
+
+export async function cancelMeeting(eventId) {
+  const r = await callMeet({ action: "cancel", eventId });
+  return r.error ? { error: r.error } : { error: "" };
 }
 
 /* Which meetings happened on this day. `date` is YYYY-MM-DD in local terms —

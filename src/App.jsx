@@ -38,7 +38,8 @@ import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
-import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText } from "./lib/fireflies.js";
+import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText,
+         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3051,8 +3052,113 @@ Ask akshay to have the client communicated by 2pm.`;
    tasks exactly as a typed note would. The full transcript is kept in its own
    table — every line, with who said it — so "we agreed X" stays answerable
    long after the box has been edited down.                                  */
-function MeetingsPanel({ date, onUse }) {
+/* Schedule the call, right here. The event lands on the caller's own calendar,
+   everyone picked is invited by email, and the Fireflies notetaker is invited
+   with them — which is what makes the transcript come back into this same
+   panel afterwards without anyone doing anything. */
+function ScheduleMeet({ date, projects, users, onScheduled }) {
   const { toast } = useCtx();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [made, setMade] = useState(null);
+  const [f, setF] = useState({ title: "Daily scrum", date, startTime: "09:30", endTime: "10:00", projectId: "", record: true });
+  const [picked, setPicked] = useState([]);
+  useEffect(() => { setF((v) => ({ ...v, date })); }, [date]);
+
+  // Picking a project offers its team first — the people the call is about.
+  const project = projects.find((p) => p.projectId === f.projectId);
+  const teamIds = new Set((project?.team || []).map((m) => String(m.userId)));
+  const candidates = [...users].sort((a, b) =>
+    (teamIds.has(String(b.id)) ? 1 : 0) - (teamIds.has(String(a.id)) ? 1 : 0) || a.name.localeCompare(b.name));
+
+  const toggle = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+
+  const go = async () => {
+    setBusy(true); setErr(""); setMade(null);
+    const emails = picked.map((id) => users.find((u) => u.id === id)?.email).filter(Boolean);
+    const r = await createMeeting({ ...f, attendees: emails, title: f.title || "Elecbits meeting" });
+    setBusy(false);
+    if (r.error) { setErr(r.error); return; }
+    setMade(r);
+    onScheduled?.(r);
+    if (r.warning) toast(r.warning, "amber");
+    else toast(`${r.title} scheduled — ${emails.length} invited${r.recording ? ", Fireflies will record it" : ""}`, "green");
+  };
+
+  const copy = (t) => { navigator.clipboard?.writeText(t); toast("Meet link copied", "green"); };
+
+  if (!meetEnabled) return null;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>Start a Google Meet</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>on your calendar, everyone invited</span>
+        <Btn kind="ghost" style={{ marginLeft: "auto" }} onClick={() => setOpen((v) => !v)}>{open ? "Close" : "Schedule"}</Btn>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input className="inp" style={{ flex: 1, minWidth: 190 }} placeholder="What is the call about?"
+                   value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+            <input type="date" className="inp" style={{ width: 150, fontFamily: MONO }}
+                   value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
+            <input type="time" className="inp" style={{ width: 108, fontFamily: MONO }}
+                   value={f.startTime} onChange={(e) => setF({ ...f, startTime: e.target.value })} />
+            <span style={{ color: "var(--txt3)", alignSelf: "center" }}>→</span>
+            <input type="time" className="inp" style={{ width: 108, fontFamily: MONO }}
+                   value={f.endTime} onChange={(e) => setF({ ...f, endTime: e.target.value })} />
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <select className="inp" style={{ width: 230 }} value={f.projectId} onChange={(e) => setF({ ...f, projectId: e.target.value })}>
+              <option value="">— no particular project —</option>
+              {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}</option>)}
+            </select>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
+              <input type="checkbox" checked={f.record} onChange={(e) => setF({ ...f, record: e.target.checked })} />
+              Record it with Fireflies
+            </label>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 5 }}>
+              Who is coming{project ? ` — ${project.projectId}'s team first` : ""}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {candidates.filter((u) => u.email).map((u) => (
+                <div key={u.id} onClick={() => toggle(u.id)}
+                     style={{ cursor: "pointer", fontSize: 12, padding: "4px 9px", borderRadius: 20,
+                              border: "1px solid " + (picked.includes(u.id) ? "var(--acc)" : "var(--bdr)"),
+                              background: picked.includes(u.id) ? "var(--soft)" : "var(--s1)",
+                              color: picked.includes(u.id) ? "var(--acc)" : "var(--txt2)" }}>
+                  {u.name}{teamIds.has(String(u.id)) ? " ·" : ""}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {err && <div style={{ fontSize: 12, color: "var(--red)" }}>{err}</div>}
+
+          <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+            <Btn icon={busy ? Loader2 : Video} disabled={busy} onClick={go}>{busy ? "Creating…" : "Create the meeting"}</Btn>
+            {made?.meetLink && (
+              <>
+                <a href={made.meetLink} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, color: "var(--acc)", fontFamily: MONO }}>{made.meetLink}</a>
+                <Btn kind="ghost" onClick={() => copy(made.meetLink)} style={{ padding: "4px 9px", fontSize: 11.5 }}>Copy link</Btn>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MeetingsPanel({ date, onUse }) {
+  const { toast, projects, users } = useCtx();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [meetings, setMeetings] = useState(null);
@@ -3096,7 +3202,23 @@ function MeetingsPanel({ date, onUse }) {
     toast("Full transcript put in the box — trim it before organising.", "green");
   };
 
-  if (!firefliesEnabled) return null;
+  const [soon, setSoon] = useState([]);
+  const refreshSoon = useCallback(async () => {
+    if (!meetEnabled) return;
+    const { meetings } = await upcomingMeetings(7);
+    setSoon(meetings || []);
+  }, []);
+  useEffect(() => { if (open) refreshSoon(); }, [open, refreshSoon]);
+
+  const callOff = async (m) => {
+    const { error } = await cancelMeeting(m.eventId);
+    if (error) { toast(error, "amber"); return; }
+    toast(`${m.title} cancelled — everyone told`, "green");
+    refreshSoon();
+  };
+
+  // Neither half switched on means nothing to show.
+  if (!firefliesEnabled && !meetEnabled) return null;
 
   return (
     <div style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 12, background: "var(--s2)", marginBottom: 12 }}>
@@ -3145,6 +3267,27 @@ function MeetingsPanel({ date, onUse }) {
             );
           })}
 
+          {soon.length > 0 && (
+            <div style={{ borderTop: "1px dashed var(--bdr2)", paddingTop: 9 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>
+                Coming up
+              </div>
+              {soon.map((m) => (
+                <div key={m.eventId} style={{ display: "flex", gap: 9, alignItems: "center", fontSize: 12.5, padding: "4px 0", flexWrap: "wrap" }}>
+                  <Video size={12} style={{ color: "var(--txt3)" }} />
+                  <span>{m.title}</span>
+                  <span style={{ color: "var(--txt3)", fontFamily: MONO, fontSize: 11 }}>{String(m.start || "").slice(5, 16).replace("T", " ")}</span>
+                  {m.projectId && <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{m.projectId}</Pill>}
+                  {/* Whether it will actually be recorded — the difference
+                      between "we have the transcript" and "we thought we did". */}
+                  <Pill color={m.recording ? "var(--green)" : "var(--txt2)"}>{m.recording ? "recording" : "not recorded"}</Pill>
+                  <a href={m.meetLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>Join ↗</a>
+                  <Btn kind="ghost" onClick={() => callOff(m)} style={{ padding: "3px 8px", fontSize: 11.5 }}>Cancel</Btn>
+                </div>
+              ))}
+            </div>
+          )}
+
           {kept.length > 0 && (
             <div style={{ marginTop: 4, borderTop: "1px dashed var(--bdr2)", paddingTop: 9 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 6 }}>
@@ -3160,6 +3303,8 @@ function MeetingsPanel({ date, onUse }) {
               ))}
             </div>
           )}
+
+          <ScheduleMeet date={date} projects={projects} users={users} onScheduled={refreshSoon} />
         </div>
       )}
     </div>
