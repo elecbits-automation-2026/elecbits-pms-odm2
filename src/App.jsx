@@ -831,7 +831,14 @@ TEAM ROSTER: ${users.map((u) => `${u.name} (${u.title})`).join(", ")}
 ACTIVE PROJECTS (with who is on each one):
 ${projects.map((p) => `  ${p.projectId} — ${p.name} [${p.status}] · client ${p.clientName || "—"}${teamLine(p, users)}`).join("\n") || "  none"}
 DATE (the day this call happened): ${date}
-${ctx.projectId ? `THIS CALL IS ABOUT PROJECT: ${ctx.projectId}${ctx.clientName ? ` (client ${ctx.clientName})` : ""}. Use that project id for every task unless the transcript clearly names a different one.` : "The project was not stated — infer it from the transcript, and leave projectId empty if it is not clear."}
+${ctx.projects?.length
+  ? `THIS CALL COVERS ${ctx.projects.length === 1 ? "PROJECT" : `${ctx.projects.length} PROJECTS`}:
+${ctx.projects.map((p) => `  ${p.projectId} — ${p.name}${p.clientName ? ` (client ${p.clientName})` : ""}`).join("\n")}
+Every task must carry one of those project ids${ctx.projects.length > 1 ? " — decide per task WHICH of them the commitment was about, from what was said around it; do not put everything on the first one" : ""}. Only use a different id if the transcript plainly names one.${
+  new Set(ctx.projects.map((p) => p.clientName).filter(Boolean)).size > 1
+    ? "\nTWO DIFFERENT CLIENTS are on this call. Never attribute one client's request to the other's project."
+    : ""}`
+  : "The projects were not stated — infer them from the transcript, and leave projectId empty where it is not clear."}
 Transcript of the call with the client:
 """${raw}"""
 
@@ -3699,7 +3706,10 @@ function ClientCallsModule() {
 
   /* The transcript being turned into work. */
   const [openCall, setOpenCall] = useState(null);   // { id, title, date, text }
-  const [projectId, setProjectId] = useState("");
+  // A recorded call can cover several of a client's projects, so the organiser
+  // is told about all of them and decides per task which one a commitment
+  // belongs to.
+  const [callProjects, setCallProjects] = useState([]);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null);
 
@@ -3708,19 +3718,19 @@ function ClientCallsModule() {
     if (error) { toast(error, "amber"); return; }
     if (!text) { toast("That call has no stored text yet — Fireflies may still be writing it.", "amber"); return; }
     setOpenCall({ id: t.external_id, title: t.title || "Client call", date: t.meeting_date || todayStr(), text });
-    setProjectId(t.project_id || guessProjectFor(t, projects));
+    setCallProjects(guessProjectsFor(t, projects));
     setPreview(null);
   };
 
   const organize = async () => {
     if (!openCall) return;
     setBusy(true); setPreview(null);
-    const p = projects.find((x) => x.projectId === projectId);
+    const on = callProjects.map((id) => projects.find((x) => x.projectId === id)).filter(Boolean);
     try {
       // A call produces more than a stand-up note does — three lists instead
       // of one — so it needs the room to answer.
       const res = await claude(clientCallPrompt(openCall.text, openCall.date, users, projects, memory,
-        { projectId, clientName: p?.clientName || "" }), { maxTokens: 2500 });
+        { projects: on }), { maxTokens: 2500 });
       setPreview({
         ...normalizeOrganised(res, { date: openCall.date, projects, users }),
         decisions: res.decisions || [],
@@ -3814,14 +3824,35 @@ function ClientCallsModule() {
             {openCall.title} — {fmtDate(openCall.date)}
           </SectionTitle>
           <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>
-            <select className="inp" style={{ width: 280 }} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-              <option value="">— which project is this call about? —</option>
-              {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}{p.clientName ? ` · ${p.clientName}` : ""}</option>)}
+            <select className="inp" style={{ width: 300 }} value=""
+                    onChange={(e) => { const v = e.target.value; if (v && !callProjects.includes(v)) setCallProjects((c) => [...c, v]); }}>
+              <option value="">{callProjects.length ? "— add another project —" : "— which projects is this call about? —"}</option>
+              {groupByClient(projects).map(([client, ps]) => (
+                <optgroup key={client} label={client}>
+                  {ps.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}</option>)}
+                </optgroup>
+              ))}
             </select>
             <Btn icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={organize} style={busy ? { pointerEvents: "none" } : {}}>
               {busy ? "Reading the call…" : "Organise with AI"}
             </Btn>
           </div>
+          {callProjects.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 9 }}>
+              {callProjects.map((id) => {
+                const p = projects.find((x) => x.projectId === id);
+                return (
+                  <div key={id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                                         padding: "4px 6px 4px 9px", borderRadius: 20,
+                                         border: "1px solid var(--acc)", background: "var(--soft)", color: "var(--acc)" }}>
+                    <span style={{ fontFamily: MONO }}>{id}</span>
+                    <span style={{ color: "var(--txt2)" }}>{p?.clientName || "internal"}</span>
+                    <X size={12} style={{ cursor: "pointer" }} onClick={() => setCallProjects((c) => c.filter((x) => x !== id))} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <textarea className="inp" rows={8} style={{ lineHeight: 1.6, fontSize: 12.5, fontFamily: MONO }}
                     value={openCall.text} onChange={(e) => setOpenCall({ ...openCall, text: e.target.value })} />
           <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 6 }}>
@@ -3878,18 +3909,59 @@ function ClientCallsModule() {
   );
 }
 
-/* Which project a recorded call was probably about, when nobody said. The
-   title is the only clue most calls carry, so match a project id or a client
-   name in it — and return nothing rather than a guess when neither is there. */
-function guessProjectFor(t, projects) {
+/* Projects under their client, alphabetically. A dozen flat project ids is a
+   list nobody can read; the same dozen under four client headings is. */
+function groupByClient(projects) {
+  const m = new Map();
+  for (const p of projects) {
+    const k = p.clientName || "Internal / no client";
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(p);
+  }
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+/* Which projects a recorded call was probably about, when nobody said. The
+   title is the only clue most calls carry: a project id in it wins outright,
+   and failing that a client's name puts ALL of that client's projects up —
+   because a call with Schneider is usually a call about several of them.
+   Nothing is returned rather than a guess when neither is there. */
+function guessProjectsFor(t, projects) {
+  if (t.project_id) return [t.project_id];
   const hay = `${t.title || ""} ${(t.attendees || []).join(" ")}`.toLowerCase();
-  const byId = projects.find((p) => p.projectId && hay.includes(normId(p.projectId)));
-  if (byId) return byId.projectId;
-  const tail = hay.match(/\b\d{4}\b/)?.[0];
-  const byTail = tail && projects.find((p) => normId(p.projectId).endsWith(tail));
-  if (byTail) return byTail.projectId;
-  const byClient = projects.find((p) => p.clientName && hay.includes(p.clientName.toLowerCase()));
-  return byClient?.projectId || "";
+
+  const byId = projects.filter((p) => p.projectId && hay.includes(normId(p.projectId)));
+  if (byId.length) return byId.map((p) => p.projectId);
+
+  const tails = [...hay.matchAll(/\b\d{4}\b/g)].map((m) => m[0]);
+  const byTail = projects.filter((p) => tails.some((n) => normId(p.projectId).endsWith(n)));
+  if (byTail.length) return byTail.map((p) => p.projectId);
+
+  const client = [...new Set(projects.map((p) => p.clientName).filter(Boolean))]
+    .find((c) => hay.includes(c.toLowerCase()));
+  if (client) return projects.filter((p) => p.clientName === client).map((p) => p.projectId);
+  return [];
+}
+
+/* A title for a call that may cover several projects of one client, or work
+   for two clients at once. Naming every project id makes an unreadable
+   subject line, so past two it counts them. */
+function titleFor(ps) {
+  if (!ps.length) return "";
+  const clients = [...new Set(ps.map((p) => p.clientName).filter(Boolean))];
+  const who = clients.length ? clients.join(" & ") : "Internal";
+  if (ps.length === 1) return `${who} — ${ps[0].projectId}`;
+  if (ps.length === 2) return `${who} — ${ps.map((p) => p.projectId).join(" & ")}`;
+  return `${who} — ${ps.length} projects`;
+}
+
+/* Whose contacts we just filled in, named so it is obvious which client each
+   address belongs to when two are on the same call. */
+function contactLine(ps) {
+  const named = ps.filter((p) => p.contact?.name);
+  if (!named.length) return "";
+  if (named.length === 1) return ` (${named[0].contact.name} at ${named[0].clientName || named[0].projectId})`;
+  return ` (${named.map((p) => `${p.contact.name} at ${p.clientName || p.projectId}`).join(", ")})`;
 }
 
 /* Setting up the call with the client. Their people are typed in — they are
@@ -3898,24 +3970,49 @@ function guessProjectFor(t, projects) {
 function ClientMeetSetup({ projects, users, onDone }) {
   const { toast } = useCtx();
   const [open, setOpen] = useState(false);
-  const [f, setF] = useState({ title: "", date: todayStr(), startTime: "15:00", endTime: "16:00", projectId: "", record: true });
+  const [f, setF] = useState({ title: "", date: todayStr(), startTime: "15:00", endTime: "16:00", record: true });
   const [guests, setGuests] = useState("");
   const [picked, setPicked] = useState([]);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState(null);
 
-  const project = projects.find((p) => p.projectId === f.projectId);
+  /* A call is rarely about one project. Schneider alone has five, and a
+     review with them covers whichever ones are live that week — sometimes
+     two clients at once on a joint programme. So the call carries a SET. */
+  const [onCall, setOnCall] = useState([]);              // project ids
+  const chosen = onCall.map((id) => projects.find((p) => p.projectId === id)).filter(Boolean);
+  const clientsOnCall = [...new Set(chosen.map((p) => p.clientName).filter(Boolean))];
 
-  /* Picking the project fills in the obvious: the client's own contact and a
-     title nobody has to think about. */
-  const pickProject = (id) => {
-    const p = projects.find((x) => x.projectId === id);
-    setF((v) => ({ ...v, projectId: id, title: v.title || (p ? `${p.clientName || p.name} — ${p.projectId}` : "") }));
-    if (p?.contact?.email && !guests.includes(p.contact.email)) {
-      setGuests((g) => (g.trim() ? `${g.trim()}, ${p.contact.email}` : p.contact.email));
-    }
-    // Their team should be in the room by default.
-    if (p) setPicked((cur) => (cur.length ? cur : (p.team || []).map((m) => String(m.userId)).filter((uid_) => users.some((u) => String(u.id) === uid_))));
+  /* Adding a project brings its client's contact into the guest list, its team
+     into the room, and — the first time — a title nobody has to think about. */
+  const addProjects = (ids) => {
+    const add = ids.filter((id) => id && !onCall.includes(id));
+    if (!add.length) return;
+    const ps = add.map((id) => projects.find((x) => x.projectId === id)).filter(Boolean);
+    setOnCall((cur) => [...cur, ...add]);
+
+    setGuests((g) => {
+      const have = new Set(g.split(/[,;\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean));
+      const fresh = ps.map((p) => p.contact?.email).filter((e) => e && !have.has(e.toLowerCase()));
+      return [g.trim(), ...new Set(fresh)].filter(Boolean).join(", ");
+    });
+    setPicked((cur) => [...new Set([...cur,
+      ...ps.flatMap((p) => (p.team || []).map((m) => String(m.userId)))
+           .filter((id) => users.some((u) => String(u.id) === id))])]);
+    setF((v) => ({ ...v, title: v.title || titleFor([...chosen, ...ps]) }));
+  };
+  const dropProject = (id) => setOnCall((cur) => cur.filter((x) => x !== id));
+
+  /* Projects offered grouped under their client, with a one-click way to put
+     all of a client's work on the call — which is what a review actually is. */
+  const byClient = useMemo(() => groupByClient(projects), [projects]);
+
+  const addFromSelect = (value) => {
+    if (!value) return;
+    if (value.startsWith("client:")) {
+      const c = value.slice(7);
+      addProjects((byClient.find(([k]) => k === c)?.[1] || []).map((p) => p.projectId));
+    } else addProjects([value]);
   };
 
   const clientEmails = guests.split(/[,;\s]+/).map((s) => s.trim()).filter((s) => /.+@.+\..+/.test(s));
@@ -3925,9 +4022,12 @@ function ClientMeetSetup({ projects, users, onDone }) {
     setBusy(true);
     const ours = picked.map((id) => users.find((u) => String(u.id) === String(id))?.email).filter(Boolean);
     const r = await createMeeting({
-      ...f, title: f.title || "Client call",
+      ...f, title: f.title || titleFor(chosen) || "Client call",
       attendees: [...new Set([...ours, ...clientEmails])],
-      description: project ? `Client call for ${project.projectId} — ${project.name}` : "",
+      projectId: onCall[0] || "", projectIds: onCall,
+      description: chosen.length
+        ? `Client call for ${chosen.map((p) => `${p.projectId} — ${p.name}`).join("\n")}`
+        : "",
     });
     setBusy(false);
     if (r.error) { toast(r.error, "amber"); return; }
@@ -3951,10 +4051,36 @@ function ClientMeetSetup({ projects, users, onDone }) {
 
       {open && (
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>
-          <select className="inp" style={{ maxWidth: 340 }} value={f.projectId} onChange={(e) => pickProject(e.target.value)}>
-            <option value="">— which project? —</option>
-            {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}{p.clientName ? ` · ${p.clientName}` : ""}</option>)}
-          </select>
+          <div>
+            <select className="inp" style={{ maxWidth: 380 }} value="" onChange={(e) => addFromSelect(e.target.value)}>
+              <option value="">{onCall.length ? "— add another project —" : "— which project? —"}</option>
+              {byClient.map(([client, ps]) => (
+                <optgroup key={client} label={client}>
+                  {ps.length > 1 && <option value={`client:${client}`}>▸ all {ps.length} {client} projects</option>}
+                  {ps.map((p) => <option key={p.id} value={p.projectId}>{p.projectId} · {p.name}</option>)}
+                </optgroup>
+              ))}
+            </select>
+
+            {chosen.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
+                {chosen.map((p) => (
+                  <div key={p.projectId} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                                                  padding: "4px 6px 4px 9px", borderRadius: 20,
+                                                  border: "1px solid var(--acc)", background: "var(--soft)", color: "var(--acc)" }}>
+                    <span style={{ fontFamily: MONO }}>{p.projectId}</span>
+                    <span style={{ color: "var(--txt2)" }}>{p.clientName || "internal"}</span>
+                    <X size={12} style={{ cursor: "pointer" }} onClick={() => dropProject(p.projectId)} />
+                  </div>
+                ))}
+              </div>
+            )}
+            {clientsOnCall.length > 1 && (
+              <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--amber)", display: "flex", gap: 6, alignItems: "center" }}>
+                <AlertTriangle size={11} /> {clientsOnCall.join(" and ")} are both on this call — everyone invited will see the other's project names.
+              </div>
+            )}
+          </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input className="inp" style={{ flex: 1, minWidth: 190 }} placeholder="What is the call about?"
@@ -3967,7 +4093,7 @@ function ClientMeetSetup({ projects, users, onDone }) {
 
           <div>
             <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 5 }}>
-              The client's side — email addresses{project?.contact?.name ? ` (${project.contact.name} is their contact)` : ""}
+              The client's side — email addresses{contactLine(chosen)}
             </div>
             <input className="inp" placeholder="rajesh@acme.dev, procurement@acme.dev"
                    value={guests} onChange={(e) => setGuests(e.target.value)} />
@@ -3975,7 +4101,7 @@ function ClientMeetSetup({ projects, users, onDone }) {
 
           <div>
             <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 5 }}>
-              Our side{project ? ` — ${project.projectId}'s team` : ""}
+              Our side{chosen.length ? ` — the team${chosen.length > 1 ? "s" : ""} on ${chosen.map((p) => p.projectId).join(", ")}` : ""}
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               <div onClick={() => setF((v) => ({ ...v, record: !v.record }))}
@@ -4007,7 +4133,10 @@ function ClientMeetSetup({ projects, users, onDone }) {
               {busy ? "Creating…" : "Create the call & invite everyone"}
             </Btn>
             <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>
-              {clientEmails.length} at the client · {picked.length} of ours{f.record ? " · recorded" : ""}
+              {clientEmails.length} at the client · {picked.length} of ours
+              {chosen.length ? ` · ${chosen.length} project${chosen.length > 1 ? "s" : ""}` : ""}
+              {clientsOnCall.length > 1 ? ` across ${clientsOnCall.length} clients` : ""}
+              {f.record ? " · recorded" : ""}
             </span>
           </div>
 

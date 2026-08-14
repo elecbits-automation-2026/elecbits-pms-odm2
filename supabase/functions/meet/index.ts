@@ -192,9 +192,16 @@ Deno.serve(async (req) => {
       // not every meeting should be.
       if (body.recordWithFireflies && NOTETAKER) invitees.push(NOTETAKER);
 
+      // A call can be about one project, several, or none. Accept either shape.
+      const projectIds = [...new Set(
+        (Array.isArray(body.projectIds) ? body.projectIds : [body.projectId])
+          .map((x: unknown) => String(x ?? "").trim()).filter(Boolean),
+      )];
+
       const event = {
         summary: String(body.title || "Elecbits meeting").slice(0, 250),
-        description: [String(body.description || "").trim(), body.projectId ? `Project: ${body.projectId}` : ""]
+        description: [String(body.description || "").trim(),
+                      projectIds.length ? `Project${projectIds.length > 1 ? "s" : ""}: ${projectIds.join(", ")}` : ""]
           .filter(Boolean).join("\n\n") || undefined,
         start: { dateTime: dateTime(day, start), timeZone: tz },
         end: { dateTime: dateTime(day, end), timeZone: tz },
@@ -209,7 +216,16 @@ Deno.serve(async (req) => {
         },
         // Elecbits project ids, kept on the event so a call can be traced back
         // to the work it was about.
-        extendedProperties: body.projectId ? { private: { elecbitsProjectId: String(body.projectId) } } : undefined,
+        extendedProperties: projectIds.length
+          ? { private: {
+              // The first one is what a single-project call has always carried,
+              // so anything already reading this keeps working.
+              elecbitsProjectId: projectIds[0],
+              // One call can cover several of a client's projects — Schneider
+              // alone has five — so the whole set rides along too.
+              elecbitsProjectIds: projectIds.join(","),
+            } }
+          : undefined,
       };
 
       // conferenceDataVersion=1 is NOT optional: without it Google silently
@@ -265,6 +281,8 @@ Deno.serve(async (req) => {
           meetLink: meetLinkOf(ev),
           htmlLink: ev.htmlLink || "",
           projectId: ev.extendedProperties?.private?.elecbitsProjectId || "",
+          projectIds: String(ev.extendedProperties?.private?.elecbitsProjectIds || "")
+            .split(",").map((x: string) => x.trim()).filter(Boolean),
           attendees: (ev.attendees ?? []).map((a: any) => a.email),
           // Whether the notetaker is actually coming — the difference between
           // "we recorded it" and "we thought we did".

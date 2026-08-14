@@ -65,9 +65,11 @@ const callMeet = (payload, ms = 45000) =>
 /* Create the call. It lands on the caller's own calendar, invitees are
    emailed, and — when asked — the Fireflies notetaker is invited too, which
    is what makes the transcript come back on its own afterwards. */
-export async function createMeeting({ title, date, startTime, endTime, attendees = [], projectId = "", description = "", record = true }) {
+export async function createMeeting({ title, date, startTime, endTime, attendees = [], projectId = "", projectIds = [], description = "", record = true }) {
   const r = await callMeet({
-    action: "create", title, date, startTime, endTime, attendees, projectId, description,
+    action: "create", title, date, startTime, endTime, attendees, description,
+    // One call can be about several projects — a client review usually is.
+    projectId, projectIds: projectIds.length ? projectIds : (projectId ? [projectId] : []),
     recordWithFireflies: record,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata",
   }, 60000);
