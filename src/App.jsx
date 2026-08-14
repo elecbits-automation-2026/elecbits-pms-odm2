@@ -39,7 +39,7 @@ import { syncAll } from "./lib/tableSync.js";
 import { mergeWorkspace, idsOf, baseOf, blobA, blobB } from "./lib/blobMerge.js";
 import { getSession, onAuthChange, signIn, signUp, signOut, resetPassword, setPassword, authReturnError, fetchProfiles } from "./lib/auth.js";
 import { firefliesEnabled, listMeetings, importMeeting, transcriptsForDay, transcriptText,
-         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting } from "./lib/fireflies.js";
+         meetEnabled, createMeeting, upcomingMeetings, cancelMeeting, NOTETAKER } from "./lib/fireflies.js";
 
 /* ─── SMALL HELPERS ─────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3083,7 +3083,12 @@ function ScheduleMeet({ date, projects, users, onScheduled }) {
     setMade(r);
     onScheduled?.(r);
     if (r.warning) toast(r.warning, "amber");
-    else toast(`${r.title} scheduled — ${emails.length} invited${r.recording ? ", Fireflies will record it" : ""}`, "green");
+    // Asked for a recording but Google did not keep the notetaker on the guest
+    // list — usually a Workspace rule about external guests. Say it now, not
+    // after the call has happened and produced nothing.
+    else if (f.record && r.notetakerInvited === false) {
+      toast(`${r.title} scheduled, but ${r.notetaker || "the notetaker"} was dropped from the guest list — this call will NOT be recorded.`, "amber");
+    } else toast(`${r.title} scheduled — ${emails.length} invited${r.recording ? ", Fireflies will record it" : ""}`, "green");
   };
 
   const copy = (t) => { navigator.clipboard?.writeText(t); toast("Meet link copied", "green"); };
@@ -3128,6 +3133,22 @@ function ScheduleMeet({ date, projects, users, onScheduled }) {
               Who is coming{project ? ` — ${project.projectId}'s team first` : ""}
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {/* The notetaker is a guest like the rest — shown first, ticked by
+                  default, and impossible to miss. Untick it and the call simply
+                  is not recorded; that is the same switch as the checkbox above,
+                  so the two always tell the same story. */}
+              <div onClick={() => setF((v) => ({ ...v, record: !v.record }))}
+                   title={f.record
+                     ? `${NOTETAKER} is invited — it joins the call and writes the transcript`
+                     : `${NOTETAKER} is not invited — this call will not be recorded`}
+                   style={{ cursor: "pointer", fontSize: 12, padding: "4px 9px", borderRadius: 20,
+                            display: "flex", alignItems: "center", gap: 5,
+                            border: "1px solid " + (f.record ? "var(--acc)" : "var(--bdr)"),
+                            background: f.record ? "var(--soft)" : "var(--s1)",
+                            color: f.record ? "var(--acc)" : "var(--txt3)" }}>
+                <Mic size={11} />
+                Fred (Fireflies){f.record ? " ✓" : ""}
+              </div>
               {candidates.filter((u) => u.email).map((u) => (
                 <div key={u.id} onClick={() => toggle(u.id)}
                      style={{ cursor: "pointer", fontSize: 12, padding: "4px 9px", borderRadius: 20,

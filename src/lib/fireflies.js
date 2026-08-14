@@ -15,6 +15,13 @@ export const firefliesEnabled = Boolean(URL_);
 const MEET_URL = (import.meta.env.VITE_MEET_URL || "").trim();
 export const meetEnabled = Boolean(MEET_URL);
 
+/* The notetaker's own address. It is a guest on the call like anyone else —
+   that invitation is the whole mechanism by which the recording happens, so
+   it belongs in the guest list where people can see it, not hidden behind a
+   checkbox. Must match FIREFLIES_NOTETAKER_EMAIL on the `meet` function. */
+export const NOTETAKER =
+  (import.meta.env.VITE_FIREFLIES_NOTETAKER || "fred@fireflies.ai").trim().toLowerCase();
+
 async function userJwt() {
   if (!supabase) return "";
   try { return (await supabase.auth.getSession())?.data?.session?.access_token || ""; }

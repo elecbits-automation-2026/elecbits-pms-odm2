@@ -236,7 +236,13 @@ Deno.serve(async (req) => {
         end: ev.end?.dateTime || "",
         organizer: subject,
         attendees: (ev.attendees ?? []).map((a: any) => a.email),
+        // What we ASKED for versus what Google actually kept. A Workspace that
+        // blocks external guests drops the notetaker silently, and the first
+        // anyone would otherwise know is a call that produced no transcript.
         recording: !!body.recordWithFireflies,
+        notetaker: NOTETAKER,
+        notetakerInvited: (ev.attendees ?? []).some(
+          (a: any) => String(a.email || "").toLowerCase() === NOTETAKER),
       });
     }
 
