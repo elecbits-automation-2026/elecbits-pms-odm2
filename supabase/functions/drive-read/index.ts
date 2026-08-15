@@ -275,20 +275,32 @@ const listSafe = (token: string, id: string) => listChildren(token, id).catch(()
 const ROOT_CHAIN = ["Eb-02-ODM", "Eb-ODM Execution", "Engineering Services"];
 /* Preferred starting points, by who is asking. These are hints for the ORDER
    of looking, not the whole list — real work also sits in sibling folders like
-   Eb-Hardware, so every child of Engineering Services is searched. */
+   Eb-Hardware, so every child of Engineering Services is searched.
+
+   These are deliberately STEMS, not the folders' full names. The real folders
+   are "Project Management - Project Managers" and "PCB & Firmware - Engineers
+   / Developers", and people extend those names from time to time. Matching on
+   the stem means a rename that adds to the end costs nothing; putting the full
+   name here would break the moment somebody appended another word. */
 const BRANCH: Record<string, string> = { pm: "Project Management", pcb: "PCB & Firmware" };
 const ROOT_PATH = "/" + ROOT_CHAIN.join("/") + "/";
 
 const norm = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-/* Folder names drift (spacing, ampersands, case) — match on the letters. */
-async function childFolder(token: string, parentId: string, name: string): Promise<GFile | null> {
+/* Folder names drift (spacing, ampersands, case) — match on the letters.
+
+   `strict` turns the fuzzy half off. It is used when the name being tried is a
+   GUESS reassembled from several path segments: there, a loose match is worse
+   than no match, because "Project Management - Project Managers / Eb-09-1752"
+   contains the parent's name and would happily match the parent, swallowing
+   the segment that named the folder actually wanted. */
+async function childFolder(token: string, parentId: string, name: string, strict = false): Promise<GFile | null> {
   let kids: GFile[];
   try { kids = (await listChildren(token, parentId)).filter(isFolder); } catch { return null; }
   const n = norm(name);
-  return kids.find((k) => norm(k.name) === n)
-    || kids.find((k) => norm(k.name).includes(n) || n.includes(norm(k.name)))
-    || null;
+  const exact = kids.find((k) => norm(k.name) === n);
+  if (exact || strict) return exact || null;
+  return kids.find((k) => norm(k.name).includes(n) || n.includes(norm(k.name))) || null;
 }
 
 /* Resolved once per warm instance — the IDs don't move.
@@ -664,12 +676,31 @@ Deno.serve(async (req) => {
         }
         if (!node) return { node: null, walked, missing: ROOT_CHAIN.join("/"), last: null as GFile | null };
       }
-      for (const part of parts) {
-        const kid: GFile | null = await childFolder(token, node!.id, part);
-        const found = kid || (make ? await createFolder(token, node!.id, part) : null);
-        if (!found) return { node: null, walked, missing: part, last: node };
+      /* Drive is not a filesystem: a folder's own name may contain a slash, and
+         two of ours do — "PCB & Firmware - Engineers / Developers" and
+         "Z-Engineering Modules / Frameworks / Sigma Backend". Splitting the
+         path on "/" tears those in half, so at each level try the LONGEST run
+         of remaining segments first and fall back to shorter ones.
+
+         Longest-first is not a preference, it is required: "PCB & Firmware -
+         Engineers" alone would fuzzy-match the real folder, consume one
+         segment, and leave "Developers" to fail against its children. */
+      for (let i = 0; i < parts.length; ) {
+        let found: GFile | null = null;
+        let used = 1;
+        for (let take = Math.min(4, parts.length - i); take >= 1; take--) {
+          const name = parts.slice(i, i + take).join(" / ");
+          // Only the single segment the caller actually wrote may match loosely.
+          const kid = await childFolder(token, node!.id, name, take > 1);
+          if (kid) { found = kid; used = take; break; }
+        }
+        // Creating is different: make exactly the one folder that was asked
+        // for, never a speculative multi-segment name.
+        if (!found && make) { found = await createFolder(token, node!.id, parts[i]); used = 1; }
+        if (!found) return { node: null, walked, missing: parts[i], last: node };
         node = found;
         walked.push(node.name);
+        i += used;
       }
       return { node, walked, missing: "", last: node };
     };

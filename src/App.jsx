@@ -65,10 +65,17 @@ const normId = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 /* ─── THE REAL DRIVE ADDRESS ──────────────────────────────────────────────
    One chain, two branches. PMs work out of Project Management, engineers out
    of PCB & Firmware. Everything the OS reads or writes lives under here — no
-   guessing at folder names anywhere else in Drive. */
+   guessing at folder names anywhere else in Drive.
+
+   The folders carry a "- who works here" suffix in Drive, and these constants
+   say the full name so a path shown on screen matches what a person sees when
+   they open Drive. Nothing MATCHES on these strings: the drive-read function
+   finds a branch by its stem ("Project Management"), so the next time somebody
+   extends a folder name, this file is the only thing that needs to change and
+   nothing breaks in the meantime. */
 const DRIVE_CHAIN = "Eb-02-ODM/Eb-ODM Execution/Engineering Services";
-const PM_ROOT = `/${DRIVE_CHAIN}/Project Management`;
-const PCB_ROOT = `/${DRIVE_CHAIN}/PCB & Firmware`;
+const PM_ROOT = `/${DRIVE_CHAIN}/Project Management - Project Managers`;
+const PCB_ROOT = `/${DRIVE_CHAIN}/PCB & Firmware - Engineers / Developers`;
 const pmPath = (id) => `${PM_ROOT}/${id || "<Project ID>"}/`;
 const pcbPath = (id) => `${PCB_ROOT}/${id || "<board>"}/`;
 /* Which branch a person looks in first. */
@@ -564,7 +571,7 @@ const WORKSPACE_TOOLS = [
   tool("create_doc", "Write a document and hand it to the user in the chat — a plan, a checklist, a summary, a report, a CSV. They can open it, download it, and it is filed into the project's Drive folder if you name one. Use this whenever they ask you to write, draft, produce or prepare something, rather than dumping the text into your reply.",
     { title: str("what to call it"), fileName: str("file name with extension, e.g. Kickoff-Plan.md"), content: str("the whole document"), projectId: str("file it into this project's Drive folder — optional"), folderPath: str("or file it at this path under Eb-02-ODM — optional; folders are created if missing") }, ["content"]),
   tool("list_folder", "See what is actually inside a Drive folder — its sub-folders and its files. Use this for \"what is in X\", \"list the files in X\", or whenever you need to know what exists before deciding anything. Leave folderPath empty for the top of Eb-02-ODM. This is browsing, not searching: it shows you everything at that level.",
-    { folderPath: str("the folder to open, e.g. 'Eb-02-ODM', 'Eb-02-ODM/Eb-ODM Execution', or 'Project Management/Eb-09-ML-432-01-1752'. Empty means the top of Eb-02-ODM.") }),
+    { folderPath: str("the folder to open, e.g. 'Eb-02-ODM', 'Eb-02-ODM/Eb-ODM Execution', or 'Project Management - Project Managers/Eb-09-ML-432-01-1752'. Empty means the top of Eb-02-ODM. A folder's name only has to be close — 'Project Management' finds it.") }),
   tool("write_drive_file", "Write a file anywhere in the company Drive. Give a projectId for a project folder, or a folderPath to put it somewhere else entirely — any folder under Eb-02-ODM. Folders in the path that do not exist are created.",
     { projectId: str("a project's folder"), folderPath: str("where to put it instead, e.g. 'Eb-02-ODM/Templates' or 'Eb-ODM Execution/Engineering Services/Shared'"), fileName: str("file name including extension"), content: str("the full text of the file") }, ["fileName", "content"]),
   tool("read_file", "Read ONE Drive file in full — the whole text, not the folder digest. Use this before editing a file, or whenever you need its actual contents rather than a summary.",
