@@ -30,3 +30,6 @@ logs/
 *.ntvs*
 *.njsproj
 *.sln
+
+# health-check screenshots and reports
+check-artifacts/
