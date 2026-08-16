@@ -404,7 +404,12 @@ async function searchUnder(token: string, rootName: string, term: string, limit 
   try {
     data = await drive(token, `files?q=${q}&fields=files(id,name,mimeType,modifiedTime,size,parents,webViewLink)&pageSize=40&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives`);
   } catch { return []; }
-  const files: GFile[] = (data.files ?? []).filter((f: GFile) => !isFolder(f));
+  /* Folders count. A project ID, a PCB ID and a board revision are all FOLDER
+     names — "1880" is the tail of EbX-RD-01-01-03-1880-GW-123 — so excluding
+     folders from a search made the commonest question in this system
+     ("find 1880") unanswerable, and the honest "I found nothing" that came
+     back was the function's fault, not the asker's. */
+  const files: GFile[] = (data.files ?? []);
   const under = await inParallel(files.slice(0, 16), 6, async (f: GFile) => {
     const path = await folderPath(token, f).catch(() => "");
     return norm(path).includes(norm(rootName)) ? { ...f, _path: path } as GFile & { _path: string } : null;
@@ -1168,11 +1173,33 @@ Deno.serve(async (req) => {
       if (!hits.length) {
         lines.push(`Nothing named like "${search}" turned up anywhere under ${ROOT_PATH}.`);
       } else {
-        lines.push(`Searched the whole of ${ROOT_PATH} for "${search}" — ${hits.length} file(s) match by name:`);
-        for (const f of hits) {
+        const folders = hits.filter(isFolder);
+        const files_ = hits.filter((f) => !isFolder(f));
+        lines.push(`Searched the whole of ${ROOT_PATH} for "${search}" — ${hits.length} match(es) by name:`);
+        for (const f of folders) {
+          const path = (f as GFile & { _path?: string })._path || "";
+          lines.push(`  FOLDER ${path || f.name}`);
+        }
+        for (const f of files_) {
           const path = (f as GFile & { _path?: string })._path || "";
           lines.push(`  ${path || f.name} · modified ${String(f.modifiedTime || "").slice(0, 10)}`);
           candidates.push({ f, path: path.replace(new RegExp(`${f.name}/$`), "") });
+        }
+        /* A matching FOLDER is almost always the real answer — somebody asking
+           for "1880" wants the project, not a file that mentions it. So open
+           the closest one and say what is in it, rather than naming it and
+           making them ask a second time. */
+        for (const dir of folders.slice(0, 2)) {
+          const kids = await listSafe(token, dir.id);
+          if (!kids.length) continue;
+          const sub = kids.filter(isFolder).map((k) => k.name).sort();
+          const inside = kids.filter((k) => !isFolder(k));
+          lines.push(`  ↳ ${dir.name} holds ${sub.length} folder(s) and ${inside.length} file(s)`);
+          if (sub.length) lines.push(`    folders: ${sub.slice(0, 25).join(" · ")}`);
+          for (const f of inside.slice(0, 12)) {
+            lines.push(`    ${f.name} · ${String(f.modifiedTime || "").slice(0, 10)}`);
+            candidates.push({ f, path: ((dir as GFile & { _path?: string })._path || "") });
+          }
         }
       }
     }
