@@ -931,7 +931,9 @@ Deno.serve(async (req) => {
           // The Flow Map grew a second section below the block table — the
           // cross-track convergence points — and a range that stopped at row
           // 40 would have cut it off without anything saying so.
-          "'Process Flow'!A1:P400", "'Template Actions'!A1:G300", "'Flow Map'!A1:F80",
+          // Wide enough for the 2-PCB project copy: 20 columns, one row per
+          // board per step — 543 rows for two boards, more for three.
+          "'Process Flow'!A1:V900", "'Template Actions'!A1:G300", "'Flow Map'!A1:F80",
         ]);
       } catch (e) {
         return json({ error: `Found ${pick.f.name} but could not read it: ${e}` }, 502);
@@ -939,23 +941,61 @@ Deno.serve(async (req) => {
 
       const cell = (r: string[] | undefined, i: number) => String(r?.[i] ?? "").replace(/\s+/g, " ").trim();
       const flowRows = tabs["Process Flow"] ?? [];
-      const steps = [];
-      for (let i = 5; i < flowRows.length; i++) {
+
+      /* Columns by HEADER, rows folded by base number — the same reading the
+         upload path does, because the pinned file and the uploaded file are
+         the same document and must never parse two different ways. The master
+         layout, the single-PCB project copy and the 2-PCB copy (PCB and Scope
+         columns, one row per board per step, "118.a"/"118.b" numbering) all
+         come through this one reader. */
+      const headerRow = flowRows.findIndex((r) => /^s\.?\s?no\.?$/i.test(cell(r, 0)));
+      const H = headerRow >= 0 ? (flowRows[headerRow] || []).map((h) => cell([h], 0).toLowerCase()) : [];
+      const colOf = (...res: RegExp[]) => H.findIndex((h) => res.some((re) => re.test(h)));
+      const CC = headerRow >= 0 ? {
+        category: colOf(/^category/), step: colOf(/^steps?$/),
+        entryTrigger: colOf(/^entry trigger/), exitTrigger: colOf(/^exit trigger/),
+        entryQuestion: colOf(/^entry question/), exitQuestion: colOf(/^exit question/),
+        templateFile: colOf(/template link|file name/), templateId: colOf(/^template id/),
+        template: colOf(/^template to work|^template$/),
+        location: colOf(/^location/), action: colOf(/^action/), whatToDo: colOf(/^what to do/),
+        owner: colOf(/^owner/), responsibility: colOf(/^responsibility/), guidelines: colOf(/^guidelines/),
+        pcb: colOf(/^pcb$/), scope: colOf(/^scope$/),
+      } : { category: 1, step: 2, entryTrigger: 3, exitTrigger: 4, entryQuestion: 5, exitQuestion: 6,
+            templateFile: 7, templateId: 8, template: 9, location: -1, action: 11, whatToDo: 12,
+            owner: 13, responsibility: 14, guidelines: 15, pcb: -1, scope: -1 };
+      const firstDataRow = headerRow >= 0 ? headerRow + 1 : 5;
+
+      const steps: Record<string, unknown>[] = [];
+      const stepByNo = new Map<number, Record<string, unknown>>();
+      for (let i = firstDataRow; i < flowRows.length; i++) {
         const r = flowRows[i];
-        const no = Number(cell(r, 0));
-        if (!Number.isFinite(no) || !cell(r, 2)) continue;
-        steps.push({
-          no, category: cell(r, 1), step: cell(r, 2),
-          entryTrigger: cell(r, 3), exitTrigger: cell(r, 4),
-          entryQuestion: cell(r, 5), exitQuestion: cell(r, 6),
-          // 35 rows have the template id glued onto the front of the
-          // filename. It is already in its own column, and left in it makes
-          // every one of those steps name a file Drive will never match.
-          templateFile: cell(r, 7).replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
-          templateId: cell(r, 8), template: cell(r, 9),
-          action: cell(r, 11), whatToDo: cell(r, 12),
-          owner: cell(r, 13), responsibility: cell(r, 14), guidelines: cell(r, 15),
-        });
+        const noMatch = /^(\d+)(?:\.[a-z0-9]+)?$/i.exec(cell(r, 0));
+        if (!noMatch || !cell(r, CC.step)) continue;
+        const no = Number(noMatch[1]);
+        const at = (k: keyof typeof CC) => (CC[k] >= 0 ? cell(r, CC[k] as number) : "");
+        let st = stepByNo.get(no);
+        if (!st) {
+          st = {
+            no, category: at("category"), step: at("step"),
+            entryTrigger: at("entryTrigger"), exitTrigger: at("exitTrigger"),
+            entryQuestion: at("entryQuestion"), exitQuestion: at("exitQuestion"),
+            templateFile: at("templateFile").replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
+            templateId: at("templateId"), template: at("template"),
+            action: at("action"), whatToDo: at("whatToDo"),
+            owner: at("owner"), responsibility: at("responsibility"), guidelines: at("guidelines"),
+            scope: at("scope").toLowerCase() || "",
+            location: "", locations: {} as Record<string, string>,
+          };
+          stepByNo.set(no, st);
+          steps.push(st);
+        }
+        const pcbRaw = at("pcb");
+        const boardKey = pcbRaw && !/^both$/i.test(pcbRaw) ? pcbRaw : "";
+        const loc = at("location");
+        if (loc) {
+          if (boardKey) (st.locations as Record<string, string>)[boardKey] = (st.locations as Record<string, string>)[boardKey] || loc;
+          st.location = st.location || loc;
+        }
       }
       if (!steps.length) {
         return json({ error: `${pick.f.name} opened but its "Process Flow" tab has no step rows — has the layout changed?` }, 502);

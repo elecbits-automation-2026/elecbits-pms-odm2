@@ -344,6 +344,10 @@ export async function loadProcessMapFromUpload(file) {
     templateId: col(/^template id/),
     template: col(/^template to work|^template$/),
     open: col(/^open\b/),
+    // the 2-PCB project copy: which board a row belongs to, and whether the
+    // step runs per board or once for the project
+    pcb: col(/^pcb$/),
+    scope: col(/^scope$/),
     // EVERY per-board link column, not just the first: one project workbook
     // carries one "Open — <board>" column per PCB, and each is a source.
     opens: H.map((h, i) => (/^open\b/.test(h) ? i : -1)).filter((i) => i >= 0),
@@ -361,33 +365,58 @@ export async function loadProcessMapFromUpload(file) {
 
   const flowLink = linksOf("Process Flow");
   const steps = [];
+  const byNo = new Map();
   for (let i = headerRow + 1; i < flow.length; i++) {
     const r = flow[i];
-    const no = Number(clean(r[C.no]));
-    if (!Number.isFinite(no) || !clean(r[C.step])) continue;
+    /* "118" is a step; "118.a" and "118.b" are the SAME step run on two
+       boards — the 2-PCB copy writes one row per board, and the app folds
+       them back into one step carrying a link per board. It re-explodes per
+       project itself, so a workbook and a two-board plan never disagree
+       about what a step is. */
+    const noMatch = /^(\d+)(?:\.[a-z0-9]+)?$/i.exec(clean(r[C.no]));
+    if (!noMatch || !clean(r[C.step])) continue;
+    const no = Number(noMatch[1]);
     const cell = (k) => (C[k] >= 0 ? clean(r[C[k]]) : "");
-    steps.push({
-      no, category: cell("category"), step: cell("step"),
-      entryTrigger: cell("entryTrigger"), exitTrigger: cell("exitTrigger"),
-      entryQuestion: cell("entryQuestion"), exitQuestion: cell("exitQuestion"),
-      templateFile: cell("templateFile").replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
-      templateId: cell("templateId"), template: cell("template"),
-      action: cell("action"), whatToDo: cell("whatToDo"),
-      owner: cell("owner"), responsibility: cell("responsibility"), guidelines: cell("guidelines"),
-      /* The three columns that make the sheet the source of truth for WHERE:
-         the project's own file, the blank it came from, and the human-readable
-         location. Links that came off the sheet somebody deliberately built
-         are exactly the "cannot be wrong" links asked for. */
-      openLink: flowLink(i, C.open),
-      /* keyed by the column's own label — "Open — GW-123" → "GW-123" — so a
-         two-board workbook hands each board its own link. A plain "Open"
-         column keys as "" and serves the single-board case unchanged. */
-      openLinks: Object.fromEntries(C.opens
-        .map((c) => [clean(flow[headerRow][c]).replace(/^open\s*[—–-]?\s*/i, ""), flowLink(i, c)])
-        .filter(([, url]) => url)),
-      masterLink: flowLink(i, C.master),
-      location: cell("location"),
-    });
+    const pcbRaw = cell("pcb");
+    const boardKey = pcbRaw && !/^both$/i.test(pcbRaw) ? pcbRaw : "";
+    let st = byNo.get(no);
+    if (!st) {
+      st = {
+        no, category: cell("category"), step: cell("step"),
+        entryTrigger: cell("entryTrigger"), exitTrigger: cell("exitTrigger"),
+        entryQuestion: cell("entryQuestion"), exitQuestion: cell("exitQuestion"),
+        templateFile: cell("templateFile").replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
+        templateId: cell("templateId"), template: cell("template"),
+        action: cell("action"), whatToDo: cell("whatToDo"),
+        owner: cell("owner"), responsibility: cell("responsibility"), guidelines: cell("guidelines"),
+        // A declared scope ("Board" / "Project") outranks every inferred rule.
+        scope: cell("scope").toLowerCase() || "",
+        openLink: "", openLinks: {}, masterLink: "", location: "", locations: {},
+      };
+      /* the older layouts: one row per step, per-board links as extra
+         "Open — <board>" COLUMNS keyed by their own label. A per-row layout
+         (a PCB column exists) owns its links row by row instead. */
+      for (const c of (C.pcb >= 0 ? [] : C.opens)) {
+        const label = clean(flow[headerRow][c]).replace(/^open\s*[—–-]?\s*/i, "").replace(/^this project$/i, "");
+        const url = flowLink(i, c);
+        if (url) st.openLinks[label] = url;
+      }
+      byNo.set(no, st);
+      steps.push(st);
+    }
+    /* every row contributes ITS board's link and location — but only the
+       per-row layout writes keyed links here; in the one-row layouts the
+       keyed links come from the labelled columns above, and a stray ""-key
+       would hand an unknown board the first board's link. */
+    const url = flowLink(i, C.open);
+    if (url) {
+      if (C.pcb >= 0) st.openLinks[boardKey] = st.openLinks[boardKey] || url;
+      st.openLink = st.openLink || url;
+    }
+    const master = flowLink(i, C.master);
+    if (master) st.masterLink = st.masterLink || master;
+    const loc = cell("location");
+    if (loc) { if (boardKey) st.locations[boardKey] = st.locations[boardKey] || loc; st.location = st.location || loc; }
   }
   if (!steps.length) return { error: `${file.name} opened, but its Process Flow tab has no step rows.` };
 
@@ -461,13 +490,19 @@ export async function loadProcessMapFromUpload(file) {
     };
     const [projectId] = find("Project ID");
     const pcbIds = pr
-      .filter((r) => /^pcb id/i.test(clean(r[0])))
-      .flatMap((r) => clean(r[1]).split(/[,;]/))
+      .filter((r) => /^pcb ids?$/i.test(clean(r[0])))
+      .flatMap((r) => clean(r[1]).split(/[,;·]/))
       .map((x) => x.trim()).filter(Boolean);
     const pcbId = pcbIds[0] || "";
+    // "PCB folder — GW-123" rows: one Drive folder per board
+    const pcbFolders = {};
+    pr.forEach((r, i) => {
+      const m = /^pcb folder\s*[—–-]\s*(.+)$/i.exec(clean(r[0]));
+      if (m) pcbFolders[m[1].trim()] = prLink(i, 1) || clean(r[1]);
+    });
     const [pmText, pmLink] = find("Project folder");
     const [pcbText, pcbLink] = find("PCB folder");
-    if (projectId) projectCopy = { projectId, pcbId, pcbIds,
+    if (projectId) projectCopy = { projectId, pcbId, pcbIds, pcbFolders,
       pmFolderLink: pmLink || pmText, pcbFolderLink: pcbLink || pcbText };
   }
 
@@ -521,7 +556,15 @@ export function sourceLine() {
    Changing the rule is one line — a product whose enclosure ships per board
    would add "E" here. */
 export const BOARD_TRACKS = ["H", "F"];
-export const boardScoped = (step) => BOARD_TRACKS.includes(String(step?.wave || "").charAt(0));
+/* The workbook can DECLARE a step's scope — the 2-PCB project copy carries a
+   Scope column marking 230 steps board-level and 78 project-level, which is
+   wider than the wave rule (their reference-product work runs per board even
+   inside pre-design). A declared scope wins; the wave-track rule serves the
+   workbooks that never say. */
+export const boardScoped = (step) =>
+  step?.scope === "board" ? true
+  : step?.scope === "project" ? false
+  : BOARD_TRACKS.includes(String(step?.wave || "").charAt(0));
 export const boardsOf = (project) => (project?.linkedIds || []).map((x) => String(x).trim()).filter(Boolean);
 
 /* The project workbook stays in the Project ID folder — ONE file per project,
@@ -529,20 +572,28 @@ export const boardsOf = (project) => (project?.linkedIds || []).map((x) => Strin
    link for a given board: the column whose label names the board wins, and a
    lone unlabelled Open column serves a single-board project as it always
    did. Never the WRONG board's link — a near-miss falls through to none. */
+const normB = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+export function byBoard(map, board) {
+  if (!map) return "";
+  const keys = Object.keys(map);
+  if (board) {
+    const hit = keys.find((k) => k && (normB(k).includes(normB(board)) || normB(board).includes(normB(k))));
+    if (hit) return map[hit];
+  }
+  return map[""] || "";
+}
 export function openLinkFor(step, board) {
   const links = step?.openLinks || null;
-  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (links) {
+  if (links && Object.keys(links).length) {
+    const hit = byBoard(links, board);
+    if (hit) return hit;
     const keys = Object.keys(links);
-    if (board) {
-      const hit = keys.find((k) => k && (norm(k).includes(norm(board)) || norm(board).includes(norm(k))));
-      if (hit) return links[hit];
-    }
     if (!boardScoped(step) || keys.length === 1) return links[keys[0]] || "";
     return board ? "" : links[keys[0]] || "";
   }
   return step?.openLink || "";
 }
+export const locationFor = (step, board) => byBoard(step?.locations, board) || step?.location || "";
 
 export const stepByNo = (no) => STEPS.find((s) => s.no === Number(no)) || null;
 export const stepsIn = (category) => STEPS.filter((s) => s.category === category);
@@ -998,7 +1049,7 @@ export function buildPlan(project, users = [], opts = {}) {
       // somebody deliberately built, and they are the row's payload.
       openLink: openLinkFor(s, board),
       masterLink: s.masterLink || "",
-      location: s.location || "",
+      location: locationFor(s, board),
 
       templateStandard: templateStandard(s),
       // Where the parallel tracks have to stop and agree before this can close.

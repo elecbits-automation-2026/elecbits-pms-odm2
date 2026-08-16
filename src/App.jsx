@@ -38,7 +38,8 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          sourceLine, servesOf, templateFor,
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
          loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
-         projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES } from "./lib/processMap.js";
+         projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES,
+         openLinkFor, locationFor } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -885,7 +886,13 @@ async function runAgent({ messages, system, exec, onStep, onText, maxSteps = MAX
    and the citations come back in the same content array. */
 const WEB_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
 
-async function claude(prompt, { json = true, maxTokens = 1000, images = [], web = false } = {}) {
+/* The strongest model available, for the places where the person said "use
+   the best AI — I'm ready to pay": the work chat that edits real files, the
+   report builder, and the email brain. Light parsing calls stay on the fast
+   default; judgement calls get the heavyweight. */
+const POWER_MODEL = import.meta.env.VITE_CLAUDE_POWER_MODEL || "claude-opus-5";
+
+async function claude(prompt, { json = true, maxTokens = 1000, images = [], web = false, model = "" } = {}) {
   const attempts = [];
   if (import.meta.env.VITE_CLAUDE_PROXY_URL) attempts.push({ url: import.meta.env.VITE_CLAUDE_PROXY_URL, direct: false });
   if (import.meta.env.VITE_ANTHROPIC_API_KEY || attempts.length === 0) attempts.push({ url: "https://api.anthropic.com/v1/messages", direct: true });
@@ -902,7 +909,7 @@ async function claude(prompt, { json = true, maxTokens = 1000, images = [], web 
       const res = await fetch(a.url, {
         method: "POST", headers,
         body: JSON.stringify({
-          model: AI_MODEL, max_tokens: budget,
+          model: model || AI_MODEL, max_tokens: budget,
           messages: [{
             role: "user",
             // the picture first, then the question about it — the order the
@@ -3023,6 +3030,19 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       </Section>
       )}
 
+      {tab === "overview" && boardsOf(p).length > 0 && (
+        <Section style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>PCBs on this project</span>
+            {boardsOf(p).map((b) => (
+              <span key={b} style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 700, padding: "4px 11px", borderRadius: 999, border: "1px solid var(--bdr)", background: "color-mix(in srgb, var(--blue) 9%, transparent)", color: "var(--blue)" }}>{b}</span>
+            ))}
+            <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
+              {boardsOf(p).length > 1 ? "hardware and firmware run once per board — the Plan shows a lane each" : "single-board project"} · manage in the Report tab
+            </span>
+          </div>
+        </Section>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: tab === "overview" ? "minmax(0,1fr) minmax(0,340px)" : "minmax(0,1fr)", gap: 16, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {(tab === "overview" || tab === "tasks") && (
@@ -4552,7 +4572,7 @@ function EmailTab({ p, upd, users }) {
     if (busy || !text.trim()) return;
     setBusy(true); setResult(null);
     try {
-      const r = await claude(emailPrompt(p, users, text), { maxTokens: 2000 });
+      const r = await claude(emailPrompt(p, users, text), { maxTokens: 2000, model: POWER_MODEL });
       if (!r?.summary) { toast("The AI didn't answer — try again", "amber"); return; }
       setResult(r);
       const entry = { id: uid(), at: new Date().toISOString(), from: r.from || "", subject: r.subject || "",
@@ -4710,7 +4730,7 @@ function ReportsCard({ p, upd, users }) {
     if (checking || !desc.trim()) return;
     setChecking(true); setAdvice(null); setBuilt(null);
     try {
-      const r = await claude(reportCheckPrompt(p, desc), { maxTokens: 1500 });
+      const r = await claude(reportCheckPrompt(p, desc), { maxTokens: 1500, model: POWER_MODEL });
       if (r?.files || r?.fits) setAdvice(r);
       else toast("The AI didn't answer that — try again in a moment", "amber");
     } catch (e) { toast(`Couldn't check: ${e?.message || e}`, "amber"); }
@@ -4724,7 +4744,7 @@ function ReportsCard({ p, upd, users }) {
       // read what the chosen files actually contain, then write from that
       const search = (advice.files || []).map((f) => f.name).join(" ").slice(0, 200) || desc.slice(0, 120);
       const { digest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: "pm", search });
-      const r = await claude(reportBuildPrompt(p, desc, advice, digest), { maxTokens: 6000 });
+      const r = await claude(reportBuildPrompt(p, desc, advice, digest), { maxTokens: 6000, model: POWER_MODEL });
       if (!r?.markdown) { toast("The AI returned no report — try again", "amber"); return; }
       const name = `${p.projectId}_${(advice.reportName || "Report").replace(/[^\w-]+/g, "-")}_${todayStr()}.md`;
       const folder = String(advice.targetFolder || "02-Project-Folder-R&D-PM/").replace(/^\/+/, "");
@@ -5067,22 +5087,43 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
    to be three fields (what was done, file, path) is read out of the
    conversation when the task is closed, because the conversation IS the
    record of the work. */
-const workChatPrompt = (p, t, step, history, msg, attachTexts) => `You are the Elecbits ODM work copilot, sitting inside the work window for one task. Help the person actually DO it — answer, draft, review what they attach, point at the exact file and folder. Be direct and concrete; short paragraphs, no headers.
+const workChatPrompt = (p, t, step, history, msg, attachTexts, fileCtx) => `You are the Elecbits ODM work copilot, sitting inside the work window for one task. Help the person actually DO it — answer, draft, review what they attach, point at the exact file and folder. Be direct and concrete; short paragraphs, no headers.
 TASK: "${t.title}" on project ${t.projectId || "unlinked"}${p ? ` (${p.name || ""}, deadline ${p.deadline || "?"})` : ""}
 ${step ? `THE METHOD'S STEP ${step.no}: ${step.step}
 DO: ${step.action}: ${step.whatToDo}
 GATE TO START: ${step.entryQuestion}
 GATE TO CLOSE: ${step.exitQuestion}
-THE FILE IT WRITES: ${fileNameFor(step, t.projectId)} in ${folderFor(step) || "(no folder recorded)"}
+THE FILE IT WRITES: ${fileCtx?.name || fileNameFor(step, t.projectId)} in ${fileCtx?.folder || folderFor(step) || "(no folder recorded)"}
 GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}` : "No method step is linked — help from the task's own words."}
+
+YOU CAN OPERATE THE FILE ITSELF — really read it and really write it in Drive. To use a tool, reply with ONLY a JSON object, nothing else:
+{"tool":"read_file"} — fetch the current content of this step's file from Drive.
+{"tool":"write_file","content":"the ENTIRE new file content","note":"one line on what changed"} — save it back to Drive.
+Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When no tool is needed, reply in plain text.
 CONVERSATION SO FAR:
-${history.slice(-14).map((m) => `${m.role === "user" ? "THEM" : "YOU"}: ${m.text}`).join("\n").slice(0, 6000) || "(none yet)"}
+${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(0, 12000) || "(none yet)"}
 ${attachTexts ? `THEY ATTACHED (extracted content):\n"""${attachTexts.slice(0, 8000)}"""` : ""}
 THEM: ${msg}
-Reply as YOU — plain text, no JSON.`;
+Reply as YOU — plain text, or exactly one tool JSON.`;
+
+/* A tool call is a reply that IS a JSON object naming a tool. Anything else —
+   prose, prose around JSON, JSON without a tool — is conversation. */
+function parseTool(reply) {
+  const txt = String(reply || "").trim().replace(/^```json|```$/g, "").trim();
+  if (!txt.startsWith("{")) return null;
+  try { const o = JSON.parse(txt); return typeof o?.tool === "string" ? o : null; } catch { return null; }
+}
 
 function WorkChat({ t, p, step, onEvidence }) {
   const { setTasks, toast } = useCtx();
+  /* The file this chat can really operate on. The board comes from the task's
+     own title when it names one, so GW-124's chat edits GW-124's file. */
+  const board = boardsOf(p).find((b) => String(t.title || "").includes(b)) || boardsOf(p)[0] || "";
+  const inPcb = step && servesOf(step) === "pcb" && board;
+  const fileName = step ? fileNameFor(step, t.projectId, board) : "";
+  const folder = step ? folderFor(step) : "";
+  const folderPath = step ? `${(inPcb ? pcbPath(board) : pmPath(t.projectId)).replace(/\/$/, "")}/${folder}` : "";
+  const fileCtx = step ? { name: fileName, folder: folderPath } : null;
   const [msgs, setMsgs] = useState(t.workChat || []);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState([]);   // attachments waiting on the next send
@@ -5127,12 +5168,46 @@ function WorkChat({ t, p, step, onEvidence }) {
         .map((x) => ({ type: "image", source: { type: "base64", media_type: x.media_type, data: x.data } }));
       const attachTexts = atts.filter((x) => x.kind === "text" && x.text)
         .map((x) => `--- ${x.name} ---\n${x.text}`).join("\n\n");
-      const reply = await claude(workChatPrompt(p, t, step, msgs, mine.text, attachTexts),
-                                 { json: false, maxTokens: 1800, images });
-      const done = [...base, { role: "assistant", text: String(reply || "").trim() || "…", at: new Date().toISOString() }];
-      setMsgs(done); persist(done);
+
+      /* The agentic loop: the copilot can read the step's real file, edit it,
+         and write it back — each round's tool result feeds the next call, so
+         "add a risks section and save it" is read → rewrite → save → confirm,
+         all inside one Send. Five rounds is plenty for any sane edit; a loop
+         that wants more is a loop that is stuck. */
+      let convo = base;
+      const add = (m) => { convo = [...convo, { ...m, at: new Date().toISOString() }]; setMsgs(convo); persist(convo); };
+      for (let round = 0; round < 5; round++) {
+        const reply = await claude(workChatPrompt(p, t, step, convo.slice(0, -1), convo.at(-1).role === "user" ? convo.at(-1).text : mine.text, round === 0 ? attachTexts : "", fileCtx),
+                                   { json: false, maxTokens: 4000, images: round === 0 ? images : [], model: POWER_MODEL });
+        const act = parseTool(reply);
+        if (!act) { add({ role: "assistant", text: String(reply || "").trim() || "…" }); break; }
+
+        if (act.tool === "read_file" && step) {
+          add({ role: "tool", text: `Reading ${fileName} from Drive…` });
+          const r = await driveReadFile({ projectId: inPcb ? board : t.projectId, folderPath, fileName, scope: inPcb ? "pcb" : "pm" });
+          add({ role: "tool", text: r?.ok
+            ? `FILE CONTENT of ${r.fileName} (${(r.text || "").length} chars${r.editable ? "" : " · this format cannot be written back, only read"}):\n${String(r.text || "").slice(0, 20000)}`
+            : `Could not read it: ${r?.error || r}` });
+          continue;
+        }
+        if (act.tool === "write_file" && step) {
+          /* The one hard guard the model cannot talk its way past: no write
+             without a read in this conversation. Overwriting a file nobody
+             looked at is the only unrecoverable mistake this chat can make. */
+          const hasRead = convo.some((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text));
+          if (!hasRead) { add({ role: "tool", text: "Write refused: the file has not been read in this conversation yet." }); continue; }
+          add({ role: "tool", text: `Writing ${fileName} back to Drive…` });
+          const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, String(act.content || ""), { folderPath, scope: inPcb ? "pcb" : "pm", wantFile: true });
+          add({ role: "tool", text: (w === true || w?.ok)
+            ? `Saved ${fileName} ✓${act.note ? ` — ${act.note}` : ""}`
+            : `Drive would not take it: ${typeof w === "string" ? w : "unknown error"}` });
+          continue;
+        }
+        add({ role: "assistant", text: String(reply || "").trim() });
+        break;
+      }
     } catch (e) {
-      const done = [...base, { role: "assistant", text: `I couldn't reach the AI just now (${e?.message || e}). Your message is saved — try again in a moment.`, at: new Date().toISOString() }];
+      const done = [...msgs, { role: "assistant", text: `I couldn't reach the AI just now (${e?.message || e}). Your message is saved — try again in a moment.`, at: new Date().toISOString() }];
       setMsgs(done); persist(done);
     } finally { setBusy(false); }
   };
@@ -5160,7 +5235,13 @@ function WorkChat({ t, p, step, onEvidence }) {
             the closing gate reads this conversation as your evidence.
           </div>
         )}
-        {msgs.map((m, i) => (
+        {msgs.map((m, i) => m.role === "tool" ? (
+          <div key={i} style={{ alignSelf: "center", maxWidth: "94%", fontSize: 10.5, fontFamily: MONO, color: "var(--txt3)",
+            border: "1px dashed var(--bdr)", borderRadius: 8, padding: "4px 10px", whiteSpace: "pre-wrap",
+            overflow: "hidden", maxHeight: 72, textOverflow: "ellipsis" }}>
+            {/^FILE CONTENT/.test(m.text) ? m.text.split("\n")[0] : m.text}
+          </div>
+        ) : (
           <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%",
             background: m.role === "user" ? "var(--acc)" : "var(--s2)",
             color: m.role === "user" ? "#fff" : "var(--txt)",
@@ -5381,17 +5462,40 @@ function StepGuidance({ step, task, onUse, onPick, board = "" }) {
       <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>
         The file this step writes to
       </div>
-      <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", wordBreak: "break-all", marginBottom: 3 }}>{name}</div>
-      {/* No folder means the workbook never said where this template lives.
-          Saying so is the only honest option — a made-up path would be obeyed. */}
-      {knowsWhereItGoes(step) ? (
-        <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginBottom: 7 }}>{path}</div>
-      ) : (
-        <div style={{ fontSize: 11, color: "var(--amber)", marginBottom: 7, lineHeight: 1.5 }}>
-          The process sheet does not say which folder {step.templateId} lives in — add it to the
-          Template Actions tab and this will fill in.
-        </div>
-      )}
+      {/* THE LINK, first and clickable. The project workbook carries a hyperlink
+          per step to this project's own file — the exact thing to open and work
+          in. Everything else in this block is orientation around that link. */}
+      {(() => {
+        const own = openLinkFor(step, board);
+        const loc = locationFor(step, board);
+        return (
+          <div style={{ marginBottom: 7 }}>
+            {own ? (
+              <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", marginBottom: 4 }}>
+                <a href={own} target="_blank" rel="noreferrer"
+                   style={{ fontSize: 13, fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open the file ↗</a>
+                {step.masterLink && <a href={step.masterLink} target="_blank" rel="noreferrer"
+                   style={{ fontSize: 11, color: "var(--txt3)", textDecoration: "underline" }}>blank template</a>}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 4 }}>
+                No per-step link on file — upload or pin the project workbook in the Plan tab and this becomes one click.
+              </div>
+            )}
+            <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", wordBreak: "break-all" }}>{name}</div>
+            {loc ? (
+              <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginTop: 2 }}>{loc}</div>
+            ) : knowsWhereItGoes(step) ? (
+              <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginTop: 2 }}>{path}</div>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 2, lineHeight: 1.5 }}>
+                The process sheet does not say which folder {step.templateId} lives in — add it to the
+                Template Actions tab and this will fill in.
+              </div>
+            )}
+          </div>
+        );
+      })()}
       <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 8 }}>{step.template} · {step.templateId}</div>
 
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>
