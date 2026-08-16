@@ -140,6 +140,43 @@ export function phasesOf(categories = CATEGORIES) {
   return [...byPhase.values()].sort((a, b) => a.phase - b.phase);
 }
 
+export const WAVES = MAP.waves || [];
+export const waveById = (id) => WAVES.find((w) => w.id === id) || null;
+export const waveOf = (stepNo) => WAVES.find((w) => w.steps.includes(Number(stepNo))) || null;
+
+/* ── the real schedule: waves ────────────────────────────────────────────────
+   The flow diagram carries what the workbook cannot — the dependency graph. A
+   wave holds steps with no dependency on each other, so they all start
+   together; a wave's predecessors are fixed. Hardware, firmware and enclosure
+   all begin after the last pre-design wave, and the prototype merge waits on
+   ALL THREE: pulling firmware in early does not move it.
+
+   That is a critical path, not a spread. Every wave gets one working day per
+   step in its longest chain, then the whole thing is stretched or squeezed to
+   fit the project's actual window — so the SHAPE comes from the process and
+   the LENGTH from the dates the business committed to.                       */
+export function scheduleWaves({ start, end, milestones = [] }) {
+  if (!WAVES.length) return null;
+
+  // Earliest finish for each wave, in abstract units, honouring predecessors.
+  const cost = (w) => Math.max(1, w.steps.length);
+  const startAt = new Map(), endAt = new Map();
+  const settle = (w, guard = 0) => {
+    if (endAt.has(w.id)) return endAt.get(w.id);
+    if (guard > WAVES.length) return 0;              // a cycle would hang this
+    const after = (w.after || []).map(waveById).filter(Boolean);
+    const from = after.length ? Math.max(...after.map((p) => settle(p, guard + 1))) : 0;
+    startAt.set(w.id, from);
+    const to = from + cost(w);
+    endAt.set(w.id, to);
+    return to;
+  };
+  for (const w of WAVES) settle(w);
+
+  const span = Math.max(1, Math.max(...endAt.values()));
+  return { startAt, endAt, span, milestones };
+}
+
 /* Dates for every step. `milestones` is optional: a list of
    { category | phase, date } from the project's Milestone Tracking Sheet. Any
    phase named there is pinned to that date and the rest flow around it. */
@@ -147,6 +184,60 @@ export function scheduleSteps({ start, end, milestones = [], steps = STEPS, cate
   const t0 = new Date(start || iso(Date.now()));
   const t1 = new Date(end || addDays(t0, 180));
   const totalDays = Math.max(workingDaysBetween(t0, t1), phasesOf(categories).length);
+
+  /* The wave graph is the truth when we have it: it knows that H, F and E run
+     together and that the merge waits on all three. The category spread below
+     is the fallback for a partial plan (one category asked for on its own),
+     where there is no graph to walk. */
+  const graph = steps === STEPS ? scheduleWaves({ start, end, milestones }) : null;
+  if (graph) {
+    /* Abstract wave units → real dates, through the milestones as ANCHORS.
+       A milestone is a date the business has committed to, so the wave that
+       ends there is pinned to it and the stretches either side absorb the
+       difference. Interpolating between anchors is what makes a late milestone
+       push everything after it out and an early one pull it in, without ever
+       moving the milestone itself. */
+    const anchors = [[0, 0]];
+    for (const m of milestones) {
+      if (!m.date) continue;
+      const cat = m.category || CATEGORIES.find((c) => c.phase === m.phase)?.name;
+      const waves = WAVES.filter((w) => w.category === cat);
+      if (!waves.length) continue;
+      const unit = Math.max(...waves.map((w) => graph.endAt.get(w.id) || 0));
+      anchors.push([unit, workingDaysBetween(t0, new Date(m.date))]);
+    }
+    anchors.push([graph.span, totalDays]);
+    anchors.sort((a, b) => a[0] - b[0]);
+    const toDays = (u) => {
+      for (let i = 1; i < anchors.length; i++) {
+        const [u0, d0] = anchors[i - 1], [u1, d1] = anchors[i];
+        if (u <= u1 || i === anchors.length - 1) {
+          const t = u1 === u0 ? 0 : (u - u0) / (u1 - u0);
+          return d0 + t * (d1 - d0);
+        }
+      }
+      return u;
+    };
+
+    const out = new Map();
+    for (const w of WAVES) {
+      const a = addWorkingDays(t0, toDays(graph.startAt.get(w.id) || 0));
+      const b = addWorkingDays(t0, toDays(graph.endAt.get(w.id) || 1));
+      for (const no of w.steps) {
+        const s = stepByNo(no);
+        const cat = categories.find((c) => c.name === s?.category);
+        // Every step in a wave starts together — that is what a wave means.
+        out.set(no, { start: iso(a), end: iso(b), phase: cat?.phase, category: s?.category,
+                      parallel: !!cat?.parallel, wave: w.id });
+      }
+    }
+    // A step the diagram never placed still needs a date rather than nothing.
+    for (const s of steps) if (!out.has(s.no)) {
+      const cat = categories.find((c) => c.name === s.category);
+      out.set(s.no, { start: iso(t0), end: iso(t1), phase: cat?.phase, category: s.category, parallel: !!cat?.parallel, wave: "" });
+    }
+    return out;
+  }
 
   const phases = phasesOf(categories);
   const weight = phases.reduce((s, p) => s + p.span, 0) || 1;
@@ -241,6 +332,7 @@ export function buildPlan(project, users = [], opts = {}) {
       start: w.start || start,
       end: w.end || end,
       parallel: !!w.parallel,
+      wave: w.wave || "",
     };
   });
 }
