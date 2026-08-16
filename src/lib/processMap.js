@@ -10,12 +10,171 @@
    Regenerated from the master workbook by scripts/build-process-map.mjs.
    Nothing in the app reads the spreadsheet — this JSON is the source.        */
 
-import MAP from "../data/process-map.json";
+import BUNDLED from "../data/process-map.json";
 
-export const PROCESS = MAP;
-export const STEPS = MAP.steps;
-export const CATEGORIES = MAP.categories;
-export const TEMPLATES = MAP.templates;
+/* ── WHERE THE METHOD COMES FROM ─────────────────────────────────────────────
+   The workbook lives in Drive and is edited there. This module follows it: it
+   reads the live file, and the copy compiled into the build is a fallback for
+   when Drive cannot be reached — never a quiet substitute.
+
+   That distinction is the whole point. A plan built from last month's method
+   looks exactly like a plan built from this morning's, so the source and the
+   date are carried alongside the data and shown, rather than left to trust. */
+let MAP = BUNDLED;
+
+export const SOURCE = {
+  from: "bundled",          // drive | cache | bundled
+  fileName: "",
+  path: "",
+  editLink: "",
+  modifiedTime: "",
+  fetchedAt: "",
+  error: "",
+};
+
+export const PROCESS = () => MAP;
+export let STEPS = MAP.steps;
+export let CATEGORIES = MAP.categories;
+export let TEMPLATES = MAP.templates;
+
+/* The wave graph comes from the flow diagram, which is a drawing and cannot be
+   parsed at runtime — so it stays compiled in, keyed by step NAME. A workbook
+   edited in Drive has rows inserted, moved and deleted, and a row number would
+   silently point at the wrong step the moment that happened; a name survives
+   it. Anything genuinely new gets no wave and is reported rather than being
+   given a neighbour's dependencies. */
+function applyWaves(map) {
+  const byName = BUNDLED.waveByName || {};
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Category AND name: "System Block Diagram" starts both the hardware and the
+  // firmware track, and a name-only key folds them into one wave.
+  const key = (s) => `${norm(s.category)}|${norm(s.step)}`;
+  const waves = (BUNDLED.waves || []).map((w) => ({ ...w, steps: [] }));
+  const index = new Map(waves.map((w) => [w.id, w]));
+  const unplaced = [];
+  for (const s of map.steps) {
+    const id = byName[key(s)] || "";
+    s.wave = id;
+    if (index.has(id)) index.get(id).steps.push(s.no);
+    else unplaced.push(s);
+  }
+  /* A step the diagram never drew — a new one, or a renamed one — joins the
+     wave of its nearest neighbour by number, which is what "inline" means for
+     the test and audit steps that were always in this position. */
+  const placed = map.steps.filter((s) => index.has(s.wave));
+  for (const s of unplaced) {
+    if (!placed.length) break;
+    const near = placed.reduce((best, x) => Math.abs(x.no - s.no) < Math.abs(best.no - s.no) ? x : best, placed[0]);
+    s.wave = near.wave;
+    index.get(near.wave).steps.push(s.no);
+  }
+  map.waves = waves.filter((w) => w.steps.length);
+  map.newSteps = unplaced.map((s) => s.step);
+  return map;
+}
+
+/* Categories, derived rather than stored — the workbook is the only place the
+   list lives, and a category added in Drive has to appear here without a code
+   change. Which ones run concurrently comes from the Flow Map tab. */
+function deriveCategories(map) {
+  const cats = [];
+  for (const s of map.steps) {
+    let c = cats.find((x) => x.name === s.category);
+    if (!c) {
+      const phase = Number((s.category.match(/^(\d+)/) || [])[1]) || 99;
+      c = { name: s.category, phase, count: 0, first: s.no, last: s.no };
+      cats.push(c);
+    }
+    c.count++; c.first = Math.min(c.first, s.no); c.last = Math.max(c.last, s.no);
+  }
+  cats.sort((a, b) => a.phase - b.phase || a.first - b.first);
+  for (const c of cats) {
+    const b = (map.blocks || []).find((x) => x.category === c.name);
+    c.parallel = /concurrent/i.test(b?.runs || "");
+    c.gated = /gated/i.test(b?.runs || "");
+    c.runs = b?.runs || "";
+  }
+  map.categories = cats;
+  return map;
+}
+
+function adopt(map) {
+  MAP = applyWaves(deriveCategories(map));
+  STEPS = MAP.steps;
+  CATEGORIES = MAP.categories;
+  TEMPLATES = MAP.templates;
+  WAVES = MAP.waves || [];
+  return MAP;
+}
+
+/* ── loading it from Drive ───────────────────────────────────────────────────
+   Once per session, or on demand when somebody has just edited the workbook.
+   The cache is what makes an offline Drive survivable without pretending: the
+   data is used, and SOURCE says it is a cached copy and how old it is.       */
+const CACHE_KEY = "eb-process-map-v1";
+
+function fromCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    return c?.map?.steps?.length ? c : null;
+  } catch { return null; }
+}
+
+export async function loadProcessMap(readDrive, { force = false } = {}) {
+  if (!force && SOURCE.from === "drive") return MAP;
+
+  // A cached copy first, so the app is usable in the second before Drive
+  // answers — then replaced the moment the live one arrives.
+  const cached = fromCache();
+  if (cached && SOURCE.from === "bundled") {
+    adopt(cached.map);
+    Object.assign(SOURCE, cached.source, { from: "cache" });
+  }
+
+  if (typeof readDrive !== "function") return MAP;
+  try {
+    const r = await readDrive({ action: "process_map" });
+    if (r?.error) throw new Error(r.error);
+    if (!r?.steps?.length) throw new Error("Drive returned a workbook with no steps in it.");
+
+    adopt({ steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [] });
+    Object.assign(SOURCE, {
+      from: "drive", error: "",
+      fileName: r.file?.name || "", path: r.file?.path || "",
+      editLink: r.file?.editLink || "", modifiedTime: r.file?.modifiedTime || "",
+      fetchedAt: new Date().toISOString(),
+      alternates: r.alternates || [],
+    });
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        map: { steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [] },
+        source: { ...SOURCE },
+      }));
+    } catch { /* a full quota is not a reason to fail the load */ }
+  } catch (e) {
+    // Say which copy is being used and why the live one is not — never fall
+    // back silently, because a stale plan is indistinguishable from a current
+    // one until somebody works to the wrong method.
+    SOURCE.error = String(e?.message || e);
+    if (SOURCE.from !== "cache") SOURCE.from = "bundled";
+  }
+  return MAP;
+}
+
+/* One line for the UI: which method this plan is built from. */
+export function sourceLine() {
+  if (SOURCE.from === "drive") {
+    const when = SOURCE.modifiedTime ? ` · edited ${SOURCE.modifiedTime.slice(0, 10)}` : "";
+    return `From ${SOURCE.fileName || "the workbook"} in Drive${when}`;
+  }
+  if (SOURCE.from === "cache") {
+    const when = SOURCE.fetchedAt ? ` from ${SOURCE.fetchedAt.slice(0, 10)}` : "";
+    return `Drive unreachable — using the copy last read${when}${SOURCE.error ? ` (${SOURCE.error})` : ""}`;
+  }
+  return `Not synced from Drive yet${SOURCE.error ? ` — ${SOURCE.error}` : ""}`;
+}
 
 export const stepByNo = (no) => STEPS.find((s) => s.no === Number(no)) || null;
 export const stepsIn = (category) => STEPS.filter((s) => s.category === category);
@@ -140,7 +299,7 @@ export function phasesOf(categories = CATEGORIES) {
   return [...byPhase.values()].sort((a, b) => a.phase - b.phase);
 }
 
-export const WAVES = MAP.waves || [];
+export let WAVES = MAP.waves || [];
 export const waveById = (id) => WAVES.find((w) => w.id === id) || null;
 export const waveOf = (stepNo) => WAVES.find((w) => w.steps.includes(Number(stepNo))) || null;
 

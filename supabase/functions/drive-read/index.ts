@@ -496,6 +496,60 @@ async function convertAndExtract(token: string, f: GFile, limit: number): Promis
   }
 }
 
+/* ── THE PROCESS MAP, READ LIVE FROM DRIVE ───────────────────────────────────
+   The master process flow is a living document: it is edited in Drive, and the
+   app has to follow it rather than carry a copy that quietly goes stale. A
+   plan built from last month's method is worse than no plan, because nobody
+   can tell by looking.
+
+   Reading it needs the Sheets API rather than Drive's CSV export, because
+   export only ever returns the FIRST tab and the map is spread across three —
+   the steps, the template library, and the split/merge structure. The `drive`
+   scope already covers the Sheets API, so no new permission is involved.
+
+   An .xlsx is not a Sheet, so it is copied into one, read, and the copy
+   deleted — the same trick the text extractor uses, and the reason writes need
+   Editor rather than Viewer.                                                 */
+const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
+
+async function readSheets(token: string, id: string, ranges: string[]): Promise<Record<string, string[][]>> {
+  const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join("&");
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchGet?${qs}&majorDimension=ROWS`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) throw new Error(`Sheets API answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  const out: Record<string, string[][]> = {};
+  for (const vr of data.valueRanges ?? []) {
+    // "'Process Flow'!A1:P400" → "Process Flow"
+    const name = String(vr.range || "").replace(/^'?(.*?)'?!.*$/, "$1");
+    out[name] = (vr.values ?? []) as string[][];
+  }
+  return out;
+}
+
+/* Read the three tabs, converting first when the file is an .xlsx. */
+async function readProcessWorkbook(token: string, f: GFile, ranges: string[]) {
+  if (f.mimeType === SHEET_MIME) return await readSheets(token, f.id, ranges);
+
+  let copyId = "";
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}/copy?supportsAllDrives=true&fields=id`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: `~ebtmp-process-${Date.now()}`, mimeType: SHEET_MIME }),
+    });
+    if (!res.ok) throw new Error(`Drive would not convert the workbook (${res.status}). The service account needs Editor on that folder.`);
+    copyId = (await res.json()).id;
+    return await readSheets(token, copyId, ranges);
+  } finally {
+    if (copyId) {
+      try { await fetch(`https://www.googleapis.com/drive/v3/files/${copyId}?supportsAllDrives=true`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } }); } catch { /* never leave a copy behind */ }
+    }
+  }
+}
+
 async function extractText(token: string, f: GFile, limit = 1800): Promise<string> {
   try {
     if (f.mimeType === "application/vnd.google-apps.document") return await exportAs(token, f.id, "text/plain", limit);
@@ -709,6 +763,96 @@ Deno.serve(async (req) => {
        Browsing is not searching. "What is in Eb-02-ODM" is a fair question and
        used to be answered with "I don't have visibility there", because the
        only tool was a search confined to the Engineering Services branches. */
+    /* ── the process map, straight from the Drive file ──────────────────────
+       The workbook is the company's method and it is maintained in Drive, so
+       this reads it there rather than shipping a copy. It returns the parsed
+       map plus WHERE it came from and when that file was last touched, so the
+       app can say "synced from Drive, edited 3 days ago" instead of asking
+       anyone to take a number on trust. */
+    if (body.action === "process_map") {
+      const want = String(body.name || "Master Process Flow");
+      const found = await searchUnder(token, ROOT_CHAIN[0], want, 20);
+      /* Prefer the copy that actually sits in a Process folder — old versions
+         of this workbook exist, and one under Archive must never win. Then
+         prefer the most recently edited, because the live method is the one
+         somebody touched last. */
+      const ranked = (await inParallel(found, 6, async (f: GFile) => {
+        const path = (f as GFile & { _path?: string })._path || await folderPath(token, f).catch(() => "");
+        const inProcess = /\/process[^/]*\//i.test(path);
+        const archived = /\/(99-)?archive|\/old\b|\/backup/i.test(path);
+        return { f, path, score: (inProcess ? 2 : 0) - (archived ? 3 : 0), at: f.modifiedTime || "" };
+      }))
+        .filter((x) => /\.xlsx?$/i.test(x.f.name) || x.f.mimeType === SHEET_MIME)
+        .sort((a, b) => b.score - a.score || String(b.at).localeCompare(String(a.at)));
+
+      if (!ranked.length) {
+        return json({ error: `I couldn't find a workbook called "${want}" anywhere the service account can see. Share the Process folder with ${SA_EMAIL} and try again.` }, 404);
+      }
+      const pick = ranked[0];
+
+      let tabs: Record<string, string[][]>;
+      try {
+        tabs = await readProcessWorkbook(token, pick.f, [
+          "'Process Flow'!A1:P400", "'Template Actions'!A1:G300", "'Flow Map'!A1:F40",
+        ]);
+      } catch (e) {
+        return json({ error: `Found ${pick.f.name} but could not read it: ${e}` }, 502);
+      }
+
+      const cell = (r: string[] | undefined, i: number) => String(r?.[i] ?? "").replace(/\s+/g, " ").trim();
+      const flowRows = tabs["Process Flow"] ?? [];
+      const steps = [];
+      for (let i = 5; i < flowRows.length; i++) {
+        const r = flowRows[i];
+        const no = Number(cell(r, 0));
+        if (!Number.isFinite(no) || !cell(r, 2)) continue;
+        steps.push({
+          no, category: cell(r, 1), step: cell(r, 2),
+          entryTrigger: cell(r, 3), exitTrigger: cell(r, 4),
+          entryQuestion: cell(r, 5), exitQuestion: cell(r, 6),
+          templateFile: cell(r, 7), templateId: cell(r, 8), template: cell(r, 9),
+          action: cell(r, 11), whatToDo: cell(r, 12),
+          owner: cell(r, 13), responsibility: cell(r, 14), guidelines: cell(r, 15),
+        });
+      }
+      if (!steps.length) {
+        return json({ error: `${pick.f.name} opened but its "Process Flow" tab has no step rows — has the layout changed?` }, 502);
+      }
+
+      const templates: Record<string, unknown> = {};
+      for (const r of (tabs["Template Actions"] ?? []).slice(4)) {
+        const id = cell(r, 0);
+        if (!/^EB-T-/.test(id)) continue;
+        templates[id] = {
+          id, name: cell(r, 1), folder: cell(r, 3),
+          steps: cell(r, 4).split(",").map((x) => Number(x.trim())).filter(Number.isFinite),
+          actions: cell(r, 6).split("·").map((x) => x.trim()).filter(Boolean),
+        };
+      }
+
+      const blocks = [];
+      for (const r of (tabs["Flow Map"] ?? []).slice(3)) {
+        if (!cell(r, 0) || cell(r, 0) === "TOTAL") continue;
+        blocks.push({ block: cell(r, 0), category: cell(r, 1), steps: Number(cell(r, 3)) || 0,
+                      runs: cell(r, 4), convergesWith: cell(r, 5) });
+      }
+
+      return json({
+        ok: true,
+        steps, templates, blocks,
+        // Provenance, so nobody has to guess whether the plan reflects the
+        // current method — and a link that opens the file to edit it.
+        file: {
+          id: pick.f.id, name: pick.f.name, modifiedTime: pick.f.modifiedTime || "",
+          path: pick.path,
+          editLink: pick.f.webViewLink || `https://drive.google.com/open?id=${pick.f.id}`,
+        },
+        // Say what else is out there. When two copies of the method exist,
+        // knowing which one was NOT used matters.
+        alternates: ranked.slice(1, 4).map((x) => ({ name: x.f.name, path: x.path, modifiedTime: x.f.modifiedTime || "" })),
+      });
+    }
+
     if (body.action === "list") {
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
       const { node, walked, missing, last } = await walkPath(rawPath, false);

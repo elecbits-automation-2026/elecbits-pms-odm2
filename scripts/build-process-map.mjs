@@ -138,6 +138,7 @@ for (const c of categories) {
    prefix — the wave file supplies ORDER, the workbook supplies identity.     */
 const flowText = process.argv[3];
 let waves = [];
+let map_waveByName = {};
 if (flowText) {
   const raw = (await import("node:fs")).readFileSync(flowText, "utf8");
   const TRACKS = [
@@ -283,6 +284,19 @@ if (flowText) {
   }
   for (const s of steps) s.wave = waveOfStep.get(s.no) || "";
 
+  /* Waves are keyed by step NAME as well as number. The workbook is edited in
+     Drive — rows get inserted, reordered and removed — and a row number means
+     nothing the moment somebody does that. A name survives an edit; a number
+     silently points at the wrong step. */
+  /* Keyed by CATEGORY and name, not name alone: "System Block Diagram" is the
+     first step of both the hardware and the firmware track, and a name-only
+     key silently merges the two into one wave — which then reshapes the
+     schedule for every step after it. */
+  map_waveByName = {};
+  for (const s of steps) {
+    if (s.wave) map_waveByName[`${norm(s.category)}|${norm(s.step)}`] = s.wave;
+  }
+
   console.log(`waves: ${waves.length} · ${matched} steps placed · ${confirmed} names confirmed · ${missed.length} to check`);
   if (missed.length) for (const m of missed.slice(0, 8)) console.log(`    ? ${m}`);
   const orphan = steps.filter((s) => !s.wave).length;
@@ -291,6 +305,7 @@ if (flowText) {
 
 const map = {
   waves,
+  waveByName: map_waveByName,
   source: path.basename(src),
   builtBy: "scripts/build-process-map.mjs",
   stepCount: steps.length,
