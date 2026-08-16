@@ -201,6 +201,114 @@ const SEED_MEMORY = [
 const KPI_DEFS = "PM KPIs (daily): (1) Customer queries answered — every client question closed same day, minimum 3 logged; (2) Decisions taken that move the project to completion — minimum 5/day; (3) Team on-time — every R&D member on the PM's projects finishes tasks on time (≥70%); (4) AI-checked closures — task completions verified through the AI gate; (5) Escalations to Shreya (Dept Head) — the fewer decisions that reach her, the better; target 0–1/day.";
 const KPI_T = { queries: 3, decisions: 5, onTime: 70, escalations: 1 };
 
+/* ─── DEVELOPER KPIs ──────────────────────────────────────────────────────
+   A PM is measured on decisions and client contact. A developer is not, and
+   scoring one against the other is how a number stops being believed.
+
+   Four disciplines, one engine. Every figure below is DERIVED from tasks that
+   were actually closed through the AI gate — nothing here can be typed in by
+   the person being measured, which is the only reason any of it is worth
+   looking at.
+
+   The one thing that differs by discipline is what counts as EVIDENCE. A
+   hardware task closed without a gerber, a DRC report or a BoM is not a closed
+   hardware task; a test closed without a report is not a test. Each discipline
+   therefore carries the artefacts its own work produces, and the "evidenced"
+   figure is the share of closures that actually named one. */
+const DEV_KPI = [
+  {
+    key: "hw", label: "Hardware", icon: Zap,
+    roles: ["sr_hw", "jr_hw"], depts: ["Hardware"],
+    artefact: /gerber|drc|\bercs?\b|schematic|\bbom\b|stack ?up|impedance|footprint|layout|altium|kicad|\.(sch|brd|pcb|step|zip|pdf)\b/i,
+    artefactLabel: "gerber · DRC · schematic · BoM",
+    targets: { closes: 2, onTime: 70, gate: 7, evidence: 80 },
+    defs: "Hardware KPIs (daily): (1) Boards moved — tasks closed on the hardware side, minimum 2/day; (2) On time — closed inside the window agreed in the scrum, ≥70%; (3) Closure quality — the AI closure gate's score, ≥7/10; (4) Evidenced — every closure names the artefact it produced (gerber, DRC report, schematic, BoM) and where in Drive it sits, ≥80%; (5) Escalations — a needed one beats a silently stuck board, but the target is 0–1/day.",
+  },
+  {
+    key: "fw", label: "Firmware", icon: Bot,
+    roles: ["sr_fw", "jr_fw"], depts: ["Firmware"],
+    artefact: /firmware|\bfw\b|build|binary|\.(bin|hex|elf|c|h|py|ino)\b|ota|bootloader|driver|commit|branch|repo|unit test|log/i,
+    artefactLabel: "build · binary · commit · test log",
+    targets: { closes: 2, onTime: 70, gate: 7, evidence: 80 },
+    defs: "Firmware KPIs (daily): (1) Firmware moved — tasks closed on the firmware side, minimum 2/day; (2) On time — closed inside the agreed window, ≥70%; (3) Closure quality — the AI closure gate's score, ≥7/10; (4) Evidenced — every closure names the build, binary, commit or test log it produced and where it sits, ≥80%; (5) Escalations — target 0–1/day.",
+  },
+  {
+    key: "test", label: "Testing", icon: CheckCircle2,
+    roles: ["tester", "soldering"], depts: ["Testing", "Soldering & Testing"],
+    artefact: /test report|test ?plan|report|result|pass|fail|defect|bug|compliance|\bemi\b|\bemc\b|soak|bring.?up|\.(xlsx|csv|pdf|docx)\b/i,
+    artefactLabel: "test report · results · defect log",
+    targets: { closes: 3, onTime: 75, gate: 7, evidence: 90 },
+    defs: "Testing KPIs (daily): (1) Tests closed — minimum 3/day; (2) On time — ≥75%; (3) Closure quality — the AI closure gate's score, ≥7/10; (4) Evidenced — a test with no report filed is not a test; ≥90% of closures must name the report and where it sits; (5) Escalations — target 0–1/day. A failed test reported properly is a good day's work, not a bad one.",
+  },
+  {
+    key: "enc", label: "Enclosure", icon: Upload,
+    roles: ["ind_design"], depts: ["Industrial Design"],
+    artefact: /enclosure|\bcad\b|\.(step|stp|stl|iges|igs|f3d|sldprt|dxf|pdf)\b|3d ?print|tolerance|draft|fit|mould|mold|dfm|fusion|solidworks/i,
+    artefactLabel: "STEP · STL · CAD · DFM note",
+    targets: { closes: 2, onTime: 70, gate: 7, evidence: 80 },
+    defs: "Enclosure KPIs (daily): (1) Parts moved — enclosure tasks closed, minimum 2/day; (2) On time — ≥70%; (3) Closure quality — the AI closure gate's score, ≥7/10; (4) Evidenced — every closure names the CAD it produced (STEP, STL, drawing, DFM note) and where it sits, ≥80%; (5) Escalations — target 0–1/day.",
+  },
+];
+
+/* Which discipline a person belongs to. The resource role is the reliable
+   answer; the department is the fallback for anyone added before roles were
+   set. Somebody in neither is not a developer and gets no developer KPI —
+   silence is better than measuring a PM against a gerber count. */
+export const disciplineOf = (u) => {
+  if (!u) return null;
+  return DEV_KPI.find((d) => d.roles.includes(u.resourceRole))
+    || DEV_KPI.find((d) => u.dept && d.depts.includes(u.dept))
+    || null;
+};
+
+/* A developer's day, entirely from what the task system already knows.
+
+   `evidence` deserves a word: it counts a closure as evidenced only when the
+   work log names BOTH a file and where that file lives, and the name looks
+   like something this discipline actually produces. "Done" in a text box is
+   not evidence, and a firmware engineer attaching an enclosure drawing is not
+   evidence of firmware. */
+export function devMetrics(userId, date, disc, tasks) {
+  const mine = tasks.filter((t) => String(t.assigneeId) === String(userId));
+  const dayTasks = mine.filter((t) => t.date === date);
+  const closed = mine.filter((t) => t.status === "done" && (t.completedAt || "").slice(0, 10) === date);
+
+  const onTime = closed.filter((t) => !t.endTime
+    || (t.completedAt && new Date(t.completedAt) <= hmToDate(t.date, t.endTime)));
+  const onTimePct = closed.length ? Math.round((onTime.length / closed.length) * 100) : null;
+
+  const gated = closed.filter((t) => typeof t.aiVerification?.score === "number");
+  const gate = gated.length
+    ? Math.round((gated.reduce((s, t) => s + t.aiVerification.score, 0) / gated.length) * 10) / 10
+    : null;
+
+  const evidenced = closed.filter((t) => {
+    const w = t.work || {};
+    if (!w.fileName || !w.fileLocation) return false;
+    return disc.artefact.test(`${w.fileName} ${w.fileLocation} ${t.title}`);
+  });
+  const evidencePct = closed.length ? Math.round((evidenced.length / closed.length) * 100) : null;
+
+  const escalations = mine.filter((t) => (t.escalated?.at || "").slice(0, 10) === date).length;
+  const open = dayTasks.filter((t) => t.status !== "done").length;
+
+  const T = disc.targets;
+  const alerts = [];
+  if (closed.length < T.closes) alerts.push(`${closed.length}/${T.closes} closed`);
+  if (onTimePct !== null && onTimePct < T.onTime) alerts.push(`On time ${onTimePct}% < ${T.onTime}%`);
+  if (gate !== null && gate < T.gate) alerts.push(`Closure quality ${gate}/10 < ${T.gate}`);
+  if (evidencePct !== null && evidencePct < T.evidence) alerts.push(`Evidenced ${evidencePct}% < ${T.evidence}%`);
+  if (escalations > KPI_T.escalations) alerts.push(`${escalations} escalations`);
+
+  return { closes: closed.length, onTimePct, gate, evidencePct, escalations, open,
+           dayTaskCount: dayTasks.length, alerts };
+}
+
+/* The KPI text this person is actually judged against — used for the daily
+   work-update score. Scoring a firmware engineer's note against "customer
+   queries answered" was worse than not scoring it. */
+export const kpiDefsFor = (u) => disciplineOf(u)?.defs || KPI_DEFS;
+
 /* ─── AI LAYER ──────────────────────────────────────────────────────────────
    Integration seam. By default this posts to the Anthropic Messages API — in
    the artifact sandbox the host injects auth; in a real browser that call is
@@ -890,9 +998,12 @@ ${memCtx(memory)}
 TASK: "${t.title}" on ${t.projectId || "(unlinked)"} | steps: ${(t.steps || []).join("; ") || "—"}
 BLOCKER / SITUATION: "${blocker || "not fully finished"}"
 Propose 2–3 concrete sub-tasks (imperative titles, realistic timeboxes) that unblock and finish this. Respond ONLY with JSON: {"subtasks":[{"title":"","timeboxMinutes":60}]}`;
-const alignPrompt = (entry, memory) => `Score today's work-update entry against the Elecbits PM KPIs.
+/* `defs` is the KPI set the WRITER is measured against — a firmware engineer's
+   note scored against "customer queries answered" told them nothing and taught
+   them the number was noise. */
+const alignPrompt = (entry, memory, defs = KPI_DEFS) => `Score today's work-update entry against the Elecbits KPIs for this person's role.
 ${memCtx(memory)}
-KPI DEFINITIONS: ${KPI_DEFS}
+KPI DEFINITIONS: ${defs}
 ENTRY (free-form daily work-update note):
 """${String(entry.note || "").slice(0, 3000)}"""
 Respond ONLY with JSON: {"score":0-100,"feedback":"max 2 sentences, direct","kpiHits":["which KPIs this reflection actually serves"]}`;
@@ -5098,6 +5209,22 @@ function PerfModule() {
   const pms = users.filter((u) => u.role === "pm");
   const shownPMs = isAdmin ? pms : my?.role === "pm" ? [my] : [];
 
+  /* Which developers this viewer may look at. An admin or dept head sees
+     everyone; a PM sees the people on their own projects, because that is
+     whose delivery they answer for; everybody else sees themselves and no
+     one else. A KPI is not a leaderboard. */
+  const shownDevs = useMemo(() => {
+    const devs = users.filter((u) => disciplineOf(u));
+    if (isAdmin) return devs;
+    if (my?.role === "pm") {
+      const mine = new Set(projects
+        .filter((p) => (p.team || []).some((x) => String(x.userId) === String(me) && x.slot.startsWith("PM")))
+        .flatMap((p) => (p.team || []).map((x) => String(x.userId))));
+      return devs.filter((u) => mine.has(String(u.id)));
+    }
+    return devs.filter((u) => String(u.id) === String(me));
+  }, [users, projects, isAdmin, my, me]);
+
   const metricsFor = (pmId, dt) => {
     const pmProjects = projects.filter((p) => (p.team || []).some((x) => x.userId === pmId && x.slot.startsWith("PM"))).map((p) => p.projectId);
     const inScope = (t) => pmProjects.includes(t.projectId) || t.createdBy === pmId;
@@ -5133,7 +5260,7 @@ function PerfModule() {
         </div>
       </div>
 
-      {ptab === "kpi" && <KpiTab shownPMs={shownPMs} date={date} setDate={setDate} metricsFor={metricsFor} me={me} isAdmin={isAdmin} tasks={tasks} />}
+      {ptab === "kpi" && <KpiTab shownPMs={shownPMs} shownDevs={shownDevs} date={date} setDate={setDate} metricsFor={metricsFor} me={me} isAdmin={isAdmin} tasks={tasks} />}
       {ptab === "worklog" && <WorklogTab date={date} setDate={setDate} viewUserId={viewUserId} setViewUserId={setViewUserId} isMgr={isMgr} />}
       {ptab === "ideas" && <IdeasTab projects={projects} users={users} me={me} isMgr={isMgr} viewUserId={viewUserId} setViewUserId={setViewUserId} />}
       {ptab === "training" && (
@@ -5147,10 +5274,11 @@ function PerfModule() {
   );
 }
 
-function KpiTab({ shownPMs, date, setDate, metricsFor, me, isAdmin, tasks }) {
+function KpiTab({ shownPMs, shownDevs, date, setDate, metricsFor, me, isAdmin, tasks }) {
   const { users } = useCtx();
   const last7 = wuDays(7);
   return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
     <div className="card" style={{ padding: 16 }}>
       <SectionTitle icon={Gauge}>PM KPIs — daily, on the calendar</SectionTitle>
       <div style={{ fontSize: 12, color: "var(--txt2)", marginBottom: 13, lineHeight: 1.6 }}>{KPI_DEFS}</div>
@@ -5195,6 +5323,102 @@ function KpiTab({ shownPMs, date, setDate, metricsFor, me, isAdmin, tasks }) {
         })}
       </div>
     </div>
+
+    <DevKpiBlock devs={shownDevs} date={date} setDate={setDate} tasks={tasks} last7={last7} />
+    </div>
+  );
+}
+
+/* Developers, grouped by discipline. Hardware, firmware, testing and enclosure
+   produce different artefacts and are held to different numbers, but the shape
+   is the same everywhere: what got closed, whether it was on time, what the
+   closure gate thought of it, and whether there is a file in Drive to show for
+   it. Nothing on this screen can be self-reported. */
+function DevKpiBlock({ devs, date, setDate, tasks, last7 }) {
+  if (!devs?.length) return null;
+  const groups = DEV_KPI
+    .map((disc) => [disc, devs.filter((u) => disciplineOf(u)?.key === disc.key)])
+    .filter(([, list]) => list.length);
+  if (!groups.length) return null;
+
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <SectionTitle icon={Gauge}>Developer KPIs — daily, on the calendar</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--txt2)", marginBottom: 13, lineHeight: 1.6 }}>
+        Every figure here comes from tasks closed through the AI gate — none of it can be typed in.
+        “Evidenced” is the share of closures that named the artefact they produced and where in Drive it sits;
+        a board closed without a gerber, or a test closed without a report, does not count as either.
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        {groups.map(([disc, list]) => (
+          <div key={disc.key}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+              <disc.icon size={14} style={{ color: "var(--acc)" }} />
+              <span style={{ fontWeight: 700, fontSize: 13 }}>{disc.label}</span>
+              <Pill color="var(--txt2)">{list.length}</Pill>
+              <span style={{ fontSize: 11.5, color: "var(--txt3)" }}>
+                evidence: {disc.artefactLabel} · ≥{disc.targets.closes}/day · on time ≥{disc.targets.onTime}% · gate ≥{disc.targets.gate}/10
+              </span>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+              {list.map((u) => {
+                const m = devMetrics(u.id, date, disc, tasks);
+                const T = disc.targets;
+                const tiles = [
+                  ["Closed today", m.closes, `min ${T.closes}`, m.closes >= T.closes],
+                  ["On time", m.onTimePct === null ? "—" : m.onTimePct + "%", `target ≥ ${T.onTime}%`, m.onTimePct === null || m.onTimePct >= T.onTime],
+                  ["Closure quality", m.gate === null ? "—" : `${m.gate}/10`, `the AI gate · ≥ ${T.gate}`, m.gate === null || m.gate >= T.gate],
+                  ["Evidenced", m.evidencePct === null ? "—" : m.evidencePct + "%", `${disc.artefactLabel} · ≥ ${T.evidence}%`, m.evidencePct === null || m.evidencePct >= T.evidence],
+                  ["Still open", m.open, "assigned today, not closed", m.open === 0],
+                  ["Escalations", m.escalations, `max ${KPI_T.escalations} (fewer = better)`, m.escalations <= KPI_T.escalations],
+                ];
+                return (
+                  <div key={u.id} style={{ border: "1px solid var(--bdr)", borderRadius: 12, overflow: "hidden" }}>
+                    {m.alerts.length > 0 && (
+                      <div style={{ background: "color-mix(in srgb, var(--red) 12%, transparent)", borderBottom: "1px solid var(--red)", padding: "9px 14px", display: "flex", gap: 9, alignItems: "center", color: "var(--red)", fontWeight: 700, fontSize: 12.5, flexWrap: "wrap" }}>
+                        <AlertTriangle size={15} /> RED ALERT — {m.alerts.join(" · ")}
+                      </div>
+                    )}
+                    <div style={{ padding: 14 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+                        <AvatarDot user={u} size={30} />
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 13.5 }}>{u.name}</div>
+                          <div style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.title} · {fmtDate(date)}</div>
+                        </div>
+                        {/* A day with nothing assigned is grey, not red — an
+                            engineer on leave has not failed a KPI. */}
+                        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+                          {last7.map((d) => {
+                            const md = devMetrics(u.id, d.date, disc, tasks);
+                            const active = md.dayTaskCount > 0 || md.closes > 0;
+                            return <button key={d.date} title={`${d.label} ${d.dnum} — click to open`} onClick={() => setDate(d.date)}
+                              style={{ width: 15, height: 15, borderRadius: 4, border: "none", cursor: "pointer",
+                                       background: !active ? "var(--s3)" : md.alerts.length ? "var(--red)" : "var(--green)",
+                                       opacity: d.date === date ? 1 : 0.7, outline: d.date === date ? "2px solid var(--acc)" : "none" }} />;
+                          })}
+                        </div>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 9 }}>
+                        {tiles.map(([label, val, sub, ok]) => (
+                          <div key={label} style={{ background: "var(--s2)", border: `1px solid ${ok ? "var(--bdr)" : "var(--red)"}`, borderRadius: 10, padding: "10px 12px" }}>
+                            <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)" }}>{label}</div>
+                            <div style={{ fontSize: 21, fontWeight: 800, fontFamily: MONO, color: ok ? "var(--txt)" : "var(--red)", margin: "3px 0 1px" }}>{val}</div>
+                            <div style={{ fontSize: 10.5, color: "var(--txt3)" }}>{sub}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -5221,7 +5445,7 @@ function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
     if (!note.trim()) return;
     setWuBusy(true);
     let scored = { score: null, feedback: "AI unreachable — stored without a score; resubmit later to score it.", kpiHits: [] };
-    try { scored = await claude(alignPrompt({ note }, memory)); } catch (e) { }
+    try { scored = await claude(alignPrompt({ note }, memory, kpiDefsFor(users.find((u) => u.id === me)))); } catch (e) { }
     setWorkUpdates((x) => {
       const ex = x.find((w) => w.userId === me && w.date === date);
       const e = { id: ex ? ex.id : uid(), userId: me, date, note, ...scored, at: new Date().toISOString() };
