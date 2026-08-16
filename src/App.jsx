@@ -7474,6 +7474,7 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(!supabaseEnabled);
   const [recovery, setRecovery] = useState(false);
   const [profiles, setProfiles] = useState(null);
+  const [rosterError, setRosterError] = useState("");
   const [demoUser, setDemoUser] = useState(() => { try { return localStorage.getItem("pms-demo-user") || ""; } catch { return ""; } });
   const demoLogin = useCallback((id) => { setDemoUser(id); setMe(id); try { localStorage.setItem("pms-demo-user", id); } catch { } }, []);
   const demoLogout = useCallback(() => { setDemoUser(""); try { localStorage.removeItem("pms-demo-user"); } catch { } }, []);
@@ -7640,7 +7641,22 @@ export default function App() {
   useEffect(() => {
     if (!supabaseEnabled) return;
     if (!session) { setProfiles(null); return; }
+    /* A request that never answers used to leave this on "Loading your
+       workspace…" for ever, with nothing on screen to say why and no way out
+       but a reload that did the same thing. Supabase's client has no timeout
+       of its own, so one goes here: after 20 seconds the app stops waiting and
+       SAYS what happened. */
+    let settled = false;
+    setRosterError("");
+    const giveUp = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setRosterError("The roster took too long to load. The database did not answer.");
+    }, 20000);
+
     fetchProfiles().then((ps) => {
+      if (settled) return;
+      settled = true; clearTimeout(giveUp);
       setProfiles(ps);
       // A person's roster id and their login are two different things once a
       // resource can exist before its account does — match on the login.
@@ -7649,7 +7665,12 @@ export default function App() {
         || ps.find((u) => u.id === authId)
         || (session.user?.email ? ps.find((u) => (u.email || "").toLowerCase() === session.user.email.toLowerCase()) : null);
       if (mine) setMe(mine.id);
-    }).catch(() => setProfiles([]));
+    }).catch((e) => {
+      if (settled) return;
+      settled = true; clearTimeout(giveUp);
+      setRosterError(String(e?.message || e));
+    });
+    return () => clearTimeout(giveUp);
   }, [session]);
   /* ticking clock only where countdowns live */
   useEffect(() => { if (view !== "scrum" && view !== "tasks") return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, [view]);
@@ -7745,6 +7766,27 @@ export default function App() {
   if (supabaseEnabled && !authChecked) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Checking your session…</div></Shell>;
   if (supabaseEnabled && (!session || recovery)) {
     return <Login dark={dark} onToggleTheme={() => setDark(!dark)} recovery={recovery && !!session} onNewPassword={() => setRecovery(false)} />;
+  }
+  if (supabaseEnabled && !profiles && rosterError) {
+    return (
+      <Shell dark={dark}>
+        <div style={{ maxWidth: 520, display: "flex", flexDirection: "column", gap: 12, textAlign: "center", alignItems: "center" }}>
+          <AlertTriangle size={26} style={{ color: "var(--amber)" }} />
+          <div style={{ fontWeight: 700, fontSize: 15 }}>The workspace could not be loaded</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.6 }}>{rosterError}</div>
+          <div style={{ fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6 }}>
+            This is the roster read. Check that the Supabase project is awake, that <b>core</b> and <b>pms</b> are still
+            in Settings → API → Exposed schemas, and that this account can read <b>core.people</b>.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+            <Btn onClick={() => window.location.reload()}>Try again</Btn>
+            {/* Signing out has to stay reachable — a stuck workspace should
+                never trap somebody in a session they cannot leave. */}
+            <Btn kind="ghost" onClick={async () => { try { await signOut(); } catch (e) { /* leave anyway */ } window.location.reload(); }}>Sign out</Btn>
+          </div>
+        </div>
+      </Shell>
+    );
   }
   if (supabaseEnabled && !profiles) return <Shell dark={dark}><div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--txt2)" }}><Loader2 className="spin" size={18} /> Loading your workspace…</div></Shell>;
   if (!supabaseEnabled && !demoUser) return <Login dark={dark} demo onDemoLogin={demoLogin} onToggleTheme={() => setDark(!dark)} />;
