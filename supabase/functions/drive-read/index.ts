@@ -853,6 +853,112 @@ Deno.serve(async (req) => {
       });
     }
 
+    /* ── the file a process step writes to ──────────────────────────────────
+       Templates are pre-stored in each project and PCB-ID folder, so nothing
+       here creates anything. The job is to FIND the file the step is about and
+       hand back a link, so somebody can do the work without opening Drive to
+       hunt for it first.
+
+       Finding it is the whole problem. The workbook says the file should be
+       called [ProjectID]_LLD-for-developer_v1.0 in 02-Hardware/00-Design/, but
+       the crawl behind the sitemaps found the same folder under three
+       different names across 122 projects and half the template files still
+       named "blank file.docx". So this matches on the letters, walks folder
+       names by stem, and when it cannot be sure it says what IS there rather
+       than reporting nothing.                                                */
+    if (body.action === "step_file") {
+      const projectId = String(body.projectId || "").trim();
+      const rel = String(body.folder || "").replace(/^\/+|\/+$/g, "");
+      const fileName = String(body.fileName || "").trim();
+      if (!projectId || !fileName) return json({ error: "Tell me the project and which file the step produces." }, 400);
+
+      // The project's own folder, in whichever branch it lives.
+      const branches = await resolveBranches(token);
+      const roots = [branches.pm, branches.pcb, ...(branches.all || []), branches.top].filter(Boolean) as GFile[];
+      let projectFolder: GFile | null = null;
+      for (const r of roots) {
+        projectFolder = await childFolder(token, r.id, projectId);
+        if (projectFolder) break;
+      }
+      if (!projectFolder) {
+        return json({ error: `No folder called ${projectId} under ${ROOT_PATH} — the project folder has to exist before its files can be opened.` }, 404);
+      }
+
+      // Down the template's own sub-path. Missing a level is worth saying
+      // precisely: "07-Test-and-Compliance is not there yet" is actionable,
+      // "file not found" is not.
+      let node: GFile = projectFolder;
+      // The full Drive path, not one relative to the project — somebody has to
+      // be able to follow it in Drive, and "/03-LLD-HLD/" alone leads nowhere.
+      const base = (await folderPath(token, projectFolder).catch(() => `/${projectFolder.name}/`))
+        .replace(/^\/|\/$/g, "");
+      const walked: string[] = base.split("/").filter(Boolean);
+      for (const part of rel.split("/").filter(Boolean)) {
+        const next = await childFolder(token, node.id, part);
+        if (!next) {
+          return json({
+            ok: true, found: false, projectFolder: projectFolder.name,
+            missingFolder: part, path: "/" + walked.join("/") + "/",
+            reason: `${projectId} has no "${part}" folder under /${walked.join("/")}/ yet.`,
+          });
+        }
+        node = next;
+        walked.push(node.name);
+      }
+
+      /* The name in the workbook is [ProjectID]_Template-Name_v1.0, and half
+         the files in these folders are saved as something else — "Milestone
+         Tracking Sheet FINAL", "blank file.docx". Matching only on the full
+         expected name finds none of those, so fall back to the DISTINCTIVE
+         middle of the name, and then to the template's own library name. Both
+         are still specific enough not to collide inside one folder. */
+      const core = fileName
+        .replace(new RegExp(`^${projectId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[_-]*`, "i"), "")
+        .replace(/_v\d+(\.\d+)*$/i, "")
+        .replace(/\.[a-z0-9]{2,5}$/i, "");
+      let { hit, candidates } = await findFileIn(token, node.id, fileName);
+      if (!hit && core.length > 4) ({ hit, candidates } = await findFileIn(token, node.id, core));
+      if (!hit && body.template) ({ hit, candidates } = await findFileIn(token, node.id, String(body.template)));
+      if (!hit) {
+        return json({
+          ok: true, found: false, projectFolder: projectFolder.name,
+          folderId: node.id, path: "/" + walked.join("/") + "/",
+          reason: `Nothing in /${walked.join("/")}/ matches "${fileName}".`,
+          // What IS in there. Half these folders hold a file under a name
+          // nobody expected, and showing them turns a dead end into a choice.
+          candidates: candidates.map((f) => ({
+            id: f.id, name: f.name, modifiedTime: f.modifiedTime || "",
+            openLink: f.webViewLink || `https://drive.google.com/open?id=${f.id}`,
+          })),
+        });
+      }
+
+      /* Open vs download are different links. A Google-native file opens in
+         its editor and downloads through an export; an .xlsx or .docx sitting
+         in Drive downloads directly. Getting this wrong hands someone a link
+         that 404s at the moment they need the file. */
+      const native = (hit.mimeType || "").startsWith("application/vnd.google-apps.");
+      const kind = /spreadsheet/.test(hit.mimeType || "") ? "spreadsheets"
+        : /presentation/.test(hit.mimeType || "") ? "presentation" : "document";
+      const asFormat = kind === "spreadsheets" ? "xlsx" : kind === "presentation" ? "pptx" : "docx";
+      return json({
+        ok: true, found: true,
+        projectFolder: projectFolder.name,
+        file: {
+          id: hit.id, name: hit.name, mimeType: hit.mimeType,
+          modifiedTime: hit.modifiedTime || "", size: hit.size || "",
+          path: "/" + walked.join("/") + "/" + hit.name,
+          openLink: hit.webViewLink || `https://drive.google.com/open?id=${hit.id}`,
+          downloadLink: native
+            ? `https://docs.google.com/${kind}/d/${hit.id}/export?format=${asFormat}`
+            : `https://drive.google.com/uc?export=download&id=${hit.id}`,
+        },
+        // The name differs from what the workbook expects — worth flagging,
+        // because that drift is why folder conformance reads low.
+        renamed: norm(hit.name) !== norm(fileName) ? fileName : "",
+      });
+    }
+
     if (body.action === "list") {
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
       const { node, walked, missing, last } = await walkPath(rawPath, false);
