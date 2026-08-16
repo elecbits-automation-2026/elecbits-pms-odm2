@@ -6262,9 +6262,9 @@ function WaveBox({ w, open, done }) {
   const sync = names.some((st) => st.converge && !st.converge.merge);
   const merge = names.some((st) => st.converge?.merge);
   return (
-    <div style={{ border: `1.5px solid ${sync ? "var(--amber)" : merge ? "var(--acc)" : "var(--bd)"}`,
-                  borderRadius: 8, padding: "6px 8px", background: "var(--s1)",
-                  boxShadow: agg !== "pending" ? `inset 3px 0 0 ${planColor(agg)}` : "none" }}>
+    <div style={{ border: `1.5px solid ${sync ? "var(--amber)" : merge ? "var(--acc)" : "var(--bdr)"}`,
+                  borderRadius: 10, padding: "8px 10px", background: "var(--s2)",
+                  boxShadow: agg !== "pending" ? `inset 3px 0 0 ${planColor(agg)}` : "0 1px 2px rgba(0,0,0,.04)" }}>
       <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
         <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 800, color: "var(--acc)" }}>{w.id}</span>
         {w.steps.length > 1 && <span style={{ fontSize: 9, color: "var(--txt3)" }}>{w.steps.length} in parallel</span>}
@@ -6317,7 +6317,7 @@ function WaveFlow({ projTasks }) {
         wave order inside a track is fixed. <span style={{ color: "var(--amber)", fontWeight: 700 }}>Amber outline</span> = cross-track
         sync point. The merge waits on all three tracks — pulling in firmware alone does not move it.
       </div>
-      <WaveColumn track="P" title="Pre-design feasibility" open={open} done={done} />
+      <div style={{ maxWidth: 400 }}><WaveColumn track="P" title="Pre-design feasibility" open={open} done={done} /></div>
       {arrow("SPLIT — hardware, firmware and enclosure all start here, together")}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
         <WaveColumn track="H" title="Hardware" sub="concurrent track 1" open={open} done={done} />
@@ -6455,8 +6455,8 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
   const allOpen = openBlocks.size === BLOCKS.length;
   const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "";
 
-  const th = { textAlign: "left", padding: "6px 8px", fontSize: 9.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--bd)", whiteSpace: "nowrap" };
-  const td = { padding: "7px 8px", fontSize: 11.5, color: "var(--txt2)", borderBottom: "1px solid var(--bd)", verticalAlign: "top", lineHeight: 1.45 };
+  const th = { textAlign: "left", padding: "6px 8px", fontSize: 9.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--bdr2)", whiteSpace: "nowrap" };
+  const td = { padding: "7px 8px", fontSize: 11.5, color: "var(--txt2)", borderBottom: "1px solid var(--bdr2)", verticalAlign: "top", lineHeight: 1.45 };
 
   return (
     <div className="fade">
@@ -6467,7 +6467,28 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         <span style={{ fontSize: 11, color: LINKS.links ? "var(--txt3)" : "var(--amber)" }}>{linksLine()}</span>
         {copy && copyMatches && <Pill color="var(--green)">step links from {copy.projectId}'s own workbook</Pill>}
         {copy && !copyMatches && <Pill color="var(--amber)">the loaded workbook is {copy.projectId}'s copy — its step links don't apply here</Pill>}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 7 }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+          {(() => {
+            /* The one indicator that answers "did it take?" without reading a
+               sentence. Green: the method on screen came from the workbook —
+               uploaded or pinned. Amber: from an earlier read, Drive quiet
+               now. Red: still the built-in copy, nothing synced. */
+            const state = SOURCE.from === "upload"
+              ? ["var(--green)", "Synced — uploaded workbook"]
+              : SOURCE.from === "drive"
+              ? ["var(--green)", PIN.fileId ? "Synced — pinned workbook" : "Synced — from Drive"]
+              : SOURCE.from === "cache"
+              ? ["var(--amber)", "Synced earlier — Drive quiet now"]
+              : ["var(--red)", "Not synced"];
+            return (
+              <span title={sourceLine()} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px",
+                borderRadius: 999, border: `1px solid ${state[0]}`, color: state[0], fontSize: 11, fontWeight: 800,
+                background: `color-mix(in srgb, ${state[0]} 10%, transparent)` }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: state[0] }} />
+                {state[1]}
+              </span>
+            );
+          })()}
           <Btn small kind="ghost" icon={linksBusy ? Loader2 : RefreshCw} disabled={linksBusy}
                title="Ask Drive which template files are actually alive and relink every sheet — the register's own links can point at deleted copies"
                onClick={refreshLinks}>{linksBusy ? "Checking Drive…" : "Refresh the file links"}</Btn>
@@ -6484,7 +6505,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       </div>
 
       {pinOpen && (
-        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", border: "1px solid var(--bd)", borderRadius: 9 }}>
+        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", border: "1px solid var(--bdr2)", borderRadius: 9 }}>
           <span style={{ fontSize: 11, color: "var(--txt2)" }}>Paste the Drive link of the master workbook:</span>
           <input value={pinUrl} onChange={(e) => setPinUrl(e.target.value)}
                  placeholder="https://docs.google.com/spreadsheets/d/…"
@@ -6518,7 +6539,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
             const list = inBlock(b.id);
             const isOpen = openBlocks.has(b.id);
             return (
-              <div key={b.id} style={{ border: "1px solid var(--bd)", borderRadius: 9, marginBottom: 6, overflow: "hidden" }}>
+              <div key={b.id} style={{ border: "1px solid var(--bdr2)", borderRadius: 9, marginBottom: 6, overflow: "hidden" }}>
                 <button onClick={() => toggle(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: "var(--s2)", border: "none", cursor: "pointer", textAlign: "left", color: "var(--txt)" }}>
                   <ChevronDown size={13} style={{ transform: isOpen ? "none" : "rotate(-90deg)", transition: "transform .15s", color: "var(--txt3)", flexShrink: 0 }} />
                   <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: "var(--acc)" }}>{b.id}</span>
@@ -6540,7 +6561,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                   <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--txt3)", textAlign: "right" }}>{b.convergesWith}</span>
                 </button>
                 {isOpen && list.some((r) => r.folder) && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 11px", borderTop: "1px solid var(--bd)", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 11px", borderTop: "1px solid var(--bdr2)", flexWrap: "wrap" }}>
                     <Btn small kind="ghost" icon={finding === b.id ? Loader2 : Search} disabled={!!finding}
                       onClick={() => findInDrive(b.id, list)}>
                       {finding === b.id ? "Looking in Drive…" : "Open the real sheets"}
@@ -6566,7 +6587,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                         <th style={{ ...th, width: 44 }}>#</th>
                         <th style={{ ...th, width: 168 }}>Category</th>
                         <th style={th}>Step</th>
-                        <th style={{ ...th, width: 108 }}>Template ID</th>
+                        <th style={{ ...th, width: 118 }}>File link</th>
                         <th style={{ ...th, width: 168 }}>Responsibility</th>
                         <th style={{ ...th, width: 132 }}>Who · when</th>
                         <th style={{ ...th, width: 96 }}>Status</th>
@@ -6587,13 +6608,6 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                                   thing that tells them whether they can start
                                   and when they are done — and the path is on
                                   the sheet's own link anyway. */}
-                              {copyMatches && (r.openLink || r.masterLink) && (
-                                <div style={{ display: "flex", gap: 9, alignItems: "baseline", marginTop: 3 }}>
-                                  {r.openLink && <a href={r.openLink} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>}
-                                  {r.masterLink && <a href={r.masterLink} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: "var(--txt3)", textDecoration: "underline" }}>master</a>}
-                                  {r.location && <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--txt3)" }}>{r.location}</span>}
-                                </div>
-                              )}
                               <div style={{ marginTop: 3, display: "flex", flexDirection: "column", gap: 2 }}>
                                 {(r.entryQuestion || r.entryTrigger) && (
                                   <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>
@@ -6627,33 +6641,30 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                               ))}
                               {r.converge?.agree && <div style={{ fontSize: 10.5, color: "var(--amber)", marginTop: 2 }}>Must agree: {r.converge.agree}</div>}
                             </td>
-                            <td style={{ ...td, fontFamily: MONO, fontSize: 10.5 }}>
-                              {/* The id names the template, and that is all it
-                                  is for. The link that matters is on the row's
-                                  own sheet in the project folder, not on the
-                                  blank in the library — so the blank is a
-                                  quiet second line, not the headline. */}
-                              <div style={{ color: "var(--txt3)" }}>{r.templateId || "—"}</div>
-                              {/* The number is not the sheet. "EB-T-030" tells
-                                  nobody what they are opening; the register
-                                  knows it is the Test Environment Setup
-                                  Record, so say so. */}
-                              {r.templateName && (() => {
-                                /* Looked up at render, not baked into the row:
-                                   the verified set can arrive or be refreshed
-                                   at any moment, and a stale closure here is
-                                   the same bug as the stale register. */
+                            <td style={{ ...td, fontSize: 11 }}>
+                              {(() => {
+                                /* One link, and the most exact one that exists:
+                                   the project's own file off the uploaded
+                                   workbook, else the Drive-verified blank. The
+                                   template id and the master link earned their
+                                   keep while things were being wired up; for
+                                   somebody doing the work they are noise. */
+                                if (copyMatches && r.openLink) {
+                                  return (
+                                    <a href={r.openLink} target="_blank" rel="noreferrer"
+                                       title={r.location || r.fileName || ""}
+                                       style={{ fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>
+                                  );
+                                }
                                 const live = templateLinkFor(r.templateId);
-                                return (
-                                  <div style={{ fontFamily: "inherit", fontSize: 10.5, color: "var(--txt2)", lineHeight: 1.35, marginTop: 1 }}>
-                                    {live
-                                      ? <a href={live.link} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateName}</a>
-                                      : r.templateName}
-                                    {live?.copies > 1 && <span style={{ color: "var(--amber)", fontSize: 9 }}> · {live.copies} copies live in Drive</span>}
-                                  </div>
-                                );
+                                if (live) {
+                                  return (
+                                    <a href={live.link} target="_blank" rel="noreferrer" title={r.fileName || ""}
+                                       style={{ color: "var(--acc)", textDecoration: "none", lineHeight: 1.35 }}>{r.templateName || "Open the blank"}</a>
+                                  );
+                                }
+                                return <span style={{ color: "var(--txt3)" }}>{r.templateName || "—"}</span>;
                               })()}
-                              {r.fileName && <div style={{ fontSize: 9.5, color: "var(--txt3)", marginTop: 1 }}>{r.fileName}</div>}
                             </td>
                             <td style={td}>{r.responsibility || <span style={{ color: "var(--txt3)" }}>—</span>}</td>
                             <td style={{ ...td, fontSize: 10.5 }}>
@@ -6684,7 +6695,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       ))}
 
       {unplacedTodos.length > 0 && (
-        <div style={{ border: "1px solid var(--bd)", borderRadius: 9, padding: "11px 13px", marginBottom: 10 }}>
+        <div style={{ border: "1px solid var(--bdr2)", borderRadius: 9, padding: "11px 13px", marginBottom: 10 }}>
           <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 7 }}>
             Raised in the scrum, not yet part of the process
           </div>
@@ -6709,7 +6720,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       )}
 
       {CONVERGENCE.length > 0 && (
-        <div style={{ border: "1px solid var(--bd)", borderRadius: 9, padding: "11px 13px", marginTop: 4 }}>
+        <div style={{ border: "1px solid var(--bdr2)", borderRadius: 9, padding: "11px 13px", marginTop: 4 }}>
           <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 7 }}>Where the tracks must agree</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             {CONVERGENCE.map((c) => (
