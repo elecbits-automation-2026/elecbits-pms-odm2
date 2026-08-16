@@ -108,6 +108,69 @@ const ORG_SIZES = [
 ];
 const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Sr. Hardware Engineer", "Jr. Hardware Engineer", "Sr. Firmware Engineer", "Jr. Firmware Engineer", "Industrial Designer", "Tester / QA", "Supply Chain", "Solution Architect"];
 
+/* ─── WHO CAN BE PUT IN A SLOT ────────────────────────────────────────────
+   Two rules, both learned the hard way.
+
+   Everybody real is eligible. Being an administrator of this tool says
+   nothing about whether you run projects — Saurav and Shreya are the two
+   department heads for Project Management and Nikhil leads Solution
+   Architecture, and filtering on `role !== "superadmin"` left all three out
+   of the PM list entirely. The only account that is genuinely not a person is
+   the seeded Admin login.
+
+   And the right people come first. Every slot used to offer the same
+   undifferentiated list of forty names, so "Jr. Hardware Engineer" offered
+   firmware engineers and project managers with nothing to separate them.
+   Nobody is BLOCKED — a stand-in is a real thing — but the people whose
+   resource role matches the slot are grouped at the top under it.        */
+export const isRealPerson = (u) => !!u && u.id !== "u-admin" && !/^admin$/i.test(u.name || "");
+
+const SLOT_ROLES = [
+  [/senior pm|technical manager/i, ["sr_pm"]],
+  [/^pm|project manager/i, ["sr_pm", "jr_pm"]],
+  [/sr\.? hardware/i, ["sr_hw"]],
+  [/jr\.? hardware/i, ["jr_hw"]],
+  [/hardware/i, ["sr_hw", "jr_hw"]],
+  [/sr\.? firmware/i, ["sr_fw"]],
+  [/jr\.? firmware/i, ["jr_fw"]],
+  [/firmware/i, ["sr_fw", "jr_fw"]],
+  [/industrial|enclosure|mechanical/i, ["ind_design"]],
+  [/tester|qa/i, ["tester", "soldering"]],
+  [/supply chain|procurement|sourcing/i, ["sc"]],
+  [/solution architect/i, ["sol_arch"]],
+  [/soldering|assembly/i, ["soldering"]],
+  [/devops/i, ["devops"]],
+];
+
+export const rolesForSlot = (slot) => SLOT_ROLES.find(([re]) => re.test(String(slot || "")))?.[1] || [];
+
+/* The people for a slot, split into the ones it is meant for and everyone
+   else — so the list is a recommendation, not a restriction. */
+export function peopleForSlot(slot, users) {
+  const want = rolesForSlot(slot);
+  const all = (users || []).filter(isRealPerson);
+  if (!want.length) return { fits: [], others: all };
+  const fits = all.filter((u) => want.includes(u.resourceRole));
+  return { fits, others: all.filter((u) => !fits.includes(u)) };
+}
+
+/* One <select> body, used everywhere somebody is chosen for a slot. */
+function SlotOptions({ slot, users }) {
+  const { fits, others } = peopleForSlot(slot, users);
+  const label = (u) => `${u.name}${u.title ? ` — ${u.title}` : ""}`;
+  if (!fits.length) return <>{others.map((u) => <option key={u.id} value={u.id}>{label(u)}</option>)}</>;
+  return (
+    <>
+      <optgroup label={slot}>
+        {fits.map((u) => <option key={u.id} value={u.id}>{label(u)}</option>)}
+      </optgroup>
+      <optgroup label="Anyone else">
+        {others.map((u) => <option key={u.id} value={u.id}>{label(u)}</option>)}
+      </optgroup>
+    </>
+  );
+}
+
 /* ─── LLD QUESTIONS (30 — carried from the previous ODM tool) ───────────── */
 const LLD_QUESTIONS = [
   { id: 1, sec: "Product", text: "What is the product you want to build? Describe it in one sentence.", hint: "This becomes the one-liner on every internal doc. Keep it tight.", type: "text" },
@@ -1966,7 +2029,7 @@ function ProjectWizard({ onClose }) {
               <span style={{ fontSize: 12, width: 195, color: "var(--txt2)", fontWeight: 600 }}>{r.slot}{r.slot.startsWith("PM") && <span style={{ color: "var(--red)" }}> *</span>}</span>
               <select className="inp" style={{ flex: 1 }} value={r.userId} onChange={(e) => set(i, e.target.value)}>
                 <option value="">— unassigned —</option>
-                {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
+                {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
               </select>
             </div>
           ))}
@@ -2312,7 +2375,7 @@ function AddExistingProject({ onClose }) {
           <Field label="PM (Project Manager)" req>
             <select className="inp" value={pmId} onChange={(e) => setPmId(e.target.value)}>
               <option value="">— choose PM —</option>
-              {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
+              <SlotOptions slot="PM (Project Manager)" users={users} />
             </select>
           </Field>
           <Field label="Status"><select className="inp" value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}</select></Field>
@@ -2335,7 +2398,7 @@ function AddExistingProject({ onClose }) {
                 <span style={{ fontSize: 11, width: 130, color: "var(--txt2)", fontWeight: 600 }}>{r.slot}</span>
                 <select className="inp" style={{ flex: 1, padding: "6px 8px" }} value={r.userId} onChange={(e) => setRow(i, e.target.value)}>
                   <option value="">—</option>
-                  {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  <SlotOptions slot={r.slot} users={users} />
                 </select>
               </div>
             ))}
@@ -3150,7 +3213,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                       <span style={{ fontSize: 11, width: 118, color: "var(--txt2)", fontWeight: 600 }}>{slot}{slot.startsWith("PM") && <span style={{ color: "var(--red)" }}> *</span>}</span>
                       <select className="inp" style={{ flex: 1, padding: "6px 8px" }} value={slotUser(slot)} onChange={(e) => setSlot(slot, e.target.value)}>
                         <option value="">— unassigned —</option>
-                        {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                        {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                       </select>
                     </div>
                   ))}
@@ -3671,7 +3734,7 @@ function OrganisedTasks({ preview, date, users, onPatch }) {
                 {t.linked ? <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill> : <Pill color="var(--amber)"><AlertTriangle size={10} /> {t.projectId || "no project"} · unlinked</Pill>}
                 <select className="inp" style={{ width: 150, padding: "5px 9px", background: "var(--s1)" }} value={t.assigneeId} onChange={(e) => onPatch(i, { assigneeId: e.target.value })}>
                   <option value="">— assignee —</option>
-                  {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                 </select>
                 {/* The day the task is FOR. A note written today can raise
                     work for tomorrow, and that has to be visible and
@@ -4433,7 +4496,7 @@ function TasksModule() {
         <Seg value={group} onChange={setGroup} options={[{ k: "project", label: "By project", icon: FolderPlus }, { k: "person", label: "By person", icon: Users }]} />
         <select className="inp" style={{ width: 170 }} value={personF} onChange={(e) => setPersonF(e.target.value)}>
           <option value="all">All people</option>
-          {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
         </select>
         <select className="inp" style={{ width: 200, fontFamily: MONO, fontSize: 12 }} value={projF} onChange={(e) => setProjF(e.target.value)}>
           <option value="all">All projects</option>
@@ -4899,7 +4962,7 @@ function CompleteFlow({ t, onClose }) {
                 <input className="inp" style={{ flex: 1, minWidth: 180 }} placeholder="Sub-task title" value={r.title} onChange={(e) => setRows((rs) => rs.map((y, j) => (j === i ? { ...y, title: e.target.value } : y)))} />
                 <select className="inp" style={{ width: 130 }} value={r.assigneeId} onChange={(e) => setRows((rs) => rs.map((y, j) => (j === i ? { ...y, assigneeId: e.target.value } : y)))}>
                   <option value="">— who —</option>
-                  {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                 </select>
                 <input type="number" min="10" step="10" className="inp" style={{ width: 82, fontFamily: MONO }} value={r.timebox} onChange={(e) => setRows((rs) => rs.map((y, j) => (j === i ? { ...y, timebox: +e.target.value } : y)))} />
                 <span style={{ fontSize: 11, color: "var(--txt3)" }}>min</span>
@@ -5652,7 +5715,7 @@ function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
     toast(scored.score !== null ? `Aligned ${scored.score}/100 with the KPI` : "Saved — unscored for now", scored.score !== null ? "green" : "amber");
   };
 
-  const team = isMgr ? users.filter((u) => u.role !== "superadmin") : [];
+  const team = isMgr ? users.filter(isRealPerson) : [];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card" style={{ padding: 15 }}>
@@ -5782,7 +5845,7 @@ function AssignTraining({ onClose }) {
         <Field label="Person" req>
           <select className="inp" value={f.userId} onChange={(e) => setF({ ...f, userId: e.target.value })}>
             <option value="">— choose —</option>
-            {users.filter((u) => u.role !== "superadmin").map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
+            {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name} — {u.title}</option>)}
           </select>
         </Field>
         <Field label="Training title" req><input className="inp" placeholder="e.g. DFM basics for 4-layer boards" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></Field>
