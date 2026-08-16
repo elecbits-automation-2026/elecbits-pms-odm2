@@ -37,6 +37,21 @@ export let STEPS = MAP.steps;
 export let CATEGORIES = MAP.categories;
 export let TEMPLATES = MAP.templates;
 
+/* ── the major blocks, and their sequence ────────────────────────────────────
+   The Flow Map tab is the only document that names the blocks and fixes the
+   order they run in: A runs alone, B splits into three concurrent design
+   tracks with test inline and the DFx gates across them, C runs serially after
+   the merge. Ten blocks, 308 steps, and every step belongs to exactly one.
+
+   A plan read as 308 numbered rows is unreadable. Read as ten named blocks in
+   sequence it is the same plan somebody can hold in their head.              */
+export let BLOCKS = MAP.blocks || [];
+
+/* The points where the parallel tracks must stop and agree with each other.
+   Without these the schedule will happily let hardware finish a layout against
+   an enclosure revision nobody signed off. */
+export let CONVERGENCE = MAP.convergence || [];
+
 /* The wave graph comes from the flow diagram, which is a drawing and cannot be
    parsed at runtime — so it stays compiled in, keyed by step NAME. A workbook
    edited in Drive has rows inserted, moved and deleted, and a row number would
@@ -98,14 +113,79 @@ function deriveCategories(map) {
   return map;
 }
 
+/* Which block each step is in, and which steps are convergence points. Done
+   here rather than trusted from the file because the workbook is edited in
+   Drive between builds: a step added there arrives with no block, and a step
+   with no block falls out of every view that reads the plan by block.
+
+   A category split across two blocks (Test is drawn inline per track AND again
+   after the merge) is divided by the Flow Map's own counts, in the order the
+   Flow Map lists the blocks — so the split comes from the document rather than
+   from a rule invented here. */
+function deriveBlocks(map) {
+  const blocks = map.blocks || [];
+  const byCategory = {};
+  for (const b of blocks) (byCategory[b.category] ||= []).push(b);
+  const at = new Map();
+  for (const [cat, bs] of Object.entries(byCategory)) {
+    const inCat = map.steps.filter((s) => s.category === cat).sort((a, b) => a.no - b.no);
+    if (bs.length === 1) { for (const s of inCat) at.set(s.no, bs[0].id); continue; }
+    let cursor = 0;
+    for (const b of bs) {
+      for (const s of inCat.slice(cursor, cursor + b.steps)) at.set(s.no, b.id);
+      cursor += b.steps;
+    }
+    for (const s of inCat.slice(cursor)) at.set(s.no, bs[bs.length - 1].id);
+  }
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const conv = new Map();
+  for (const cv of map.convergence || []) {
+    for (const no of cv.steps || []) conv.set(no, cv);
+    // Resolved by name too: a step renumbered in Drive keeps its name.
+    for (const s of map.steps) if (norm(s.step) === norm(cv.name)) conv.set(s.no, cv);
+  }
+  for (const s of map.steps) {
+    s.block = at.get(s.no) || s.block || "";
+    const cv = conv.get(s.no);
+    if (cv) s.converge = { n: cv.n, name: cv.name, tracks: cv.tracks, agree: cv.agree, merge: !!cv.merge };
+  }
+  return map;
+}
+
 function adopt(map) {
-  MAP = applyWaves(deriveCategories(map));
+  MAP = applyWaves(deriveBlocks(deriveCategories(map)));
   STEPS = MAP.steps;
   CATEGORIES = MAP.categories;
   TEMPLATES = MAP.templates;
+  BLOCKS = MAP.blocks || [];
+  CONVERGENCE = MAP.convergence || [];
   WAVES = MAP.waves || [];
   return MAP;
 }
+
+/* The blocks, grouped the way the Flow Map draws them: A, then B with its
+   concurrent tracks side by side, then C. */
+export function blocksInSequence(blocks = BLOCKS) {
+  const groups = [];
+  for (const b of blocks) {
+    let g = groups.find((x) => x.group === b.group);
+    if (!g) { g = { group: b.group, blocks: [], steps: 0, concurrent: false }; groups.push(g); }
+    g.blocks.push(b);
+    g.steps += b.steps;
+    if (/concurrent/i.test(b.runs)) g.concurrent = true;
+  }
+  return groups;
+}
+
+export const blockById = (id) => BLOCKS.find((b) => b.id === id) || null;
+export const blockOf = (step) => blockById(step?.block);
+export const stepsInBlock = (id) => STEPS.filter((s) => s.block === id);
+
+/* The convergence points that touch a step, for the work window: "this review
+   cannot be closed until Firmware and Enclosure have agreed the pin map." */
+export const convergenceAt = (step) =>
+  CONVERGENCE.find((cv) => (cv.steps || []).includes(step?.no)) ||
+  (step?.converge ? CONVERGENCE.find((cv) => cv.n === step.converge.n) || step.converge : null);
 
 /* ── loading it from Drive ───────────────────────────────────────────────────
    Once per session, or on demand when somebody has just edited the workbook.
@@ -139,7 +219,8 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
     if (r?.error) throw new Error(r.error);
     if (!r?.steps?.length) throw new Error("Drive returned a workbook with no steps in it.");
 
-    adopt({ steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [] });
+    adopt({ steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [],
+             convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [] });
     Object.assign(SOURCE, {
       from: "drive", error: "",
       fileName: r.file?.name || "", path: r.file?.path || "",
@@ -149,7 +230,8 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
     });
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({
-        map: { steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [] },
+        map: { steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [],
+               convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [] },
         source: { ...SOURCE },
       }));
     } catch { /* a full quota is not a reason to fail the load */ }
@@ -184,10 +266,25 @@ export const stepsIn = (category) => STEPS.filter((s) => s.category === category
    with the template. Together they are the exact address of the artefact the
    step must produce — which is what lets somebody do the work without opening
    Drive to hunt for the right folder first.                                  */
-export const fileNameFor = (step, projectId) =>
-  String(step?.templateFile || "").replace(/\[ProjectID\]/g, projectId || "[ProjectID]");
+export const fileNameFor = (step, projectId, pcbId) =>
+  String(step?.templateFile || "")
+    .replace(/\[ProjectID\]/g, projectId || "[ProjectID]")
+    // Engineering artefacts are named after the BOARD, not the project — a
+    // project with three boards produces three of these files and they are
+    // told apart by nothing else.
+    .replace(/\[PCB-?ID\]/gi, pcbId || "[PCB-ID]");
 
 export const folderFor = (step) => TEMPLATES[step?.templateId]?.folder || "";
+
+/* ── the template itself ─────────────────────────────────────────────────────
+   The template register carries a link straight to the file in Drive, what the
+   filled-in copy should be called, and what a good one looks like. A step that
+   can hand somebody the blank template and the standard it will be judged
+   against is a step they can do without asking anybody first.                */
+export const templateFor = (step) => TEMPLATES[step?.templateId] || null;
+export const templateLink = (step) => templateFor(step)?.link || "";
+export const templateStandard = (step) => templateFor(step)?.whatGood || "";
+export const templateLibraryFolder = (step) => templateFor(step)?.library || "";
 
 /* Whether we actually know where this step's output belongs. A template the
    workbook uses but never defines in its Template Actions tab has no folder,
@@ -198,10 +295,10 @@ export const knowsWhereItGoes = (step) => !!folderFor(step);
 /* The full path, given the project's own root folder (which the app already
    knows as pmPath(projectId)). Kept as one function so a path never gets
    assembled two different ways in two different screens. */
-export function pathFor(step, projectId, projectRoot = "") {
+export function pathFor(step, projectId, projectRoot = "", pcbId = "") {
   const folder = folderFor(step);
   const root = String(projectRoot || "").replace(/\/+$/, "");
-  return `${root}/${folder}${fileNameFor(step, projectId)}`.replace(/\/{2,}/g, "/");
+  return `${root}/${folder}${fileNameFor(step, projectId, pcbId)}`.replace(/\/{2,}/g, "/");
 }
 
 /* ── who does it ─────────────────────────────────────────────────────────────
@@ -468,6 +565,9 @@ export function buildPlan(project, users = [], opts = {}) {
   const start = opts.start || project?.startDate || (project?.createdAt || "").slice(0, 10) || iso(Date.now());
   const end = opts.end || project?.deadline || "";
   const only = opts.categories ? new Set(opts.categories) : null;
+  // A project can carry several boards; the first is the one the steps that
+  // name [PCB-ID] belong to unless a caller says otherwise.
+  const pcbId = opts.pcbId || (project?.linkedIds || [])[0] || "";
 
   const steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
   const categories = only ? CATEGORIES.filter((c) => only.has(c.name)) : CATEGORIES;
@@ -477,15 +577,26 @@ export function buildPlan(project, users = [], opts = {}) {
     const w = when.get(s.no) || {};
     return {
       no: s.no,
+      /* Category, step, template id and responsibility travel together — those
+         four are what makes a plan row actionable rather than a name on a
+         list: which part of the process this is, what it is, which document it
+         writes to, and whose job it is. Every view that prints the plan prints
+         all four. */
       category: s.category,
       phase: w.phase,
+      block: s.block || "",
+      blockName: blockById(s.block)?.label || "",
       title: s.step,
       action: s.action,
       template: s.template,
       templateId: s.templateId,
-      fileName: fileNameFor(s, projectId),
+      templateLink: templateLink(s),
+      templateStandard: templateStandard(s),
+      // Where the parallel tracks have to stop and agree before this can close.
+      converge: s.converge || null,
+      fileName: fileNameFor(s, projectId, pcbId),
       folder: folderFor(s),
-      path: knowsWhereItGoes(s) ? pathFor(s, projectId, opts.projectRoot || "") : "",
+      path: knowsWhereItGoes(s) ? pathFor(s, projectId, opts.projectRoot || "", pcbId) : "",
       // Named so a screen can say WHY there is no path rather than showing a
       // blank and letting somebody assume the file has no home.
       folderUnknown: knowsWhereItGoes(s) ? "" : (s.templateId || "the template"),

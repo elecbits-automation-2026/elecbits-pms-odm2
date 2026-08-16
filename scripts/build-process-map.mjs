@@ -20,9 +20,22 @@ import XLSX from "xlsx";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const src = process.argv[2];
+/* Arguments are taken by KIND, not by position: the workbook and the template
+   index are both .xlsx and it is far too easy to hand them over the wrong way
+   round. The first workbook with a "Process Flow" tab is the master; the one
+   with an "Index" tab is the template register; the .txt is the waves. */
+const args = process.argv.slice(2);
+let src = "", indexSrc = "", flowText = "";
+for (const a of args) {
+  if (/\.txt$/i.test(a)) { flowText = a; continue; }
+  if (!/\.xlsx?$/i.test(a)) continue;
+  const names = XLSX.readFile(a, { bookSheets: true }).SheetNames;
+  if (names.includes("Process Flow")) src = a;
+  else if (names.includes("Index")) indexSrc = a;
+  else console.error(`  ? ignoring ${path.basename(a)} — no "Process Flow" or "Index" tab in it`);
+}
 if (!src) {
-  console.error("Usage: node scripts/build-process-map.mjs <EbODM_Master_Process_Flow….xlsx>");
+  console.error("Usage: node scripts/build-process-map.mjs <Master_Process_Flow.xlsx> [waves.txt] [TemplateIndex.xlsx]");
   process.exit(2);
 }
 const OUT = path.join(process.cwd(), "src/data/process-map.json");
@@ -52,8 +65,13 @@ for (let i = 5; i < flow.length; i++) {
     exitTrigger: clean(r[COL.exitTrigger]),
     entryQuestion: clean(r[COL.entryQuestion]),
     exitQuestion: clean(r[COL.exitQuestion]),
-    // [ProjectID] is substituted at the moment a plan is built for a project.
-    templateFile: clean(r[COL.templateFile]),
+    /* [ProjectID] and [PCB-ID] are substituted at the moment a plan is built.
+       35 rows have the template id glued onto the front of the filename
+       ("EB-T-161 · [ProjectID]_LLD-Developer_v1.0"), which is a copy-paste
+       artefact and not part of any filename — left in, every one of those
+       steps tells somebody to save a file under a name Drive will never
+       match. The id is already in its own column. */
+    templateFile: clean(r[COL.templateFile]).replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
     templateId: clean(r[COL.templateId]),
     template: clean(r[COL.template]),
     action: clean(r[COL.action]),
@@ -82,16 +100,172 @@ for (let i = 4; i < ta.length; i++) {
   };
 }
 
-/* ── how the process splits and merges ───────────────────────────────────── */
+/* ── the template register ───────────────────────────────────────────────────
+   EbODM_TemplateIndex is the library's own register: all 178 templates, the
+   exact folder each instance goes in, what the file is called, what good looks
+   like — and a LINK straight to the template file in Drive. The workbook's
+   Template Actions tab knows which steps touch a template; the index knows
+   everything else about it. Neither is complete on its own.
+
+   Two things it fixes outright. It defines templates the workbook uses but
+   never declares (EB-T-161, the developer LLD), so those steps stop being
+   homeless. And its instance paths carry the REAL Drive folder names where the
+   workbook uses shorthand stems — "10-PM/03-LLD-HLD" against
+   "02-Project-Folder-R&D-PM/03-LLD-HLD/01-Customer-LLD". A path is only worth
+   showing somebody if it is the path they will actually find.                */
+const templateNotes = [];
+if (indexSrc) {
+  const ib = XLSX.readFile(indexSrc);
+  const sheet = ib.Sheets["Index"];
+  const ir = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  // "Open" is a word in a cell; the thing worth having is the hyperlink under
+  // it, which is a direct Drive link to the template file.
+  const links = {};
+  for (const addr in sheet) {
+    if (addr[0] === "!") continue;
+    const cell = sheet[addr];
+    if (cell?.l?.Target && /^EB-T-/.test(String(cell.v || ""))) links[String(cell.v)] = cell.l.Target;
+  }
+  const IX = { id: 0, name: 1, format: 3, kind: 4, description: 5, whatGood: 6, serves: 7,
+               library: 8, instancePath: 9, instanceName: 10, stage: 11, createdAt: 12,
+               editedAt: 13, owner: 14, filledBy: 15, auditRow: 16, version: 17 };
+  let added = 0, enriched = 0, refined = 0, moved = 0;
+  for (let i = 0; i < ir.length; i++) {
+    const r = ir[i];
+    const id = clean(r[IX.id]);
+    if (!/^EB-T-/.test(id)) continue;
+    const instance = clean(r[IX.instancePath]);
+    /* A few rows put the FILE in the instance-path column. A file is not a
+       folder, and treating one as the other would drop everything that step
+       writes into the folder above it. The library column has the folder in
+       those cases — one segment deeper, because it is written from the top of
+       the project rather than from inside it, so that root is taken off. */
+    const library = clean(r[IX.library]).replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
+    const folder = /\.[a-z0-9]{2,5}$/i.test(instance) ? library : instance;
+    const t = templates[id];
+    if (!t) {
+      templates[id] = { id, name: clean(r[IX.name]), folder, steps: [], actions: [] };
+      added++;
+    } else {
+      if (folder && folder.replace(/\/+$/, "") !== t.folder.replace(/\/+$/, "")) {
+        (folder.startsWith(t.folder.replace(/\/+$/, "") + "/") ? () => refined++ : () => moved++)();
+        t.folder = folder;
+      }
+      enriched++;
+    }
+    Object.assign(templates[id], {
+      format: clean(r[IX.format]),
+      kind: clean(r[IX.kind]),
+      description: clean(r[IX.description]),
+      whatGood: clean(r[IX.whatGood]),
+      serves: clean(r[IX.serves]),
+      library: clean(r[IX.library]),
+      instanceName: clean(r[IX.instanceName]),
+      stage: clean(r[IX.stage]),
+      owner: clean(r[IX.owner]),
+      filledBy: clean(r[IX.filledBy]),
+      auditRow: clean(r[IX.auditRow]),
+      version: clean(r[IX.version]),
+      link: links[id] || "",
+    });
+  }
+  const linked = Object.values(templates).filter((t) => t.link).length;
+  templateNotes.push(`template index: ${enriched + added} templates read · ${added} the workbook never declared · ${linked} link straight to Drive`);
+  if (refined) templateNotes.push(`${refined} folder(s) made more exact by the index`);
+  if (moved) templateNotes.push(`${moved} folder(s) DISAGREE between the workbook and the index — the index won, because it carries the real Drive folder names`);
+  // Duplicates are a Drive problem, not a data problem, but the register knows
+  // about them and nobody reads the register.
+  const dup = XLSX.utils.sheet_to_json(ib.Sheets["Duplicates in Drive"] || {}, { header: 1, defval: "" });
+  const dupIds = [...new Set(dup.map((r) => clean(r[0])).filter((x) => /^EB-T-/.test(x)))];
+  if (dupIds.length) templateNotes.push(`${dupIds.length} template id(s) resolve to two files in Drive — delete the spare: ${dupIds.join(", ")}`);
+} else {
+  templateNotes.push("no template index given — folders come from the workbook alone, and templates it never declares have none");
+}
+
+/* ── how the process splits and merges ───────────────────────────────────────
+   The Flow Map tab is the only place that names the MAJOR BLOCKS and fixes
+   their sequence: what runs serially, which three tracks run at the same time,
+   which gate blocks what, and the points where the parallel tracks have to
+   stop and agree with each other before any of them can go on.
+
+   It is read whole. The old reader took the block table and stopped at TOTAL,
+   which silently dropped the cross-track convergence section underneath it —
+   the sheet grew a section and the app never noticed. Every non-empty row is
+   now claimed by a section or listed in `unread` and printed, so a row added
+   in Drive can never go quietly missing again.                               */
 const fm = rows("Flow Map");
+const nonEmpty = (r) => (r || []).some((c) => clean(c));
+const cells = (r) => (r || []).map(clean);
+const rowText = (r) => cells(r).filter(Boolean).join(" ");
+
 const blocks = [];
-for (let i = 3; i < fm.length; i++) {
-  const r = fm[i];
-  if (!clean(r[0]) || clean(r[0]) === "TOTAL") continue;
-  blocks.push({
-    block: clean(r[0]), category: clean(r[1]), steps: Number(clean(r[3])) || 0,
-    runs: clean(r[4]), convergesWith: clean(r[5]),
-  });
+const convergence = [];
+const unread = [];
+let declaredTotal = null;
+let flowTitle = "";
+
+{
+  let section = "";                 // "" | blocks | convergence
+  for (let i = 0; i < fm.length; i++) {
+    const r = fm[i], c = cells(r);
+    if (!nonEmpty(r)) { continue; }
+    const label = `row ${i + 1}`;
+
+    // Headers switch the section on. Matching on the header's own words rather
+    // than a row number means inserting a row in Drive cannot break this.
+    if (c[0] === "Block" && /categor/i.test(c[1] || "")) { section = "blocks"; continue; }
+    if (/convergence step/i.test(c[1] || "")) { section = "convergence"; continue; }
+    if (/^cross-track convergence/i.test(c[0] || "")) { section = ""; continue; }
+    if (i === 0 && /flow structure/i.test(c[0] || "")) { flowTitle = c[0]; continue; }
+
+    if (section === "blocks") {
+      if (/^TOTAL$/i.test(c[0]) || /^TOTAL$/i.test(c[2])) {
+        declaredTotal = Number(c.find((x, k) => k > 0 && /^\d+$/.test(x))) || null;
+        section = "";
+        continue;
+      }
+      if (!c[0] || !c[1]) { unread.push(`${label}: ${rowText(r).slice(0, 70)}`); continue; }
+      /* "A — Serial" is a GROUP, not a name — three rows share "B — Parallel".
+         The block's own name is its category with the leading phase number
+         stripped, which is what a person actually calls it out loud. */
+      const group = (c[0].match(/^([A-Z])\b/) || [])[1] || "";
+      const kind = clean(c[0].replace(/^[A-Z]\s*[—–-]\s*/, "")) || "Serial";
+      const name = clean(c[1].replace(/^\d+\s*·\s*/, "")) || c[1];
+      blocks.push({
+        seq: blocks.length + 1,
+        id: `${group || "X"}${blocks.filter((b) => b.group === group).length + 1}`,
+        group, kind, name,
+        label: `${group}${blocks.filter((b) => b.group === group).length + 1} · ${name}`,
+        block: c[0],                       // kept: older readers key off this
+        category: c[1],
+        sourceRows: c[2] || "",
+        steps: Number(c[3]) || 0,
+        runs: c[4] || "",
+        convergesWith: c[5] || "",
+      });
+      continue;
+    }
+
+    if (section === "convergence") {
+      if (!c[1]) { unread.push(`${label}: ${rowText(r).slice(0, 70)}`); continue; }
+      convergence.push({
+        n: Number(c[0]) || convergence.length + 1,
+        // "Prototype Checklist (row 126)" — the row number is a pointer into an
+        // older revision of the sheet and goes stale; the name does not.
+        name: clean(c[1].replace(/\s*\(row\s*\d+\)\s*$/i, "")),
+        tracks: c[2] || "",
+        agree: c[3] || "",
+        merge: /merge/i.test(c[2] || ""),
+        steps: [],                         // filled in once the steps are read
+      });
+      continue;
+    }
+
+    // Prose between sections is fine and expected; anything else is a row the
+    // reader does not understand, and it gets said out loud.
+    if (c.filter(Boolean).length === 1 && c[0] && c[0].length > 30) continue;
+    unread.push(`${label}: ${rowText(r).slice(0, 70)}`);
+  }
 }
 
 /* Categories in the order the process actually runs them. The leading digit in
@@ -119,6 +293,110 @@ for (const c of categories) {
   c.parallel = /concurrent/i.test(b?.runs || "");
   c.gated = /gated/i.test(b?.runs || "");
   c.runs = b?.runs || "";
+  c.block = b?.id || "";
+}
+
+/* Every block must land on a real category and every category must sit in a
+   block, or the sequence has a hole in it that nothing downstream can see. The
+   one legitimate split is Test: the Flow Map draws it twice — inline per track
+   and again after the merge — where the workbook has a single category.      */
+const blockNotes = [];
+for (const b of blocks) {
+  if (categories.some((c) => c.name === b.category)) continue;
+  const stem = b.category.replace(/\s*\([^)]*\)\s*$/, "");
+  const c = categories.find((x) => x.name === stem);
+  if (c) { b.category = c.name; b.split = true; b.as = b.name; }
+  else blockNotes.push(`block "${b.label}" names a category the Process Flow tab does not have: "${b.category}"`);
+}
+for (const c of categories) {
+  if (!blocks.some((b) => b.category === c.name)) blockNotes.push(`category "${c.name}" (${c.count} steps) is in no block — the Flow Map does not say where it runs`);
+}
+{
+  const counted = blocks.reduce((s, b) => s + b.steps, 0);
+  if (counted !== steps.length) blockNotes.push(`the blocks add up to ${counted} steps but the Process Flow tab has ${steps.length}`);
+  if (declaredTotal != null && declaredTotal !== counted) blockNotes.push(`the Flow Map's own TOTAL says ${declaredTotal}, its blocks add up to ${counted}`);
+}
+// Two blocks can share a category (Test), so the split blocks are told apart
+// by their own name rather than by the category they belong to.
+for (const b of blocks) {
+  const same = blocks.filter((x) => x.category === b.category);
+  b.sharesCategory = same.length > 1;
+}
+
+/* ── the convergence points ──────────────────────────────────────────────────
+   Four words in a spreadsheet — "the three parallel tracks must synchronise
+   here" — are the difference between a plan that works and one that quietly
+   lets hardware finish its layout against an enclosure nobody agreed to. Each
+   row is resolved to the ACTUAL steps it names, in every track that has one.
+
+   A row can name more than one step: "Concept / CAD / render reviews with HW
+   team" is four separate enclosure reviews. And a row can name a track that
+   has no step for it at all — the sheet says enclosure must be at the block
+   diagram review and the enclosure track has nothing there. Both are reported
+   rather than smoothed over, because an unenforceable constraint that looks
+   enforced is worse than a missing one.                                      */
+const TRACK_CATEGORY = {
+  HW: "2 · Design — Hardware", FW: "2 · Design — Firmware", ENC: "2 · Design — Enclosure",
+};
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+for (const cv of convergence) {
+  cv.trackKeys = [...new Set((cv.tracks.match(/HW|FW|ENC/g) || []))];
+  const exact = steps.filter((s) => normName(s.step) === normName(cv.name));
+  if (exact.length) cv.steps = exact.map((s) => s.no);
+  else {
+    /* No exact row. The sheet is describing a GROUP of reviews — "Concept /
+       CAD / render reviews with HW team" — so every review in the named track
+       that is held with one of the other tracks is the group. Naming the
+       counterpart tracks is what keeps this from swallowing the self-reviews
+       and the checklist reviews that are internal to the track. */
+    const owner = cv.trackKeys[0] && TRACK_CATEGORY[cv.trackKeys[0]];
+    const others = cv.trackKeys.slice(1).filter((k) => TRACK_CATEGORY[k]);
+    const withOther = new RegExp(`\\bwith\\b.*\\b(${["HW", "hardware", "FW", "firmware", "enclosure", "ENC"].join("|")})\\b`, "i");
+    const pool = steps.filter((s) => s.category === owner && withOther.test(s.step));
+    const words = cv.name.toLowerCase().match(/[a-z]{3,}/g) || [];
+    const topic = words.filter((w) => !["review", "reviews", "with", "team", "the", "and"].includes(w));
+    const hit = pool.filter((s) => topic.some((w) => s.step.toLowerCase().includes(w)));
+    cv.steps = (hit.length ? hit : pool).map((s) => s.no);
+    cv.matchedLoosely = true;
+    if (!cv.steps.length) blockNotes.push(`convergence ${cv.n} "${cv.name}" matches no step in the workbook`);
+    else if (others.length) { /* the group is real */ }
+  }
+  /* The mirror. A convergence is drawn once, in the track that calls the
+     meeting — "Block diagram review with FW & Enclosure team" sits in
+     hardware. The other tracks hold their own side of the same meeting under
+     their own name ("Block diagram review with HW"), and finding it is what
+     turns a note in a spreadsheet into a dependency the schedule can enforce.
+
+     A mirror has to be a review held WITH another track and be about the same
+     thing. Both halves matter: without the first it picks up the track's own
+     self-reviews, without the second it picks up any cross-track review at
+     all. Where no mirror exists, none is invented — that track is listed as
+     having nothing to hold to the barrier. */
+  {
+    const topicWords = (cv.name.toLowerCase().match(/[a-z]{3,}/g) || [])
+      .filter((w) => !["review", "reviews", "with", "team", "the", "and", "file"].includes(w));
+    const crossTrack = /\bwith\b[^,]*\b(hw|hardware|fw|firmware|enclosure|enc)\b/i;
+    const owned = new Set(cv.steps);
+    for (const k of cv.trackKeys) {
+      const cat = TRACK_CATEGORY[k];
+      if (!cat || cv.steps.some((no) => steps.find((s) => s.no === no)?.category === cat)) continue;
+      const mirror = steps.find((s) =>
+        s.category === cat && !owned.has(s.no) && crossTrack.test(s.step) &&
+        topicWords.filter((w) => s.step.toLowerCase().includes(w)).length >= Math.min(2, topicWords.length));
+      if (mirror) { cv.steps.push(mirror.no); owned.add(mirror.no); (cv.mirrors ||= []).push(mirror.no); }
+    }
+  }
+
+  cv.stepsByTrack = {};
+  for (const no of cv.steps) {
+    const s = steps.find((x) => x.no === no);
+    const key = Object.keys(TRACK_CATEGORY).find((k) => TRACK_CATEGORY[k] === s?.category) || "OTHER";
+    (cv.stepsByTrack[key] ||= []).push(no);
+  }
+  /* A named track with nothing in it cannot be held to the barrier. Say so —
+     this is a gap in the workbook, and it is exactly the kind of gap that only
+     shows up as a surprise in week nine. */
+  cv.tracksWithoutAStep = cv.merge ? [] : cv.trackKeys.filter((k) => TRACK_CATEGORY[k] && !cv.stepsByTrack[k]?.length);
 }
 
 /* ── the waves ───────────────────────────────────────────────────────────────
@@ -136,7 +414,6 @@ for (const c of categories) {
    names arrive truncated ("Enclosure Features Che"). The workbook holds the
    authoritative names, so every wave entry is matched back to a real step by
    prefix — the wave file supplies ORDER, the workbook supplies identity.     */
-const flowText = process.argv[3];
 let waves = [];
 let map_waveByName = {};
 if (flowText) {
@@ -284,6 +561,39 @@ if (flowText) {
   }
   for (const s of steps) s.wave = waveOfStep.get(s.no) || "";
 
+  /* ── the convergence points become real dependencies ───────────────────────
+     Two tracks that must agree at a review cannot be scheduled as if they will
+     happen to arrive on the same day. Each side of the meeting waits on the
+     wave BEFORE the other side's — not on the other side itself, which would
+     be a deadlock — so neither track can run past the meeting until the other
+     has done the work it is bringing to it.
+
+     Only convergences with a step in two or more tracks can be enforced. The
+     rest are carried as declarations the UI shows on the step, and the tracks
+     with nothing to hold are named in the build output.                      */
+  let enforced = 0;
+  const waveIndex = new Map(waves.map((w) => [w.id, w]));
+  const priorWave = (id) => {
+    const w = waveIndex.get(id);
+    if (!w) return null;
+    return waves.filter((x) => x.track === w.track && x.order < w.order).at(-1) || null;
+  };
+  for (const cv of convergence) {
+    const ws = [...new Set(cv.steps.map((no) => waveOfStep.get(no)).filter(Boolean))];
+    cv.waves = ws;
+    if (cv.merge || ws.length < 2) continue;
+    for (const a of ws) {
+      for (const b of ws) {
+        if (a === b) continue;
+        const p = priorWave(b);
+        const wa = waveIndex.get(a);
+        if (p && wa && p.track !== wa.track && !wa.after.includes(p.id)) { wa.after.push(p.id); enforced++; }
+      }
+    }
+    cv.enforced = true;
+  }
+  if (enforced) console.log(`convergence: ${enforced} cross-track dependency(ies) added to the wave graph`);
+
   /* Waves are keyed by step NAME as well as number. The workbook is edited in
      Drive — rows get inserted, reordered and removed — and a row number means
      nothing the moment somebody does that. A name survives an edit; a number
@@ -303,14 +613,52 @@ if (flowText) {
   if (orphan) console.log(`    ! ${orphan} step(s) ended up in no wave`);
 }
 
+/* Which block each step belongs to, so a plan can be read the way the Flow Map
+   draws it rather than as one flat list of 308 rows. A step whose category is
+   split across two blocks (Test) takes the block whose source rows cover it. */
+{
+  const byCategory = {};
+  for (const b of blocks) (byCategory[b.category] ||= []).push(b);
+  const blockOf = new Map();
+  for (const [cat, bs] of Object.entries(byCategory)) {
+    const inCat = steps.filter((s) => s.category === cat).sort((a, b) => a.no - b.no);
+    if (bs.length === 1) { for (const s of inCat) blockOf.set(s.no, bs[0].id); continue; }
+    /* Test is drawn twice — 39 steps inline in the tracks, then 13 more after
+       the merge — where the workbook keeps one category of 52. The sheet's own
+       counts are what splits them, in the order the sheet lists the blocks, so
+       nothing here has to guess which test is which. */
+    let cursor = 0;
+    for (const b of bs) {
+      for (const s of inCat.slice(cursor, cursor + b.steps)) blockOf.set(s.no, b.id);
+      cursor += b.steps;
+      b.split = true;
+    }
+    for (const s of inCat.slice(cursor)) blockOf.set(s.no, bs.at(-1).id);
+  }
+  for (const s of steps) s.block = blockOf.get(s.no) || "";
+}
+// Steps that ARE a convergence point, so the work window can say who else has
+// to be in the room before the step can be closed.
+{
+  const at = new Map();
+  for (const cv of convergence) for (const no of cv.steps) at.set(no, cv);
+  for (const s of steps) {
+    const cv = at.get(s.no);
+    if (cv) s.converge = { n: cv.n, name: cv.name, tracks: cv.tracks, agree: cv.agree, merge: !!cv.merge };
+  }
+}
+
 const map = {
   waves,
   waveByName: map_waveByName,
   source: path.basename(src),
+  templateSource: indexSrc ? path.basename(indexSrc) : "",
   builtBy: "scripts/build-process-map.mjs",
   stepCount: steps.length,
   categories,
   blocks,
+  convergence,
+  flowMap: { title: flowTitle, total: declaredTotal, unread },
   templates,
   steps,
 };
@@ -320,6 +668,45 @@ await writeFile(OUT, JSON.stringify(map, null, 1) + "\n");
 const bytes = (await import("node:fs")).statSync(OUT).size;
 console.log(`${steps.length} steps · ${categories.length} categories · ${Object.keys(templates).length} templates`);
 console.log(`${(bytes / 1024).toFixed(0)} KB → ${OUT}`);
+for (const n of templateNotes) console.log(`  · ${n}`);
+
+/* The block sequence, printed the way the Flow Map draws it. This is the thing
+   to read after a change to the sheet: if a block is in the wrong group or a
+   row went missing, it shows up here before it shows up in somebody's plan. */
+console.log(`\n  THE MAJOR BLOCKS, IN SEQUENCE`);
+let group = "";
+for (const b of blocks) {
+  if (b.group !== group) {
+    group = b.group;
+    const kinds = [...new Set(blocks.filter((x) => x.group === group).map((x) => x.kind))].join(" + ");
+    console.log(`  ${group} — ${kinds}`);
+  }
+  console.log(`      ${b.id.padEnd(3)} ${b.name.padEnd(34)} ${String(b.steps).padStart(3)} steps   ${b.runs}`);
+  if (b.convergesWith) console.log(`          ↳ ${b.convergesWith}`);
+}
+console.log(`      ${"".padEnd(3)} ${"TOTAL".padEnd(34)} ${String(blocks.reduce((s, b) => s + b.steps, 0)).padStart(3)} steps`);
+
+if (convergence.length) {
+  console.log(`\n  CROSS-TRACK CONVERGENCE POINTS`);
+  for (const cv of convergence) {
+    const where = cv.steps.length ? `step${cv.steps.length > 1 ? "s" : ""} ${cv.steps.join(", ")}` : "no step found";
+    console.log(`      ${cv.n}. ${cv.name}`);
+    console.log(`         ${cv.tracks} · ${where}${cv.enforced ? " · enforced in the schedule" : ""}`);
+    if (cv.tracksWithoutAStep?.length)
+      console.log(`         ! the sheet says ${cv.tracksWithoutAStep.join(" and ")} must be here, but ${cv.tracksWithoutAStep.length > 1 ? "those tracks have" : "that track has"} no step for it — nothing holds them to it`);
+  }
+}
+
+if (blockNotes.length) {
+  console.log(`\n  ! the Flow Map and the Process Flow tab do not line up:`);
+  for (const n of blockNotes) console.log(`      ${n}`);
+}
+if (unread.length) {
+  console.log(`\n  ! ${unread.length} Flow Map row(s) the reader did not understand — nothing is dropped silently, so check these:`);
+  for (const u of unread) console.log(`      ${u}`);
+}
+
+console.log("");
 for (const c of categories) {
   console.log(`  ${String(c.count).padStart(3)}  ${c.name}${c.parallel ? "  (concurrent)" : ""}${c.gated ? "  (gated)" : ""}`);
 }
@@ -327,6 +714,27 @@ for (const c of categories) {
    nothing can say where its file belongs. That is a gap in the workbook, not
    in the code, and it has to be shouted about rather than papered over — a
    confidently wrong Drive path is worse than an admitted blank. */
+{
+  const glued = steps.filter((s) => /^EB-T-\d+\s*[·|:-]/.test(clean(flow.find((r) => Number(clean(r[COL.no])) === s.no)?.[COL.templateFile] || "")));
+  if (glued.length) console.log(`\n  · ${glued.length} step(s) in the workbook have the template id glued onto the filename — stripped here, but worth fixing in Drive (steps ${glued.slice(0, 6).map((s) => s.no).join(", ")}${glued.length > 6 ? " …" : ""})`);
+}
+/* A template whose blank lives in one tree and whose filled-in copy is said to
+   live in a completely different one is almost always a copy-paste in the
+   register — and it sends somebody's work to the wrong half of the project. */
+{
+  /* Compared without the leading numbers: the register writes the same folder
+     as "06-Assembly" in one column and "05-Assembly" in the other, and a
+     literal comparison would report two dozen renumberings as if they were
+     misfiled templates. Noise like that gets the whole report ignored. */
+  const top = (p) => (String(p || "").split("/").filter(Boolean)[0] || "").replace(/^\d+[-.]?\s*/, "").toLowerCase();
+  const strip = (p) => String(p || "").replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
+  const odd = Object.values(templates).filter((t) => t.library && t.folder &&
+    top(strip(t.library)) && top(t.folder) && top(strip(t.library)) !== top(t.folder));
+  if (odd.length) {
+    console.log(`\n  ! ${odd.length} template(s) whose blank and whose filled-in copy are in different parts of the project — check these in the index:`);
+    for (const t of odd.slice(0, 8)) console.log(`      ${t.id} ${t.name}\n          blank: ${t.library}\n          copy:  ${t.folder}`);
+  }
+}
 const orphanTemplates = [...new Set(steps.filter((s) => !templates[s.templateId]).map((s) => s.templateId))];
 if (orphanTemplates.length) {
   console.log(`\n  ! ${orphanTemplates.length} template(s) used by steps but MISSING from the Template Actions tab:`);

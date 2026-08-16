@@ -33,7 +33,9 @@ import {
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
-import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes } from "./lib/processMap.js";
+import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes,
+         BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
+         sourceLine, templateLink } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -3070,7 +3072,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
-          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onFile={fileTodos} filing={filing} myName={my?.name} />}
+          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onFile={fileTodos} filing={filing} myName={my?.name} meId={my?.id} />}
 
           {tab === "mom" && (
           <Section>
@@ -6067,7 +6069,169 @@ function IdeaBoard({ credit, compact }) {
    Gantt for the shape of the schedule, Flow for the sequence, Steps for the
    detail, Changes for who moved what and when. Clicking anything anywhere
    opens the same stage detail.                                              */
-const PLAN_VIEWS = [["steps", "Steps"], ["flow", "Flow"], ["gantt", "Timeline"], ["log", "Changes"]];
+const PLAN_VIEWS = [["steps", "Steps"], ["flow", "Flow"], ["gantt", "Timeline"], ["process", "Process"], ["log", "Changes"]];
+
+/* ═══ THE PROCESS PLAN ═══════════════════════════════════════════════════════
+   The company's method, instantiated for one project. Not an AI's reading of
+   the folders — the actual 308 steps of EbODM_Master_Process_Flow, in the ten
+   major blocks the Flow Map names, dated against this project's own window,
+   with each step's [ProjectID] filled in.
+
+   Every row prints the four things that make a step actionable rather than a
+   name on a list: which part of the process it belongs to, what it is, the
+   template it writes to, and whose job it is. Those four were asked for by
+   name, and they are the row — everything else is secondary detail.          */
+function ConvergeMark({ c }) {
+  if (!c) return null;
+  return (
+    <span title={`${c.tracks} — ${c.agree}`} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 5, background: "color-mix(in srgb, var(--amber) 16%, transparent)", color: "var(--amber)", fontSize: 9.5, fontWeight: 800, letterSpacing: ".04em", whiteSpace: "nowrap" }}>
+      <GitBranch size={9} />{c.merge ? "MERGE" : c.tracks}
+    </span>
+  );
+}
+
+export function ProcessPlan({ p, users, meId }) {
+  const [openBlocks, setOpenBlocks] = useState(() => new Set());
+  const [mine, setMine] = useState(false);
+
+  /* 308 rows through the scheduler on every keystroke would make the whole tab
+     feel broken; it only changes when the project's window or team does. */
+  const plan = useMemo(
+    () => buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId) }),
+    [p.projectId, p.startDate, p.deadline, p.team, users]);
+
+  const groups = blocksInSequence();
+  const rows = mine ? plan.filter((r) => String(r.assigneeId) === String(meId)) : plan;
+  const inBlock = (id) => rows.filter((r) => r.block === id);
+  const toggle = (id) => setOpenBlocks((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const allOpen = openBlocks.size === BLOCKS.length;
+  const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "";
+
+  const th = { textAlign: "left", padding: "6px 8px", fontSize: 9.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--bd)", whiteSpace: "nowrap" };
+  const td = { padding: "7px 8px", fontSize: 11.5, color: "var(--txt2)", borderBottom: "1px solid var(--bd)", verticalAlign: "top", lineHeight: 1.45 };
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <Pill color="var(--acc)">{plan.length} steps · {BLOCKS.length} blocks</Pill>
+        {CONVERGENCE.length > 0 && <Pill color="var(--amber)">{CONVERGENCE.length} convergence points</Pill>}
+        <span style={{ fontSize: 11, color: "var(--txt3)" }}>{sourceLine()}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 7 }}>
+          <Btn small kind={mine ? "primary" : "ghost"} icon={Users} onClick={() => setMine((v) => !v)}>{mine ? "Everyone's steps" : "Only mine"}</Btn>
+          <Btn small kind="ghost" icon={allOpen ? EyeOff : Eye} onClick={() => setOpenBlocks(allOpen ? new Set() : new Set(BLOCKS.map((b) => b.id)))}>{allOpen ? "Collapse all" : "Open all"}</Btn>
+        </div>
+      </div>
+
+      {mine && rows.length === 0 && (
+        <Empty icon={ListChecks} title="No steps land on you in this project" sub="Steps are handed out by the slot somebody holds on this project's team. If that looks wrong, check the team on the Overview tab." />
+      )}
+
+      {groups.map((g) => (
+        <div key={g.group} style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 800, color: "var(--txt)", letterSpacing: ".05em" }}>{g.group}</span>
+            <span style={{ fontSize: 11, color: "var(--txt3)" }}>
+              {/* The one thing about this plan that people get wrong: the three
+                  design tracks run AT THE SAME TIME. Saying so on the group
+                  itself is cheaper than explaining it every time. */}
+              {g.concurrent ? `${g.blocks.filter((b) => /concurrent/i.test(b.runs)).length} tracks running at the same time` : "one after another"} · {g.steps} steps
+            </span>
+          </div>
+
+          {g.blocks.map((b) => {
+            const list = inBlock(b.id);
+            const isOpen = openBlocks.has(b.id);
+            return (
+              <div key={b.id} style={{ border: "1px solid var(--bd)", borderRadius: 9, marginBottom: 6, overflow: "hidden" }}>
+                <button onClick={() => toggle(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: "var(--s2)", border: "none", cursor: "pointer", textAlign: "left", color: "var(--txt)" }}>
+                  <ChevronDown size={13} style={{ transform: isOpen ? "none" : "rotate(-90deg)", transition: "transform .15s", color: "var(--txt3)", flexShrink: 0 }} />
+                  <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: "var(--acc)" }}>{b.id}</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{b.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--txt3)" }}>{list.length} step{list.length === 1 ? "" : "s"}{mine && list.length !== b.steps ? ` of ${b.steps}` : ""}</span>
+                  {/concurrent/i.test(b.runs) && <Pill color="var(--acc)">concurrent</Pill>}
+                  {/gated/i.test(b.runs) && <Pill color="var(--amber)">gated</Pill>}
+                  <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--txt3)", textAlign: "right" }}>{b.convergesWith}</span>
+                </button>
+
+                {isOpen && (list.length === 0 ? (
+                  <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--txt3)" }}>Nothing in this block is yours.</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 900 }}>
+                      <thead><tr>
+                        <th style={{ ...th, width: 44 }}>#</th>
+                        <th style={{ ...th, width: 168 }}>Category</th>
+                        <th style={th}>Step</th>
+                        <th style={{ ...th, width: 108 }}>Template ID</th>
+                        <th style={{ ...th, width: 168 }}>Responsibility</th>
+                        <th style={{ ...th, width: 132 }}>Who · when</th>
+                      </tr></thead>
+                      <tbody>
+                        {list.map((r) => (
+                          <tr key={r.no}>
+                            <td style={{ ...td, fontFamily: MONO, color: "var(--txt3)" }}>{r.no}</td>
+                            <td style={td}>{r.category}</td>
+                            <td style={{ ...td, color: "var(--txt)" }}>
+                              <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                                <span style={{ fontWeight: 600 }}>{r.title}</span>
+                                <ConvergeMark c={r.converge} />
+                              </div>
+                              {r.fileName && (
+                                <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--txt3)", marginTop: 2 }}>
+                                  {r.path || r.fileName}
+                                  {!r.path && r.folderUnknown && <span style={{ color: "var(--amber)" }}> · no folder is recorded for {r.folderUnknown}</span>}
+                                </div>
+                              )}
+                              {r.converge?.agree && <div style={{ fontSize: 10.5, color: "var(--amber)", marginTop: 2 }}>Must agree: {r.converge.agree}</div>}
+                            </td>
+                            <td style={{ ...td, fontFamily: MONO, fontSize: 10.5 }}>
+                              {r.templateLink
+                                ? <a href={r.templateLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateId}</a>
+                                : (r.templateId || <span style={{ color: "var(--txt3)" }}>—</span>)}
+                            </td>
+                            <td style={td}>{r.responsibility || <span style={{ color: "var(--txt3)" }}>—</span>}</td>
+                            <td style={{ ...td, fontSize: 10.5 }}>
+                              <div>{nameOf(r.assigneeId) || <span style={{ color: "var(--amber)" }}>unassigned</span>}</div>
+                              <div style={{ fontFamily: MONO, color: "var(--txt3)" }}>{fmtDate(r.start)} → {fmtDate(r.end)}</div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {CONVERGENCE.length > 0 && (
+        <div style={{ border: "1px solid var(--bd)", borderRadius: 9, padding: "11px 13px", marginTop: 4 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 7 }}>Where the tracks must agree</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {CONVERGENCE.map((c) => (
+              <div key={c.n} style={{ display: "flex", gap: 9, alignItems: "baseline", flexWrap: "wrap", fontSize: 11.5 }}>
+                <span style={{ fontFamily: MONO, color: "var(--txt3)", fontSize: 10.5 }}>{c.n}</span>
+                <span style={{ color: "var(--txt)", fontWeight: 600 }}>{c.name}</span>
+                <ConvergeMark c={c} />
+                <span style={{ color: "var(--txt2)" }}>{c.agree}</span>
+                {/* A track the sheet names but the workbook has no step for
+                    cannot be held to the barrier. Saying so is the only way it
+                    ever gets fixed — silence just makes the plan look sound. */}
+                {c.tracksWithoutAStep?.length > 0 && (
+                  <span style={{ color: "var(--amber)", fontSize: 10.5 }}>
+                    · {c.tracksWithoutAStep.join(" and ")} {c.tracksWithoutAStep.length > 1 ? "have" : "has"} no step here, so nothing holds {c.tracksWithoutAStep.length > 1 ? "them" : "it"} to this
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* One editable row in the Steps view. Module scope, or every keystroke would
    remount the inputs and lose focus. */
@@ -6149,7 +6313,7 @@ function StageDetail({ stage, tasks, users, onClose }) {
   );
 }
 
-function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, filing, myName }) {
+function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, filing, myName, meId }) {
   const [view, setView] = useState("steps");
   const [openId, setOpenId] = useState("");
   const [editing, setEditing] = useState(false);
@@ -6206,7 +6370,10 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
         {stages.length > 0 && <Pill color="var(--green)">{doneN}/{stages.length} stages done</Pill>}
         {activeStage && <Pill color={planColor(activeStage.status)}>Now: {activeStage.name}</Pill>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          {stages.length > 0 && !editing && (
+          {/* The process view does not need an AI-built plan to exist — it is
+              the company's own method with this project's dates in it — so the
+              switcher is here even before anybody has built a plan. */}
+          {!editing && (
             <div style={{ display: "flex", gap: 2, background: "var(--s2)", borderRadius: 8, padding: 2 }}>
               {PLAN_VIEWS.map(([k, label]) => (
                 <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
@@ -6229,7 +6396,9 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
         </div>
       </div>
 
-      {stages.length === 0 && !editing ? (
+      {view === "process" && !editing ? (
+        <ProcessPlan p={p} users={users} meId={meId} />
+      ) : stages.length === 0 && !editing ? (
         <Empty icon={Gauge} title={busy ? "Reading the project's files…" : "No plan yet"} sub="Build it from Drive and the AI reads this project's folders — the checklist, the reports, the board folders — and lays out the real stages, what runs alongside what, and where you are now. Or upload your own checklist and it will follow that instead. After that, tell the chat about a customer's feedback or a vendor delay and it moves the plan for you." />
       ) : editing ? (
         <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>

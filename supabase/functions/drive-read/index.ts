@@ -798,7 +798,10 @@ Deno.serve(async (req) => {
       let tabs: Record<string, string[][]>;
       try {
         tabs = await readProcessWorkbook(token, pick.f, [
-          "'Process Flow'!A1:P400", "'Template Actions'!A1:G300", "'Flow Map'!A1:F40",
+          // The Flow Map grew a second section below the block table — the
+          // cross-track convergence points — and a range that stopped at row
+          // 40 would have cut it off without anything saying so.
+          "'Process Flow'!A1:P400", "'Template Actions'!A1:G300", "'Flow Map'!A1:F80",
         ]);
       } catch (e) {
         return json({ error: `Found ${pick.f.name} but could not read it: ${e}` }, 502);
@@ -815,7 +818,11 @@ Deno.serve(async (req) => {
           no, category: cell(r, 1), step: cell(r, 2),
           entryTrigger: cell(r, 3), exitTrigger: cell(r, 4),
           entryQuestion: cell(r, 5), exitQuestion: cell(r, 6),
-          templateFile: cell(r, 7), templateId: cell(r, 8), template: cell(r, 9),
+          // 35 rows have the template id glued onto the front of the
+          // filename. It is already in its own column, and left in it makes
+          // every one of those steps name a file Drive will never match.
+          templateFile: cell(r, 7).replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
+          templateId: cell(r, 8), template: cell(r, 9),
           action: cell(r, 11), whatToDo: cell(r, 12),
           owner: cell(r, 13), responsibility: cell(r, 14), guidelines: cell(r, 15),
         });
@@ -835,16 +842,127 @@ Deno.serve(async (req) => {
         };
       }
 
+      /* ── the Flow Map, read whole ─────────────────────────────────────────
+         This tab names the major blocks and fixes the sequence they run in,
+         and underneath the block table it names the points where the three
+         parallel design tracks have to stop and agree with each other.
+
+         Sections are found by their own headers rather than by row number, so
+         a row inserted in Drive cannot silently shift what gets read — and
+         every non-empty row that no section claims comes back in `unread`
+         instead of being dropped. */
       const blocks = [];
-      for (const r of (tabs["Flow Map"] ?? []).slice(3)) {
-        if (!cell(r, 0) || cell(r, 0) === "TOTAL") continue;
-        blocks.push({ block: cell(r, 0), category: cell(r, 1), steps: Number(cell(r, 3)) || 0,
-                      runs: cell(r, 4), convergesWith: cell(r, 5) });
+      const convergence = [];
+      const unread: string[] = [];
+      {
+        const fmRows = tabs["Flow Map"] ?? [];
+        let section = "";
+        for (let i = 0; i < fmRows.length; i++) {
+          const r = fmRows[i] ?? [];
+          const c = r.map((x) => String(x ?? "").replace(/\s+/g, " ").trim());
+          if (!c.some(Boolean)) continue;
+          if (c[0] === "Block" && /categor/i.test(c[1] || "")) { section = "blocks"; continue; }
+          if (/convergence step/i.test(c[1] || "")) { section = "convergence"; continue; }
+          if (/^cross-track convergence/i.test(c[0] || "")) { section = ""; continue; }
+          if (i === 0 && /flow structure/i.test(c[0] || "")) continue;
+
+          if (section === "blocks") {
+            if (/^TOTAL$/i.test(c[0]) || /^TOTAL$/i.test(c[2])) { section = ""; continue; }
+            if (!c[0] || !c[1]) { unread.push(`row ${i + 1}: ${c.filter(Boolean).join(" ").slice(0, 70)}`); continue; }
+            const group = (c[0].match(/^([A-Z])\b/) || [])[1] || "X";
+            const nth = blocks.filter((b) => b.group === group).length + 1;
+            const name = (c[1].replace(/^\d+\s*·\s*/, "") || c[1]).trim();
+            blocks.push({
+              seq: blocks.length + 1, id: `${group}${nth}`, group,
+              kind: c[0].replace(/^[A-Z]\s*[—–-]\s*/, "").trim() || "Serial",
+              name, label: `${group}${nth} · ${name}`,
+              block: c[0], category: c[1], sourceRows: c[2] || "",
+              steps: Number(c[3]) || 0, runs: c[4] || "", convergesWith: c[5] || "",
+            });
+            continue;
+          }
+          if (section === "convergence") {
+            if (!c[1]) { unread.push(`row ${i + 1}: ${c.filter(Boolean).join(" ").slice(0, 70)}`); continue; }
+            convergence.push({
+              n: Number(c[0]) || convergence.length + 1,
+              name: c[1].replace(/\s*\(row\s*\d+\)\s*$/i, "").trim(),
+              tracks: c[2] || "", agree: c[3] || "", merge: /merge/i.test(c[2] || ""), steps: [],
+            });
+            continue;
+          }
+          if (c.filter(Boolean).length === 1 && c[0] && c[0].length > 30) continue;
+          unread.push(`row ${i + 1}: ${c.filter(Boolean).join(" ").slice(0, 70)}`);
+        }
+        // A block whose category carries a qualifier the Process Flow tab does
+        // not use — "3 · Test (per track)" against "3 · Test" — is the same
+        // category drawn twice, not a missing one.
+        const known = new Set(steps.map((s) => s.category));
+        for (const b of blocks) {
+          if (known.has(b.category)) continue;
+          const stem = b.category.replace(/\s*\([^)]*\)\s*$/, "");
+          if (known.has(stem)) b.category = stem;
+        }
       }
+
+      /* ── the template register ────────────────────────────────────────────
+         A separate workbook, and the only place that knows where a template's
+         filled-in copy actually goes, what it should be called and what good
+         looks like. It also defines templates the master workbook uses but
+         never declares, so without it those steps have no folder at all.
+
+         Best effort by design: if it cannot be found the process map is still
+         worth having, and the response says which one you got.               */
+      let templateIndex: { name: string; path: string; count: number } | null = null;
+      try {
+        const idxFound = await searchUnder(token, ROOT_CHAIN[0], String(body.templateIndex || "TemplateIndex"), 10);
+        const idxRanked = (await inParallel(idxFound, 4, async (f: GFile) => {
+          const path = (f as GFile & { _path?: string })._path || await folderPath(token, f).catch(() => "");
+          return { f, path, archived: /\/(99-)?archive|\/old\b|\/backup/i.test(path) };
+        }))
+          .filter((x) => !x.archived && (/\.xlsx?$/i.test(x.f.name) || x.f.mimeType === SHEET_MIME))
+          .sort((a, b) => String(b.f.modifiedTime || "").localeCompare(String(a.f.modifiedTime || "")));
+        if (idxRanked.length) {
+          const ip = idxRanked[0];
+          const itabs = await readProcessWorkbook(token, ip.f, ["'Index'!A1:R400"]);
+          let n = 0;
+          for (const r of itabs["Index"] ?? []) {
+            const id = cell(r, 0);
+            if (!/^EB-T-/.test(id)) continue;
+            const instance = cell(r, 9);
+            /* A file is not a folder, and a few rows put the filename in this
+               column. The library column has the folder in those cases, one
+               segment deeper because it is written from the top of the project
+               rather than from inside it — so that root comes off. */
+            const library = cell(r, 8).replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
+            const folder = /\.[a-z0-9]{2,5}$/i.test(instance) ? library : instance;
+            const existing = (templates[id] ?? {}) as Record<string, unknown>;
+            templates[id] = {
+              ...existing,
+              id,
+              name: (existing.name as string) || cell(r, 1),
+              // The index carries the real Drive folder names where the master
+              // workbook uses shorthand stems, so it wins on the folder.
+              folder: folder || (existing.folder as string) || "",
+              steps: (existing.steps as number[]) || [],
+              actions: (existing.actions as string[]) || [],
+              format: cell(r, 3), kind: cell(r, 4),
+              description: cell(r, 5), whatGood: cell(r, 6), serves: cell(r, 7),
+              library: cell(r, 8), instanceName: cell(r, 10), stage: cell(r, 11),
+              owner: cell(r, 14), filledBy: cell(r, 15), auditRow: cell(r, 16), version: cell(r, 17),
+            };
+            n++;
+          }
+          if (n) templateIndex = { name: ip.f.name, path: ip.path, count: n };
+        }
+      } catch { /* the master workbook alone is still a usable process map */ }
 
       return json({
         ok: true,
-        steps, templates, blocks,
+        steps, templates, blocks, convergence,
+        // Rows on the Flow Map that no section claimed. Empty is the normal
+        // answer; anything in here is a row somebody added that nothing reads.
+        unread,
+        templateIndex,
         // Provenance, so nobody has to guess whether the plan reflects the
         // current method — and a link that opens the file to edit it.
         file: {
