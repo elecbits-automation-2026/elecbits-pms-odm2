@@ -914,7 +914,17 @@ Deno.serve(async (req) => {
          worth having, and the response says which one you got.               */
       let templateIndex: { name: string; path: string; count: number } | null = null;
       try {
-        const idxFound = await searchUnder(token, ROOT_CHAIN[0], String(body.templateIndex || "TemplateIndex"), 10);
+        /* Drive's `name contains` is literal, so "TemplateIndex" does not find
+           a file somebody saved as "Template Index". Both spellings are tried
+           rather than making the whole register depend on a space. */
+        const wanted = body.templateIndex ? [String(body.templateIndex)] : ["TemplateIndex", "Template Index"];
+        const idxFound: GFile[] = [];
+        for (const w of wanted) {
+          for (const f of await searchUnder(token, ROOT_CHAIN[0], w, 10)) {
+            if (!idxFound.some((x) => x.id === f.id)) idxFound.push(f);
+          }
+          if (idxFound.length) break;
+        }
         const idxRanked = (await inParallel(idxFound, 4, async (f: GFile) => {
           const path = (f as GFile & { _path?: string })._path || await folderPath(token, f).catch(() => "");
           return { f, path, archived: /\/(99-)?archive|\/old\b|\/backup/i.test(path) };
