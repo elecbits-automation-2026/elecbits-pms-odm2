@@ -33,7 +33,7 @@ import {
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
-import { matchStep, fileNameFor, folderFor, pathFor, waveOf } from "./lib/processMap.js";
+import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -4541,6 +4541,11 @@ function WorkWindow({ t, onClose, onComplete }) {
      sure — showing the wrong step's file and Drive path would be worse than
      showing the generic sitemap. */
   const step = useMemo(() => matchStep(t), [t.id, t.title, t.stepNo]);
+  /* Most tasks are typed in somebody's own words — "Complete EVSO testing" is
+     not the name of any step — so the words alone will never reach the method
+     for all of them. Choosing the step once sticks to the task, and from then
+     on it opens with its guidance, its file and its path. */
+  const pickStep = (no) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, stepNo: no } : x)));
   const bar = memory.find((m) => m.type === "instruction");
   const save = (silent) => { setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, work: w, stepsDone: checks } : x))); if (!silent) { toast("Progress saved", "green"); onClose(); } };
   return (
@@ -4563,13 +4568,17 @@ function WorkWindow({ t, onClose, onComplete }) {
             </div>
           ) : <div style={{ color: "var(--txt2)", marginBottom: 10 }}>No sub-steps written — the title is the scope.</div>}
           <ConditionRail conditions={t.conditions} />
-          {step ? <StepGuidance step={step} task={t} onUse={(name, path) => setW((v) => ({ ...v, fileName: v.fileName || name, fileLocation: v.fileLocation || path }))} /> : (
+          {step ? (
+            <StepGuidance step={step} task={t} onPick={pickStep}
+                          onUse={(name, path) => setW((v) => ({ ...v, fileName: v.fileName || name, fileLocation: v.fileLocation || path }))} />
+          ) : (<>
+            <StepPicker task={t} onPick={pickStep} />
             <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
               <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>Where things live</div>
               {t.projectId && <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", marginBottom: 5 }}>{pmPath(t.projectId)} → Checklist.xlsx</div>}
               {sitemaps.map((m) => <div key={m.id} style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", whiteSpace: "pre-wrap", marginBottom: 5 }}>{m.content.split("\n").slice(0, 2).join("\n")}</div>)}
             </div>
-          )}
+          </>)}
           {bar && <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--soft)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)" }}><b style={{ color: "var(--acc)" }}>{bar.title}:</b> {bar.content}</div>}
           {p && <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--txt2)" }}>Deadline {fmtDate(p.deadline)} · <Countdown task={t} now={now} /></div>}
         </div>
@@ -4589,6 +4598,55 @@ function WorkWindow({ t, onClose, onComplete }) {
   );
 }
 
+/* Pick the step by hand. The words in a task title will never reach the method
+   for every task — "Complete EVSO testing" names a project, not a step — and
+   the alternative to choosing is the generic sitemap, which is what everybody
+   was already ignoring. Searching by name or by number, grouped so the
+   category is visible, because step 87 means nothing on its own. */
+function StepPicker({ task, onPick }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const hits = useMemo(() => {
+    const n = q.trim().toLowerCase();
+    if (!n) return [];
+    const num = Number(n);
+    if (Number.isFinite(num) && num > 0) return STEPS.filter((s) => s.no === num);
+    return STEPS.filter((s) => s.step.toLowerCase().includes(n) || s.category.toLowerCase().includes(n)).slice(0, 25);
+  }, [q]);
+
+  return (
+    <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)" }}>
+          Which step of the process is this?
+        </span>
+        <Btn kind="ghost" style={{ marginLeft: "auto", padding: "3px 8px", fontSize: 11.5 }}
+             onClick={() => setOpen((v) => !v)}>{open ? "Close" : "Find it"}</Btn>
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--txt3)", marginTop: 4 }}>
+        Link it once and this task opens with its guidance, its file and its Drive path.
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <input className="inp" autoFocus placeholder="gerber review · milestone · 87"
+                 value={q} onChange={(e) => setQ(e.target.value)} style={{ fontSize: 12 }} />
+          <div style={{ maxHeight: 200, overflowY: "auto", marginTop: 7, display: "flex", flexDirection: "column", gap: 3 }}>
+            {hits.map((s) => (
+              <div key={s.no} onClick={() => { onPick(s.no); setOpen(false); }}
+                   style={{ cursor: "pointer", padding: "5px 7px", borderRadius: 7, border: "1px solid var(--bdr)", background: "var(--s1)" }}>
+                <div style={{ fontSize: 12 }}><span style={{ fontFamily: MONO, color: "var(--txt3)" }}>{s.no}</span> · {s.step}</div>
+                <div style={{ fontSize: 10.5, color: "var(--txt3)" }}>{s.category} · {s.template}</div>
+              </div>
+            ))}
+            {q.trim() && !hits.length && <div style={{ fontSize: 11.5, color: "var(--txt2)" }}>Nothing in the method matches that.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── THE METHOD, IN THE WORK WINDOW ──────────────────────────────────────────
    When a task is a step of the process, this is what makes it doable without
    opening Drive first: the exact file it writes to and where that file sits,
@@ -4598,7 +4656,7 @@ function WorkWindow({ t, onClose, onComplete }) {
    The path and file name are offered rather than imposed — one click fills the
    evidence fields, because the commonest reason a closure has no artefact
    recorded is that typing a 90-character Drive path by hand is miserable. */
-function StepGuidance({ step, task, onUse }) {
+function StepGuidance({ step, task, onUse, onPick }) {
   const [file, setFile] = useState(null);
   const [looking, setLooking] = useState(false);
   const wave = waveOf(step.no);
@@ -4623,6 +4681,12 @@ function StepGuidance({ step, task, onUse }) {
         <Pill color="var(--purple)">Step {step.no}</Pill>
         {wave && <Pill color="var(--txt2)">{wave.id}</Pill>}
         <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{step.category}</span>
+        {/* Matched from the words, so it can be wrong — say so and make it
+            one click to correct rather than something to live with. */}
+        {!task.stepNo && onPick && (
+          <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)", cursor: "pointer", textDecoration: "underline" }}
+                onClick={() => onPick(0)}>not this step?</span>
+        )}
       </div>
 
       <div style={{ fontSize: 12.5, marginBottom: 9 }}><b>{step.action}:</b> {step.whatToDo}</div>

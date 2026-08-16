@@ -516,6 +516,8 @@ export const stepsTouching = (templateId) => (TEMPLATES[templateId]?.steps || []
    than showing none — so a weak overlap returns nothing and the window falls
    back to what it always showed. */
 export function matchStep(task) {
+  // 0 is "the words got this wrong" — somebody said so, so never guess again.
+  if (task?.stepNo === 0) return null;
   if (task?.stepNo) return stepByNo(task.stepNo);
   const words = (s) => new Set(String(s || "").toLowerCase()
     .replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
