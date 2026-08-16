@@ -9,7 +9,7 @@ regenerate.
 
 ```bash
 node scripts/pdf-text.mjs docs/process/EbODM_Process_Flow_waves.pdf /tmp/flow.txt
-node scripts/build-process-map.mjs docs/process/EbODM_Master_Process_Flow_v5.xlsx /tmp/flow.txt
+node scripts/build-process-map.mjs docs/process/EbODM_Master_Process_Flow_v6.xlsx /tmp/flow.txt
 ```
 
 The build prints what it did and, more usefully, what it could not confirm:
@@ -23,11 +23,23 @@ waves: 147 · 220 steps placed · 219 names confirmed · 1 to check
 order of a step. One of the two documents is wrong; the build takes the
 diagram's order and says so rather than hiding it.
 
+The build also reports any template a step uses that the **Template Actions**
+tab does not define:
+
+```
+! 1 template(s) used by steps but MISSING from the Template Actions tab:
+    EB-T-161 — used by step(s) 7, 17, 18, 19: [ProjectID]_LLD-Developer_v1.0
+```
+
+Those steps have no folder, so nothing can say where their file belongs. The
+app admits that rather than inventing a path — a confidently wrong Drive path
+gets obeyed. Fix it by adding a row for the id to the Template Actions tab.
+
 ## What each one carries
 
 | File | What only this one knows |
 |---|---|
-| `EbODM_Master_Process_Flow_v5.xlsx` | What each of the 305 steps IS — entry and exit triggers, the gate questions, the template it writes to, the responsible function, and how to actually do it |
+| `EbODM_Master_Process_Flow_v6.xlsx` | What each of the 308 steps IS — entry and exit triggers, the gate questions, the template it writes to, the responsible function, and how to actually do it |
 | `EbODM_Process_Flow_waves.pdf` | What waits on what. Steps grouped into waves (P01, H07, F14 …) with fixed predecessors. Without this a plan can only spread steps evenly and pretend that is a schedule |
 | `Elecbits_Project_Management_Sitemap_v2_1.pdf` | Where PM-side artefacts live, and the five folders the 305-step process has no home for today |
 | `Elecbits_PCB_ID_Sitemap_v2_1.pdf` | Where engineering artefacts live, the Rev-0…N revision model, and the G0–G3 DFx gates |

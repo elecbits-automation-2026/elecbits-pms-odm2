@@ -323,5 +323,17 @@ console.log(`${(bytes / 1024).toFixed(0)} KB → ${OUT}`);
 for (const c of categories) {
   console.log(`  ${String(c.count).padStart(3)}  ${c.name}${c.parallel ? "  (concurrent)" : ""}${c.gated ? "  (gated)" : ""}`);
 }
-const noTemplate = steps.filter((s) => !templates[s.templateId]).length;
-if (noTemplate) console.log(`  ! ${noTemplate} step(s) name a template that is not in the library`);
+/* A step whose template is not in the Template Actions tab has no folder, so
+   nothing can say where its file belongs. That is a gap in the workbook, not
+   in the code, and it has to be shouted about rather than papered over — a
+   confidently wrong Drive path is worse than an admitted blank. */
+const orphanTemplates = [...new Set(steps.filter((s) => !templates[s.templateId]).map((s) => s.templateId))];
+if (orphanTemplates.length) {
+  console.log(`\n  ! ${orphanTemplates.length} template(s) used by steps but MISSING from the Template Actions tab:`);
+  for (const id of orphanTemplates) {
+    const using = steps.filter((s) => s.templateId === id);
+    console.log(`      ${id} — used by step(s) ${using.map((s) => s.no).join(", ")}: ${using[0].template}`);
+    console.log(`      no folder is known for it, so those steps cannot say where their file goes.`);
+  }
+  console.log(`      Fix in Drive: add a row per id to the Template Actions tab with its folder.`);
+}

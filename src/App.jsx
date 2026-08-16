@@ -33,7 +33,7 @@ import {
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
-import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS } from "./lib/processMap.js";
+import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -4784,7 +4784,16 @@ function StepGuidance({ step, task, onUse, onPick }) {
         The file this step writes to
       </div>
       <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", wordBreak: "break-all", marginBottom: 3 }}>{name}</div>
-      <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginBottom: 7 }}>{path}</div>
+      {/* No folder means the workbook never said where this template lives.
+          Saying so is the only honest option — a made-up path would be obeyed. */}
+      {knowsWhereItGoes(step) ? (
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginBottom: 7 }}>{path}</div>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--amber)", marginBottom: 7, lineHeight: 1.5 }}>
+          The process sheet does not say which folder {step.templateId} lives in — add it to the
+          Template Actions tab and this will fill in.
+        </div>
+      )}
       <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 8 }}>{step.template} · {step.templateId}</div>
 
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>

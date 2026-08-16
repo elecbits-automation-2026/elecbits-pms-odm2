@@ -189,6 +189,12 @@ export const fileNameFor = (step, projectId) =>
 
 export const folderFor = (step) => TEMPLATES[step?.templateId]?.folder || "";
 
+/* Whether we actually know where this step's output belongs. A template the
+   workbook uses but never defines in its Template Actions tab has no folder,
+   and guessing one would put somebody's work in the wrong place with total
+   confidence. Callers show the gap instead. */
+export const knowsWhereItGoes = (step) => !!folderFor(step);
+
 /* The full path, given the project's own root folder (which the app already
    knows as pmPath(projectId)). Kept as one function so a path never gets
    assembled two different ways in two different screens. */
@@ -479,7 +485,10 @@ export function buildPlan(project, users = [], opts = {}) {
       templateId: s.templateId,
       fileName: fileNameFor(s, projectId),
       folder: folderFor(s),
-      path: pathFor(s, projectId, opts.projectRoot || ""),
+      path: knowsWhereItGoes(s) ? pathFor(s, projectId, opts.projectRoot || "") : "",
+      // Named so a screen can say WHY there is no path rather than showing a
+      // blank and letting somebody assume the file has no home.
+      folderUnknown: knowsWhereItGoes(s) ? "" : (s.templateId || "the template"),
       entryTrigger: s.entryTrigger,
       exitTrigger: s.exitTrigger,
       entryQuestion: s.entryQuestion,
