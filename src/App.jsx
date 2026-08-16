@@ -2481,7 +2481,7 @@ const PROJ_TABS = [
   ["plan", "Plan", ListChecks, "plan"],
   ["tasks", "To-dos", CheckCircle2, "tasks"],
   ["mom", "Brainstorming", Lightbulb, "mom"],
-  ["files", "Files & details", FileText, ""],
+  ["files", "Report", FileText, ""],
   ["email", "Email", Send, ""],
   ["chat", "Ask the AI", Bot, ""],
 ];
@@ -2496,9 +2496,11 @@ const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, lab
 /* One open to-do on the project page. Given the plan's stages it also carries
    the control to move itself to a different one — the AI's filing is a first
    pass, and the person looking at it always gets the last word. */
-function TodoCard({ t, users, stages, onMove, nowMs }) {
+function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
   const { Ic, label, color } = todoMeta(t, nowMs);
   const u = users.find((x) => x.id === t.assigneeId);
+  const [armDel, setArmDel] = useState(false);
+  useEffect(() => { if (!armDel) return; const t2 = setTimeout(() => setArmDel(false), 4000); return () => clearTimeout(t2); }, [armDel]);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)" }}>
       <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
@@ -2521,6 +2523,12 @@ function TodoCard({ t, users, stages, onMove, nowMs }) {
         </select>
       )}
       <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+      {onDelete && (armDel ? (
+        <Btn small kind="danger" icon={Trash2} onClick={() => { setArmDel(false); onDelete(); }}>Sure — delete</Btn>
+      ) : (
+        <button onClick={() => setArmDel(true)} title="Delete this to-do"
+          style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3, flexShrink: 0 }}><Trash2 size={14} /></button>
+      ))}
     </div>
   );
 }
@@ -2553,6 +2561,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [momWho, setMomWho] = useState("");
   const [momBusy, setMomBusy] = useState(false);
   const [filing, setFiling] = useState(false);
+  const [armClear, setArmClear] = useState(false);
+  useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
   const [closedStages, setClosedStages] = useState([]);
   const [tab, setTab] = useState("overview");
@@ -3026,6 +3036,18 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   {grouped && unfiled.length > 0 && <Btn small kind="ghost" icon={filing ? Loader2 : Sparkles} disabled={filing} onClick={() => fileTodos()}>{filing ? "Filing…" : `File the ${unfiled.length} loose`}</Btn>}
                 </span>
               )}
+              {tab === "tasks" && todos.length > 0 && (
+                armClear ? (
+                  <Btn small kind="danger" icon={Trash2} onClick={() => {
+                    setTasks((ts) => ts.filter((x) => !(x.projectId === p.projectId && x.status !== "done")));
+                    setArmClear(false);
+                    toast(`${todos.length} open to-dos deleted from ${p.projectId}`, "amber");
+                  }}>Sure — delete all {todos.length}</Btn>
+                ) : (
+                  <Btn small kind="ghost" icon={Trash2} title="Delete every open to-do on this project. Done ones stay — they are the record."
+                    onClick={() => setArmClear(true)}>Delete all</Btn>
+                )
+              )}
               {tab === "tasks" && (
                 <Btn small kind="ghost" icon={ListChecks}
                   title="One to-do per remaining step of the method — owner, date and step link included. Safe to press twice: steps that already have their to-do are left alone."
@@ -3071,7 +3093,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs} />)}
+                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
+                  onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                 {tab === "overview" && todos.length > 5 && (
                   <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
                     See all {todos.length} to-dos →
@@ -3151,38 +3174,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           {tab === "files" && <BoardsCard p={p} upd={upd} />}
           {tab === "files" && <ReportsCard p={p} upd={upd} users={users} />}
           {tab === "email" && <EmailTab p={p} upd={upd} users={users} />}
-          {tab === "files" && (
-          <Section>
-            <CardLabel right={<Pill color="var(--purple)"><Database size={11} /> PM + PCB folders</Pill>}>Drive intelligence</CardLabel>
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 4 }}>{pmPath(p.projectId)} → Checklist.xlsx · Reports/ · Client-Comms/</div>
-            {(p.linkedIds || []).length > 0 && <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", marginBottom: 10 }}>{p.linkedIds.map((x) => `${pcbPath(x)}`).join("   ")}</div>}
-            <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10, lineHeight: 1.5 }}>The OS reads these folders and tells you what's going on. Live Drive read is the integration seam; the analysis uses the folder map, the known status and the intelligence log below.</div>
-            <Btn small icon={intelBusy ? Loader2 : Sparkles} disabled={intelBusy} onClick={analyseDrive}>{intelBusy ? "Analysing…" : intel ? "Re-analyse how it's moving" : "Analyse how things are moving"}</Btn>
-            {intel && <div style={{ marginTop: 12, padding: 12, background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 10, fontSize: 12.5, whiteSpace: "pre-wrap", lineHeight: 1.6, color: "var(--txt)" }}>{intel}{p.driveAnalysis?.at && <div style={{ fontSize: 10, color: "var(--txt3)", marginTop: 8 }}>analysed {fmtDate(p.driveAnalysis.at.slice(0, 10))}</div>}</div>}
-            <div style={{ marginTop: 14, borderTop: "1px dashed var(--bdr2)", paddingTop: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>Manual intelligence</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <textarea className="inp" rows={2} style={{ flex: 1, resize: "vertical" }} value={noteVal} onChange={(e) => setNoteVal(e.target.value)} placeholder="Add what you know — the AI organises it into the project's status memory…" />
-                <Btn small title="Add intelligence" icon={noteBusy ? Loader2 : Send} disabled={noteBusy || !noteVal.trim()} onClick={addIntel} style={{ alignSelf: "flex-start", width: 40, padding: 0 }}> </Btn>
-              </div>
-              {(p.intelligence || []).length > 0 && (
-                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                  {(p.intelligence || []).map((e) => {
-                    const u = users.find((x) => x.id === e.by);
-                    return (
-                      <div key={e.id} style={{ padding: "9px 11px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 9 }}>
-                        <div style={{ fontSize: 12.5, color: "var(--txt)", lineHeight: 1.5 }}>{e.text}</div>
-                        <div style={{ fontSize: 10, color: "var(--txt3)", marginTop: 4 }}>{u?.name || "—"} · {fmtDate((e.at || "").slice(0, 10))}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </Section>
-
-          )}
-
           {tab === "chat" && (
           <Section>
             <CardLabel right={<Pill color="var(--acc)"><Bot size={11} /> knows tasks · status · Drive · memory</Pill>}>Project chat — ask the AI</CardLabel>
@@ -3221,25 +3212,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </div>
           </Section>
 
-          )}
-
-          {tab === "files" && (
-          <Section style={{ background: "var(--s2)" }}>
-            <CardLabel>Project internal sheet</CardLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "9px 16px", fontSize: 12.5 }}>
-              <KV k="Project ID" v={<span style={{ fontFamily: MONO }}>{p.projectId} <span style={{ color: "var(--txt3)", fontSize: 10 }}>({p.idMode})</span></span>} />
-              <KV k="Status" v={<span style={{ color: statColor(p.status), fontWeight: 600 }}>{p.status}</span>} />
-              <KV k="Client" v={p.clientName || "—"} />
-              <KV k="Client ID" v={<span style={{ fontFamily: MONO }}>{p.clientId || "—"}</span>} />
-              <KV k="Industry" v={p.industry || "—"} />
-              <KV k="Org size" v={p.orgSize || "—"} />
-              <KV k="Contact" v={p.contact?.name ? `${p.contact.name}${p.contact.designation ? " · " + p.contact.designation : ""}` : "—"} />
-              <KV k="Created" v={fmtDate((p.createdAt || "").slice(0, 10))} />
-              {p.startDate && <KV k="Start" v={fmtDate(p.startDate)} />}
-              <KV k="Drive" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{pmPath(p.projectId)}</span>} />
-              {(p.linkedIds || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><KV k="Linked IDs (GW / PCB)" v={<span style={{ fontFamily: MONO, fontSize: 11 }}>{p.linkedIds.join(", ")}</span>} /></div>}
-            </div>
-          </Section>
           )}
         </div>
 
@@ -4913,6 +4885,8 @@ function TasksModule() {
   /* The calendar bar: today's work, tomorrow's, a picked day — because "what
      do I do today" is the question this screen exists to answer. */
   const [dayF, setDayF] = useState("all");
+  const [armAll, setArmAll] = useState(false);
+  useEffect(() => { if (!armAll) return; const t = setTimeout(() => setArmAll(false), 5000); return () => clearTimeout(t); }, [armAll]);
   const [pickedDate, setPickedDate] = useState(todayStr());
   const filtered = visible
     .filter((t) => (personF === "all" || t.assigneeId === personF) && (projF === "all" || t.projectId === projF))
@@ -4959,6 +4933,16 @@ function TasksModule() {
           {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId}</option>)}
         </select>
         <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)" }}>{filtered.length} task(s){!isAdmin && " · your view"}</span>
+        {filtered.length > 0 && (armAll ? (
+          <Btn small kind="danger" icon={Trash2} onClick={() => {
+            const ids = new Set(filtered.map((t) => t.id));
+            setTasks((ts) => ts.filter((t) => !ids.has(t.id)));
+            setArmAll(false);
+          }}>Sure — delete these {filtered.length}</Btn>
+        ) : (
+          <Btn small kind="ghost" icon={Trash2} title="Delete every task currently shown — the filters above decide what that means"
+            onClick={() => setArmAll(true)}>Delete all shown</Btn>
+        ))}
         <div style={{ flexBasis: "100%", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <Calendar size={13} style={{ color: "var(--txt3)" }} />
           {DAY_BUCKETS.map(([k, label]) => (
@@ -4995,7 +4979,7 @@ function TasksModule() {
                   <span style={{ fontSize: 11.5, fontFamily: MONO, color: "var(--txt2)", whiteSpace: "nowrap" }}>{done}/{ts.length} done</span>
                 </div>
               </div>
-              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} />)}</div>
+              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
             </div>
           );
         })
@@ -5011,7 +4995,7 @@ function TasksModule() {
                 <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u?.title}</span>
                 <Pill color={open ? "var(--blue)" : "var(--green)"} style={{ marginLeft: "auto" }}>{open} open</Pill>
               </div>
-              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showProject onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} />)}</div>
+              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showProject onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
             </div>
           );
         })
@@ -5022,9 +5006,14 @@ function TasksModule() {
   );
 }
 
-function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplete }) {
+function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplete, onDelete }) {
   const { users, me } = useCtx();
   const [open, setOpen] = useState(false);
+  /* Deleting is deliberate: the first press arms, the second deletes, and
+     looking away disarms. A single-click delete next to Start is how a task
+     vanishes with nobody able to say when. */
+  const [armDel, setArmDel] = useState(false);
+  useEffect(() => { if (!armDel) return; const t2 = setTimeout(() => setArmDel(false), 4000); return () => clearTimeout(t2); }, [armDel]);
   const my = users.find((u) => u.id === me);
   const canAct = t.assigneeId === me || ["superadmin", "dept_head"].includes(my?.role) || t.createdBy === me;
   const u = users.find((x) => x.id === t.assigneeId);
@@ -5047,6 +5036,12 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
             <Btn small kind="ghost" icon={FileText} onClick={onWork}>Work window</Btn>
             <Btn small kind="green" icon={CheckCircle2} onClick={onComplete}>Complete Now</Btn>
           </>)}
+          {onDelete && canAct && (armDel ? (
+            <Btn small kind="danger" icon={Trash2} onClick={() => { setArmDel(false); onDelete(); }}>Sure — delete</Btn>
+          ) : (
+            <button onClick={() => setArmDel(true)} title="Delete this task"
+              style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3 }}><Trash2 size={14} /></button>
+          ))}
           <button onClick={() => setOpen(!open)} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer" }}><ChevronDown size={15} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .2s" }} /></button>
         </div>
       </div>
@@ -5060,6 +5055,149 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
           {t.escalated && <div style={{ marginTop: 6, color: "var(--red)" }}><b>Escalated to Shreya:</b> {t.escalated.note || "—"}</div>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ═══ THE WORK CHAT ═════════════════════════════════════════════════════════
+   The right half of the work window is ONE conversation, not a form. The
+   person doing the task talks to it the way they would talk to Claude —
+   questions, drafts, "review this", a photo of the board, the PDF the client
+   sent — and it answers with the step's own guidance in its head. What used
+   to be three fields (what was done, file, path) is read out of the
+   conversation when the task is closed, because the conversation IS the
+   record of the work. */
+const workChatPrompt = (p, t, step, history, msg, attachTexts) => `You are the Elecbits ODM work copilot, sitting inside the work window for one task. Help the person actually DO it — answer, draft, review what they attach, point at the exact file and folder. Be direct and concrete; short paragraphs, no headers.
+TASK: "${t.title}" on project ${t.projectId || "unlinked"}${p ? ` (${p.name || ""}, deadline ${p.deadline || "?"})` : ""}
+${step ? `THE METHOD'S STEP ${step.no}: ${step.step}
+DO: ${step.action}: ${step.whatToDo}
+GATE TO START: ${step.entryQuestion}
+GATE TO CLOSE: ${step.exitQuestion}
+THE FILE IT WRITES: ${fileNameFor(step, t.projectId)} in ${folderFor(step) || "(no folder recorded)"}
+GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}` : "No method step is linked — help from the task's own words."}
+CONVERSATION SO FAR:
+${history.slice(-14).map((m) => `${m.role === "user" ? "THEM" : "YOU"}: ${m.text}`).join("\n").slice(0, 6000) || "(none yet)"}
+${attachTexts ? `THEY ATTACHED (extracted content):\n"""${attachTexts.slice(0, 8000)}"""` : ""}
+THEM: ${msg}
+Reply as YOU — plain text, no JSON.`;
+
+function WorkChat({ t, p, step, onEvidence }) {
+  const { setTasks, toast } = useCtx();
+  const [msgs, setMsgs] = useState(t.workChat || []);
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState([]);   // attachments waiting on the next send
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+  const scrollRef = useRef(null);
+  useEffect(() => { scrollRef.current?.scrollTo({ top: 1e6 }); }, [msgs, busy]);
+  const persist = (list) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, workChat: list.slice(-60) } : x)));
+
+  const attach = async (f) => {
+    try {
+      if (/^image\//.test(f.type)) {
+        const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(f); });
+        setPending((a) => [...a, { name: f.name, kind: "image", media_type: f.type, data: b64 }]);
+      } else if (/\.pdf$/i.test(f.name)) {
+        setPending((a) => [...a, { name: f.name, kind: "text", text: "" , loading: true }]);
+        const text = await pdfToText(f);
+        setPending((a) => a.map((x) => (x.name === f.name ? { ...x, text, loading: false } : x)));
+      } else if (/\.(xlsx|xls|csv|tsv)$/i.test(f.name)) {
+        const sheet = await sheetToText(f);
+        setPending((a) => [...a, { name: f.name, kind: "text", text: sheet }]);
+      } else if (/\.(txt|md|eml|json|log)$/i.test(f.name)) {
+        const plain = (await f.text()).slice(0, 20000);
+        setPending((a) => [...a, { name: f.name, kind: "text", text: plain }]);
+      } else {
+        setPending((a) => [...a, { name: f.name, kind: "ref" }]);
+      }
+    } catch (e) { toast(`Couldn't read ${f.name}: ${e?.message || e}`, "amber"); }
+  };
+
+  const send = async () => {
+    const text = draft.trim();
+    if ((!text && !pending.length) || busy) return;
+    const mine = { role: "user", text: text || `(attached ${pending.map((x) => x.name).join(", ")})`,
+                   at: new Date().toISOString(), files: pending.map((x) => x.name) };
+    const base = [...msgs, mine];
+    setMsgs(base); persist(base); setDraft("");
+    const atts = pending; setPending([]);
+    setBusy(true);
+    try {
+      const images = atts.filter((x) => x.kind === "image")
+        .map((x) => ({ type: "image", source: { type: "base64", media_type: x.media_type, data: x.data } }));
+      const attachTexts = atts.filter((x) => x.kind === "text" && x.text)
+        .map((x) => `--- ${x.name} ---\n${x.text}`).join("\n\n");
+      const reply = await claude(workChatPrompt(p, t, step, msgs, mine.text, attachTexts),
+                                 { json: false, maxTokens: 1800, images });
+      const done = [...base, { role: "assistant", text: String(reply || "").trim() || "…", at: new Date().toISOString() }];
+      setMsgs(done); persist(done);
+    } catch (e) {
+      const done = [...base, { role: "assistant", text: `I couldn't reach the AI just now (${e?.message || e}). Your message is saved — try again in a moment.`, at: new Date().toISOString() }];
+      setMsgs(done); persist(done);
+    } finally { setBusy(false); }
+  };
+
+  // The evidence the closing gate reads, distilled from the conversation.
+  useEffect(() => {
+    const userSaid = msgs.filter((m) => m.role === "user").map((m) => m.text).join("\n");
+    const fileGuess = (userSaid.match(/[\w][\w .-]*\.(?:pdf|docx|xlsx|csv|zip|step|stl|md|txt|png|jpg)/gi) || []).pop()
+      || (step ? fileNameFor(step, t.projectId) : "");
+    onEvidence({
+      whatDone: userSaid.slice(-2000),
+      fileName: fileGuess,
+      fileLocation: step && knowsWhereItGoes(step) ? pathFor(step, t.projectId, pmPath(t.projectId)) : (t.projectId ? `${pmPath(t.projectId)}` : ""),
+      attach: msgs.flatMap((m) => m.files || []).pop() || "",
+    });
+  }, [msgs]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 420, maxHeight: 560 }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, paddingRight: 4 }}>
+        {msgs.length === 0 && !busy && (
+          <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.7, padding: "14px 6px" }}>
+            This chat does the task with you. Ask how to start, paste what you have, drop in a photo of the board or the PDF the client sent —
+            it answers with this step's own guidance, gates and file in mind. When the work is done, say so and press <b>Complete Now</b>:
+            the closing gate reads this conversation as your evidence.
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%",
+            background: m.role === "user" ? "var(--acc)" : "var(--s2)",
+            color: m.role === "user" ? "#fff" : "var(--txt)",
+            border: m.role === "user" ? "none" : "1px solid var(--bdr)",
+            borderRadius: 12, padding: "8px 12px", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+            {m.text}
+            {(m.files || []).length > 0 && (
+              <div style={{ marginTop: 4, display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {m.files.map((f, j) => <span key={j} style={{ fontSize: 10, fontFamily: MONO, padding: "1px 7px", borderRadius: 5, background: "rgba(127,127,127,.18)" }}>{f}</span>)}
+              </div>
+            )}
+          </div>
+        ))}
+        {busy && <div style={{ alignSelf: "flex-start", display: "flex", gap: 7, alignItems: "center", color: "var(--txt3)", fontSize: 12 }}><Loader2 className="spin" size={13} /> thinking…</div>}
+      </div>
+      {pending.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "7px 0 0" }}>
+          {pending.map((a, i) => (
+            <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontFamily: MONO, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--bdr)", background: "var(--s2)" }}>
+              {a.loading ? <Loader2 className="spin" size={11} /> : <Paperclip size={11} />}{a.name}
+              <button onClick={() => setPending((x) => x.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt3)", display: "flex" }}><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 7, alignItems: "flex-end", paddingTop: 9, borderTop: "1px solid var(--bdr)", marginTop: 9 }}>
+        <input ref={fileRef} type="file" multiple style={{ display: "none" }}
+               onChange={(e) => { [...(e.target.files || [])].forEach(attach); e.target.value = ""; }} />
+        <button title="Attach files or pictures" onClick={() => fileRef.current?.click()}
+                style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 8, cursor: "pointer", color: "var(--txt2)", padding: 8, display: "flex" }}><Paperclip size={15} /></button>
+        <textarea className="inp" rows={draft.split("\n").length > 2 ? 3 : 1}
+          style={{ flex: 1, resize: "none", lineHeight: 1.5 }}
+          placeholder="Ask, paste, or drop a file — this chat does the task with you"
+          value={draft} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+        <Btn small kind="primary" icon={busy ? Loader2 : Send} disabled={busy || (!draft.trim() && !pending.length)} onClick={send}>Send</Btn>
+      </div>
     </div>
   );
 }
@@ -5083,7 +5221,7 @@ function WorkWindow({ t, onClose, onComplete }) {
   const bar = memory.find((m) => m.type === "instruction");
   const save = (silent) => { setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, work: w, stepsDone: checks } : x))); if (!silent) { toast("Progress saved", "green"); onClose(); } };
   return (
-    <Modal title={t.title} sub={`${t.projectId || "unlinked"} · ${t.startTime || "…"}–${t.endTime || "…"} · full scope on the left, your evidence on the right`} onClose={onClose} width={900}
+    <Modal title={t.title} sub={`${t.projectId || "unlinked"} · ${t.startTime || "…"}–${t.endTime || "…"} · the scope and its link on the left · the chat on the right does the task with you`} onClose={onClose} width={900}
       footer={<>
         <Btn kind="ghost" onClick={() => save(false)}>Save progress</Btn>
         <Btn kind="green" icon={CheckCircle2} onClick={() => { save(true); onComplete(w); }}>Complete Now</Btn>
@@ -5116,16 +5254,11 @@ function WorkWindow({ t, onClose, onComplete }) {
           {bar && <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--soft)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)" }}><b style={{ color: "var(--acc)" }}>{bar.title}:</b> {bar.content}</div>}
           {p && <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--txt2)" }}>Deadline {fmtDate(p.deadline)} · <Countdown task={t} now={now} /></div>}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <Field label="What did you do?" req><textarea className="inp" rows={4} placeholder="I created / checked / fixed … — be concrete, the AI gate reads this" value={w.whatDone} onChange={(e) => setW({ ...w, whatDone: e.target.value })} /></Field>
-          <Field label="File produced (name)" req><input className="inp" style={{ fontFamily: MONO, fontSize: 12 }} placeholder="e.g. 2026-08-04_gerber-DRC-report.pdf" value={w.fileName} onChange={(e) => setW({ ...w, fileName: e.target.value })} /></Field>
-          <Field label="Stored at (Drive path)" req><input className="inp" style={{ fontFamily: MONO, fontSize: 12 }} value={w.fileLocation} onChange={(e) => setW({ ...w, fileLocation: e.target.value })} /></Field>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--txt2)", cursor: "pointer" }}>
-            <Upload size={14} />
-            <span>{w.attach ? <span style={{ fontFamily: MONO, fontSize: 12, color: "var(--txt)" }}>{w.attach}</span> : "Attach the file as reference (Drive upload is the integration seam)"}</span>
-            <input type="file" style={{ display: "none" }} onChange={(e) => { const f = e.target.files[0]; if (f) setW({ ...w, attach: f.name, fileName: w.fileName || f.name }); }} />
-          </label>
-          <div style={{ fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.6 }}>Closing runs the AI gate: it asks pointed questions, checks the file + path against the sitemap, and fails vague closures. Full clarity in, quality out.</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <WorkChat t={t} p={p} step={step} onEvidence={(ev) => setW((v) => ({ ...v, ...ev, fileName: v.fileName && !ev.fileName ? v.fileName : ev.fileName || v.fileName }))} />
+          <div style={{ fontSize: 11, color: "var(--txt3)", lineHeight: 1.6 }}>
+            Complete Now runs the AI gate — it reads this conversation as your evidence, checks the file and path against the method, and fails vague closures.
+          </div>
         </div>
       </div>
     </Modal>
