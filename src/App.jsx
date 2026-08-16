@@ -38,7 +38,7 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          sourceLine, servesOf, templateFor,
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
          loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
-         projectCopyOf, WAVES, stepByNo } from "./lib/processMap.js";
+         projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -592,7 +592,9 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
       body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, userJwt: await userJwt(), ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
     const data = await res.json().catch(() => ({}));
-    if (res.ok && data.ok) return true;
+    // Callers that need the file's identity ask for it; everyone else keeps
+    // the simple true-or-reason contract this function always had.
+    if (res.ok && data.ok) return opts.wantFile ? data : true;
     if (res.status === 413) return `${fileName} is too large for the upload to accept. Put it in the Drive folder directly.`;
     const why = data.error || data.message || `${res.status} ${res.statusText || ""}`.trim();
     return String(why).slice(0, 180);
@@ -1741,6 +1743,10 @@ QUESTION: """${String(q).slice(0, 600)}"""`;
 /* ═══ GLOBAL STYLES + UI ATOMS ═══════════════════════════════════════════ */
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+.waveCard{transition:border-color .15s ease,box-shadow .15s ease,background .15s ease;cursor:pointer}
+.waveCard:hover{border-color:var(--acc);box-shadow:0 3px 14px rgba(0,0,0,.10)}
+.waveSteps{overflow:hidden;animation:waveOpen .18s ease}
+@keyframes waveOpen{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body,#root{height:100%}
 .eb-root{min-height:100vh;background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s}
@@ -2476,6 +2482,7 @@ const PROJ_TABS = [
   ["tasks", "To-dos", CheckCircle2, "tasks"],
   ["mom", "Brainstorming", Lightbulb, "mom"],
   ["files", "Files & details", FileText, ""],
+  ["email", "Email", Send, ""],
   ["chat", "Ask the AI", Bot, ""],
 ];
 /* Is this to-do past its own clock? Module scope so both the project page and
@@ -3019,6 +3026,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   {grouped && unfiled.length > 0 && <Btn small kind="ghost" icon={filing ? Loader2 : Sparkles} disabled={filing} onClick={() => fileTodos()}>{filing ? "Filing…" : `File the ${unfiled.length} loose`}</Btn>}
                 </span>
               )}
+              {tab === "tasks" && (
+                <Btn small kind="ghost" icon={ListChecks}
+                  title="One to-do per remaining step of the method — owner, date and step link included. Safe to press twice: steps that already have their to-do are left alone."
+                  onClick={() => {
+                    const raised = raiseWholeProcess(p, users, tasks, my?.id);
+                    if (!raised.length) { toast("Every step of the process already has its to-do", "green"); return; }
+                    setTasks((ts) => [...ts, ...raised]);
+                    toast(`${raised.length} to-dos raised — the method to the end of the project`, "green");
+                  }}>Generate tasks till the end of the project</Btn>
+              )}
               {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
             {todos.length === 0 ? (
@@ -3131,6 +3148,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
+          {tab === "files" && <ReportsCard p={p} upd={upd} users={users} />}
+          {tab === "email" && <EmailTab p={p} upd={upd} users={users} />}
           {tab === "files" && (
           <Section>
             <CardLabel right={<Pill color="var(--purple)"><Database size={11} /> PM + PCB folders</Pill>}>Drive intelligence</CardLabel>
@@ -4485,6 +4504,352 @@ function NoteCard({ n }) {
 const STATUS_DOT = { pending: "var(--txt3)", "in-progress": "var(--blue)", blocked: "var(--amber)", done: "var(--green)" };
 const DEFAULT_QS = ["What exactly did you produce, and what is the file called?", "Where exactly is it stored — full Drive path?", "How did you verify it actually meets the task's scope?"];
 
+/* ═══ REPORTS ═══════════════════════════════════════════════════════════════
+   Somebody describes the report they need in their own words. "Check with AI"
+   reads the description against the template register and the project's own
+   files and says which existing sheets carry the answer — because most
+   reports are a template that already exists, filled in. When nothing fits,
+   it names the several files it would draw from and builds the report from
+   their data. The finished report is written into the project management
+   folder in Drive, never handed back as a download to lose. */
+const reportCheckPrompt = (p, desc) => `You are the Elecbits ODM reporting brain. Somebody on project ${p.projectId} (${p.name || ""}) needs a report and described it in their own words. Decide which existing files serve it.
+THE REPORT THEY WANT: """${desc.slice(0, 1200)}"""
+THE TEMPLATE LIBRARY (id · name · what it is · where the filled copy lives):
+${Object.values(TEMPLATES).map((t) => `${t.id} · ${t.name} · ${(t.description || "").slice(0, 90)} · ${t.folder}`).join("\n").slice(0, 9000)}
+Rules:
+- If one template IS this report, say so — the job is to fill or fetch that file, not to invent a new one.
+- If several files together carry the data, list them all with what each contributes.
+- If nothing fits, say fits:"none" and name the closest raw sources anyway.
+- targetFolder must be a folder path from the library above (the project-management side), never invented.
+Reply with JSON only: {"fits":"one|several|none","files":[{"id":"EB-T-…","name":"…","gives":"what this file contributes"}],"plan":"2-3 plain sentences on how the report gets built","targetFolder":"02-Project-Folder-R&D-PM/…/","reportName":"a short file name, no extension"}`;
+
+const reportBuildPrompt = (p, desc, advice, digest) => `You are the Elecbits ODM reporting brain. Write the report itself — the finished document, not a plan for one.
+PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "not set"}
+THE ASK: """${desc.slice(0, 1200)}"""
+THE FILES CHOSEN AND WHY: ${JSON.stringify(advice.files || []).slice(0, 1500)}
+WHAT DRIVE ACTUALLY HOLDS (folders, files, and text read from them):
+"""${String(digest || "Drive was quiet — write from the project facts above and say plainly which numbers are missing.").slice(0, 12000)}"""
+Rules:
+- Markdown, with a title, a dated header line, and sections. Numbers over adjectives.
+- Never invent a figure. A number you do not have is written as "not on file" — a confident wrong number in a client report is the worst outcome this system can produce.
+- End with a "Sources" section naming the exact files the data came from.
+Reply with JSON only: {"markdown":"the whole report"}`;
+
+/* ═══ EMAIL ═════════════════════════════════════════════════════════════════
+   The client's thread, read by the system. Hand it an email — pasted, or the
+   PDF/.eml/.txt straight from the mailbox — and it says where the thread
+   stands, what the next steps are, and WHICH of two things answers it: a task
+   for somebody (raised into the scrum with one click) or a report (handed to
+   the Reports box with the description pre-written). Both roads end in the
+   email being answerable.
+
+   Live inbox reading against the project's address needs the mail connector
+   on the server; until that lands, the address is recorded here and the
+   emails are handed over by hand — every other part of the loop is real. */
+const emailPrompt = (p, users, text) => `You are the Elecbits ODM email brain for project ${p.projectId} (${p.name || ""}, deadline ${p.deadline || "not set"}). An email from this project's thread is below. Read it the way a sharp PM would.
+TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
+THE EMAIL: """${String(text).slice(0, 9000)}"""
+Decide the ONE next move that answers this email:
+- kind:"task" when somebody has to DO something first (test, fix, order, confirm) — give it to the right team member.
+- kind:"report" when the answer IS information we hold — describe the report so the reporting system can build it.
+Reply with JSON only: {"from":"who wrote it","subject":"one line","summary":"2-3 sentences on where this thread stands","nextSteps":["…","…"],"action":{"kind":"task|report","title":"the task title OR the report headline","assigneeName":"a team member's name, for tasks","description":"for reports: what it must answer"},"replyDraft":"a 3-6 sentence reply we could send once the action is done"}`;
+
+function EmailTab({ p, upd, users }) {
+  const { tasks, setTasks, me, toast } = useCtx();
+  const [addr, setAddr] = useState(p.emailAddress || "");
+  const [text, setText] = useState("");
+  const [reading, setReading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const fileRef = useRef(null);
+
+  const saveAddr = () => { upd(() => ({ emailAddress: addr.trim() })); toast("Address recorded on the project", "green"); };
+
+  const readFile = async (f) => {
+    setReading(true);
+    try {
+      if (/\.pdf$/i.test(f.name)) setText(await pdfToText(f));
+      else setText((await f.text()).slice(0, 30000));
+      toast(`${f.name} read — now analyse it`, "green");
+    } catch (e) { toast(`Couldn't read ${f.name}: ${e?.message || e}`, "amber"); }
+    finally { setReading(false); }
+  };
+
+  const analyse = async () => {
+    if (busy || !text.trim()) return;
+    setBusy(true); setResult(null);
+    try {
+      const r = await claude(emailPrompt(p, users, text), { maxTokens: 2000 });
+      if (!r?.summary) { toast("The AI didn't answer — try again", "amber"); return; }
+      setResult(r);
+      const entry = { id: uid(), at: new Date().toISOString(), from: r.from || "", subject: r.subject || "",
+                      summary: r.summary, action: r.action || null, nextSteps: r.nextSteps || [] };
+      upd((cur) => ({ emails: [entry, ...(cur.emails || [])].slice(0, 50) }));
+    } catch (e) { toast(`Couldn't analyse: ${e?.message || e}`, "amber"); }
+    finally { setBusy(false); }
+  };
+
+  const doAction = () => {
+    const a = result?.action;
+    if (!a) return;
+    if (a.kind === "task") {
+      const who = users.find((u) => u.name === a.assigneeName) || users.find((u) => a.assigneeName && u.name.includes(a.assigneeName));
+      setTasks((ts) => [...ts, { id: uid(), projectId: p.projectId, title: a.title || "Follow up on the client email",
+        assigneeId: who?.id || "", date: todayStr(), status: "pending", createdAt: new Date().toISOString(), createdBy: me, origin: "email" }]);
+      toast(`Task raised${who ? ` for ${who.name}` : ""} — it's in the scrum now`, "green");
+    } else {
+      upd(() => ({ reportDraft: a.description || a.title || "" }));
+      toast("Handed to Reports in Files & details — the description is pre-written, press Check with AI there", "green");
+    }
+  };
+
+  return (
+    <Section>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Email</span>
+        {(p.emails || []).length > 0 && <Pill color="var(--acc)">{p.emails.length} analysed</Pill>}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <input className="inp" style={{ width: 260 }} placeholder="the thread's email address"
+               value={addr} onChange={(e) => setAddr(e.target.value)} />
+        <Btn small kind="ghost" onClick={saveAddr} disabled={!addr.trim()}>Save</Btn>
+        <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
+          Live inbox sync for this address needs the mail connector on the server — until then, hand the email over below and everything else works.
+        </span>
+      </div>
+
+      <textarea className="inp" rows={6} style={{ width: "100%", resize: "vertical", lineHeight: 1.5, fontSize: 12 }}
+        placeholder="Paste the email here — or attach it as PDF / .eml / .txt"
+        value={text} onChange={(e) => setText(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input ref={fileRef} type="file" accept=".pdf,.eml,.txt,.md" style={{ display: "none" }}
+               onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) readFile(f); }} />
+        <Btn small kind="ghost" icon={reading ? Loader2 : Paperclip} disabled={reading} onClick={() => fileRef.current?.click()}>
+          {reading ? "Reading…" : "Attach the email (PDF works)"}
+        </Btn>
+        <Btn small kind="primary" icon={busy ? Loader2 : Sparkles} disabled={busy || !text.trim()} onClick={analyse}>
+          {busy ? "Reading the thread…" : "What should we do?"}
+        </Btn>
+      </div>
+
+      {result && (
+        <div className="fade" style={{ marginTop: 12, border: "1px solid var(--bdr2)", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "var(--txt2)" }}><b style={{ color: "var(--txt)" }}>{result.subject}</b>{result.from ? ` · from ${result.from}` : ""}</div>
+          <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6 }}>{result.summary}</div>
+          {(result.nextSteps || []).length > 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--txt2)" }}>
+              <div style={{ fontWeight: 700, fontSize: 10.5, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 3 }}>Next steps</div>
+              {result.nextSteps.map((n, i) => <div key={i} style={{ lineHeight: 1.6 }}>· {n}</div>)}
+            </div>
+          )}
+          {result.action && (
+            <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", borderRadius: 8, background: "color-mix(in srgb, var(--acc) 7%, transparent)" }}>
+              <Pill color={result.action.kind === "task" ? "var(--blue)" : "var(--purple)"}>{result.action.kind === "task" ? "Needs a task" : "Needs a report"}</Pill>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{result.action.title}</span>
+              {result.action.kind === "task" && result.action.assigneeName && <span style={{ fontSize: 11, color: "var(--txt3)" }}>→ {result.action.assigneeName}</span>}
+              <Btn small kind="primary" onClick={doAction}>{result.action.kind === "task" ? "Raise the task" : "Prepare this report"}</Btn>
+            </div>
+          )}
+          {result.replyDraft && (
+            <div style={{ fontSize: 11.5, color: "var(--txt2)" }}>
+              <div style={{ fontWeight: 700, fontSize: 10.5, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 3 }}>Reply, once that's done</div>
+              <div style={{ lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{result.replyDraft}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(p.emails || []).length > 0 && (
+        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em" }}>The thread so far</div>
+          {(p.emails || []).slice(0, 8).map((e) => (
+            <div key={e.id} style={{ fontSize: 11.5, display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" }}>
+              <span style={{ color: "var(--txt3)", fontSize: 10.5, fontFamily: MONO }}>{fmtDate(e.at.slice(0, 10))}</span>
+              <span style={{ fontWeight: 600, color: "var(--txt)" }}>{e.subject || "(no subject)"}</span>
+              {e.action && <Pill color={e.action.kind === "task" ? "var(--blue)" : "var(--purple)"}>{e.action.kind}</Pill>}
+              <span style={{ color: "var(--txt2)" }}>{String(e.summary || "").slice(0, 110)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function ReportsCard({ p, upd, users }) {
+  const { memory, toast } = useCtx();
+  const [desc, setDesc] = useState(p.reportDraft || "");
+  const [checking, setChecking] = useState(false);
+  const [advice, setAdvice] = useState(null);
+  const [building, setBuilding] = useState(false);
+  const [built, setBuilt] = useState(null);
+  useEffect(() => { if (p.reportDraft) setDesc(p.reportDraft); }, [p.reportDraft]);
+
+  const check = async () => {
+    if (checking || !desc.trim()) return;
+    setChecking(true); setAdvice(null); setBuilt(null);
+    try {
+      const r = await claude(reportCheckPrompt(p, desc), { maxTokens: 1500 });
+      if (r?.files || r?.fits) setAdvice(r);
+      else toast("The AI didn't answer that — try again in a moment", "amber");
+    } catch (e) { toast(`Couldn't check: ${e?.message || e}`, "amber"); }
+    finally { setChecking(false); }
+  };
+
+  const generate = async () => {
+    if (building || !advice) return;
+    setBuilding(true);
+    try {
+      // read what the chosen files actually contain, then write from that
+      const search = (advice.files || []).map((f) => f.name).join(" ").slice(0, 200) || desc.slice(0, 120);
+      const { digest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: "pm", search });
+      const r = await claude(reportBuildPrompt(p, desc, advice, digest), { maxTokens: 6000 });
+      if (!r?.markdown) { toast("The AI returned no report — try again", "amber"); return; }
+      const name = `${p.projectId}_${(advice.reportName || "Report").replace(/[^\w-]+/g, "-")}_${todayStr()}.md`;
+      const folder = String(advice.targetFolder || "02-Project-Folder-R&D-PM/").replace(/^\/+/, "");
+      const w = await driveWriteFile(p.projectId, name, r.markdown, { folderPath: folder, scope: "pm", wantFile: true });
+      const entry = { id: uid(), at: new Date().toISOString(), name, folder,
+                      desc: desc.slice(0, 200), files: (advice.files || []).map((f) => f.name),
+                      link: w?.fileId ? `https://drive.google.com/file/d/${w.fileId}/view` : "",
+                      error: typeof w === "string" ? w : "" };
+      upd((cur) => ({ reports: [entry, ...(cur.reports || [])].slice(0, 50), reportDraft: "" }));
+      setBuilt(entry);
+      toast(entry.error ? `Report written, but Drive said: ${entry.error}` : `Report filed: ${folder}${name}`, entry.error ? "amber" : "green");
+    } catch (e) { toast(`Couldn't build it: ${e?.message || e}`, "amber"); }
+    finally { setBuilding(false); }
+  };
+
+  return (
+    <Section>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Reports</span>
+        {(p.reports || []).length > 0 && <Pill color="var(--acc)">{p.reports.length} filed</Pill>}
+      </div>
+      <textarea className="inp" rows={3} style={{ width: "100%", resize: "vertical", lineHeight: 1.5 }}
+        placeholder="Describe the report — who it is for and what it must answer. e.g. Client-facing progress report for the August review: schedule vs plan, test results so far, open risks."
+        value={desc} onChange={(e) => setDesc(e.target.value)} />
+      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <Btn small kind="primary" icon={checking ? Loader2 : Sparkles} disabled={checking || !desc.trim()} onClick={check}>
+          {checking ? "Reading the library…" : "Check with AI"}
+        </Btn>
+        <span style={{ fontSize: 11, color: "var(--txt3)" }}>It reads your words against the 178 templates and this project's files, then says what the report should be built from.</span>
+      </div>
+
+      {advice && (
+        <div className="fade" style={{ marginTop: 12, border: "1px solid var(--bdr2)", borderRadius: 10, padding: "11px 13px" }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: advice.fits === "none" ? "var(--amber)" : "var(--green)", marginBottom: 6 }}>
+            {advice.fits === "one" ? "One existing file IS this report" : advice.fits === "several" ? "Several files together carry this" : "Nothing fits exactly — it will be built from the nearest sources"}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 8 }}>
+            {(advice.files || []).map((f, i) => (
+              <div key={i} style={{ fontSize: 11.5, display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" }}>
+                <span style={{ fontFamily: MONO, fontSize: 10, color: "var(--txt3)" }}>{f.id}</span>
+                <span style={{ fontWeight: 600, color: "var(--txt)" }}>{f.name}</span>
+                <span style={{ color: "var(--txt2)" }}>{f.gives}</span>
+              </div>
+            ))}
+          </div>
+          {advice.plan && <div style={{ fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55, marginBottom: 8 }}>{advice.plan}</div>}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Btn small kind="primary" icon={building ? Loader2 : FileText} disabled={building} onClick={generate}>
+              {building ? "Reading the files and writing…" : "Generate the report"}
+            </Btn>
+            <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)" }}>→ {advice.targetFolder || "02-Project-Folder-R&D-PM/"}</span>
+          </div>
+        </div>
+      )}
+
+      {built && (
+        <div className="fade" style={{ marginTop: 10, fontSize: 11.5, color: built.error ? "var(--amber)" : "var(--txt2)" }}>
+          {built.error ? `Written locally but Drive said: ${built.error}` : (<>
+            Filed as <span style={{ fontFamily: MONO }}>{built.name}</span> in <span style={{ fontFamily: MONO }}>{built.folder}</span>
+            {built.link && <> · <a href={built.link} target="_blank" rel="noreferrer" style={{ color: "var(--acc)" }}>Open ↗</a></>}
+          </>)}
+        </div>
+      )}
+
+      {(p.reports || []).length > 0 && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 5 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em" }}>Filed so far</div>
+          {(p.reports || []).slice(0, 6).map((r) => (
+            <div key={r.id} style={{ fontSize: 11.5, display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" }}>
+              <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--acc)" }}>{r.name}</span>
+              <span style={{ color: "var(--txt3)", fontSize: 10.5 }}>{fmtDate(r.at.slice(0, 10))} · from {r.files.join(", ").slice(0, 80) || "project data"}</span>
+              {r.link && <a href={r.link} target="_blank" rel="noreferrer" style={{ fontSize: 10.5, color: "var(--acc)" }}>Open ↗</a>}
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/* Raise a to-do for every step of the method that does not have one yet —
+   "generate tasks till the end of the project", literally. The step's own
+   words, its owner from the plan, its scheduled date, and a hard stepNo link.
+   Never a duplicate: a step with its to-do already raised (on that board) is
+   left alone, so pressing it twice is safe. */
+function raiseWholeProcess(p, users, allTasks, meId) {
+  const rows = buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId), pcbRootFor: (b) => pcbPath(b) });
+  const { open, done } = tasksByStep(allTasks.filter((t) => t.projectId === p.projectId), boardsOf(p));
+  const hasOne = (r) => [...(open[r.no] || []), ...(done[r.no] || [])]
+    .some((t) => !r.board || !t._board || t._board === r.board);
+  const missing = rows.filter((r) => !hasOne(r));
+  const stamp = new Date().toISOString();
+  return missing.map((r) => ({
+    id: uid(), projectId: p.projectId, title: r.title, stepNo: r.no,
+    assigneeId: r.assigneeId || "", date: r.start || todayStr(),
+    status: "pending", createdAt: stamp, createdBy: meId || "", origin: "process",
+  }));
+}
+
+/* PDF → text, in the browser. Emails arrive as PDFs; nobody should have to
+   retype one to get the system's read on it. Lazy: the library only loads
+   the first time somebody actually hands over a PDF. */
+async function pdfToText(file) {
+  const pdfjs = await import("pdfjs-dist");
+  const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  let out = "";
+  for (let i = 1; i <= Math.min(doc.numPages, 30); i++) {
+    const page = await doc.getPage(i);
+    const tc = await page.getTextContent();
+    out += tc.items.map((x) => x.str).join(" ") + "\n";
+  }
+  return out.replace(/[ \t]+/g, " ").trim();
+}
+
+/* Tasks in the order the METHOD runs them, not the order somebody typed them.
+   A task that names a process step sorts at that step's number; a task the
+   words cannot place goes after the process, and inside a rank the date and
+   time decide. "Deliver the demo" before "Collect the customer LLD" was the
+   scrum being read as a diary instead of as a plan. */
+function processOrder(a, b) {
+  const at = matchStep(a)?.no ?? 10000;
+  const bt = matchStep(b)?.no ?? 10000;
+  return at - bt
+    || String(a.date || "9999").localeCompare(String(b.date || "9999"))
+    || String(a.startTime || "").localeCompare(String(b.startTime || ""));
+}
+
+/* Which day bucket a task's date falls in, for the calendar bar. */
+const DAY_BUCKETS = [["all", "All days"], ["overdue", "Overdue"], ["today", "Today"], ["tomorrow", "Tomorrow"], ["later", "Later"]];
+function inDayBucket(t, bucket, pickedDate) {
+  if (bucket === "all") return true;
+  const d = isoDay(t.date);
+  const today = todayStr();
+  const tomorrow = iso10(new Date(new Date(today).getTime() + 86400000));
+  if (bucket === "date") return d === pickedDate;
+  if (bucket === "overdue") return !!d && d < today && t.status !== "done";
+  if (bucket === "today") return d === today;
+  if (bucket === "tomorrow") return d === tomorrow;
+  if (bucket === "later") return !d || d > tomorrow;
+  return true;
+}
+const iso10 = (d) => new Date(d).toISOString().slice(0, 10);
+
 function TasksModule() {
   const { tasks, setTasks, projects, users, me, now } = useCtx();
   const my = users.find((u) => u.id === me);
@@ -4497,7 +4862,14 @@ function TasksModule() {
   const [projF, setProjF] = useState("all");
   const [workT, setWorkT] = useState(null);
   const [compT, setCompT] = useState(null);
-  const filtered = visible.filter((t) => (personF === "all" || t.assigneeId === personF) && (projF === "all" || t.projectId === projF));
+  /* The calendar bar: today's work, tomorrow's, a picked day — because "what
+     do I do today" is the question this screen exists to answer. */
+  const [dayF, setDayF] = useState("all");
+  const [pickedDate, setPickedDate] = useState(todayStr());
+  const filtered = visible
+    .filter((t) => (personF === "all" || t.assigneeId === personF) && (projF === "all" || t.projectId === projF))
+    .filter((t) => inDayBucket(t, dayF, pickedDate))
+    .sort(processOrder);
   const newProjects = projects.filter((p) => Date.now() - new Date(p.createdAt).getTime() < 7 * 86400000 && (isAdmin || (p.team || []).some((t) => t.userId === me)));
   const startTask = (t) => { setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, status: "in-progress", startedAt: x.startedAt || new Date().toISOString() } : x))); setWorkT({ ...t, status: "in-progress" }); };
 
@@ -4539,6 +4911,21 @@ function TasksModule() {
           {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId}</option>)}
         </select>
         <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)" }}>{filtered.length} task(s){!isAdmin && " · your view"}</span>
+        <div style={{ flexBasis: "100%", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <Calendar size={13} style={{ color: "var(--txt3)" }} />
+          {DAY_BUCKETS.map(([k, label]) => (
+            <button key={k} onClick={() => setDayF(k)}
+              style={{ padding: "4px 11px", borderRadius: 999, cursor: "pointer", fontSize: 11, fontWeight: 700,
+                       border: `1px solid ${dayF === k ? "var(--acc)" : "var(--bdr2)"}`,
+                       background: dayF === k ? "color-mix(in srgb, var(--acc) 10%, transparent)" : "var(--s1)",
+                       color: dayF === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
+          ))}
+          <input type="date" className="inp" style={{ width: 150, padding: "4px 8px", fontSize: 11.5 }}
+                 value={pickedDate}
+                 onChange={(e) => { setPickedDate(e.target.value); setDayF("date"); }}
+                 title="Tasks on one particular day" />
+          {dayF === "date" && <Pill color="var(--acc)">{fmtDate(pickedDate)}</Pill>}
+        </div>
       </div>
 
       {filtered.length === 0 ? (
@@ -6115,20 +6502,32 @@ const PLAN_VIEWS = [["process", "Process"], ["flow", "Flow"], ["gantt", "Timelin
    done, any of them open or in flight means going on, none raised means not
    started. Nothing here guesses from the calendar — a step past its date with
    nobody on it is exactly what red is for. */
-function tasksByStep(tasks = []) {
+function tasksByStep(tasks = [], boards = []) {
   const open = {}, done = {};
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   for (const t of tasks) {
     const st = matchStep(t);
     if (!st) continue;
-    ((t.status === "done" ? done : open)[st.no] ||= []).push(t);
+    /* Which board the task talks about, read from its own words. "GW-124
+       gerber review" moves GW-124 and only GW-124; a task naming no board
+       moves the step on every board — closing one board's schematic must
+       never quietly tick the other's. */
+    const board = boards.find((b) => norm(t.title).includes(norm(b))) || "";
+    ((t.status === "done" ? done : open)[st.no] ||= []).push({ ...t, _board: board });
   }
   return { open, done };
 }
-function stepStatus(stepNo, todosByStep, doneByStep) {
-  const open = todosByStep[stepNo] || [];
-  const closed = doneByStep[stepNo] || [];
-  if (open.length) return "active";
-  if (closed.length) return "done";
+function stepStatus(stepNo, todosByStep, doneByStep, board = "") {
+  const mine = (list) => (list || []).filter((t) => !board || !t._board || t._board === board);
+  const open = mine(todosByStep[stepNo]);
+  const closed = mine(doneByStep[stepNo]);
+  /* A to-do RAISED is not work STARTED. Red means nobody has touched it —
+     and a freshly raised, still-pending task is exactly that. Orange needs
+     somebody to have actually begun (in-progress or blocked), or the step to
+     be part-done with work still open. */
+  const begun = open.filter((t) => t.status && t.status !== "pending");
+  if (begun.length) return "active";
+  if (closed.length) return open.length ? "active" : "done";
   return "pending";
 }
 const TASK_DEMANDS = [
@@ -6169,12 +6568,20 @@ const TRACK_OF_BLOCK = [
   [/Test/i, "Testing"], [/DFx/i, "DFx gates"],
 ];
 function stagesFromProcess(p, users, tasks = []) {
-  const rows = buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId) });
-  const { open, done } = tasksByStep(tasks);
+  const boards = boardsOf(p);
+  const rows = buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId), pcbRootFor: (b) => pcbPath(b) });
+  const { open, done } = tasksByStep(tasks, boards);
   const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "";
   const stages = [];
-  for (const b of BLOCKS) {
-    const mine = rows.filter((r) => r.block === b.id);
+  /* A board-scoped block on a two-board project is two lanes: B1 — GW-123
+     and B1 — GW-124, each with its own steps and its own light. */
+  const lanes = BLOCKS.flatMap((b) => {
+    const inBlock = rows.filter((r) => r.block === b.id);
+    const perBoard = [...new Set(inBlock.map((r) => r.board).filter(Boolean))];
+    return perBoard.length ? perBoard.map((board) => ({ b, board })) : [{ b, board: "" }];
+  });
+  for (const { b, board } of lanes) {
+    const mine = rows.filter((r) => r.block === b.id && (r.board || "") === board);
     if (!mine.length) continue;
     const start = mine.map((r) => r.start).filter(Boolean).sort()[0] || "";
     const end = mine.map((r) => r.end).filter(Boolean).sort().at(-1) || "";
@@ -6187,17 +6594,17 @@ function stagesFromProcess(p, users, tasks = []) {
        shows this list, because "35 steps of the process" answers nothing. */
     const steps = mine.map((r) => ({
       no: r.no, title: r.title, who: nameOf(r.assigneeId), start: r.start, end: r.end,
-      status: stepStatus(r.no, open, done),
+      status: stepStatus(r.no, open, done, r.board),
     }));
     const doneN = steps.filter((x) => x.status === "done").length;
     const activeN = steps.filter((x) => x.status === "active").length;
     stages.push({
-      id: `block-${b.id.toLowerCase()}`,
-      name: `${b.id} · ${b.name}`,
+      id: `block-${b.id.toLowerCase()}${board ? `-${board.toLowerCase()}` : ""}`,
+      name: `${b.id} · ${b.name}${board ? ` — ${board}` : ""}`,
       /* The block is the sum of its steps: green only when every step's scrum
          work is closed, orange the moment anything moves, red untouched. */
       status: doneN === steps.length ? "done" : (doneN || activeN) ? "active" : "pending",
-      track: TRACK_OF_BLOCK.find(([re]) => re.test(b.name))?.[1] || "Plan",
+      track: `${TRACK_OF_BLOCK.find(([re]) => re.test(b.name))?.[1] || "Plan"}${board ? ` — ${board}` : ""}`,
       start, end, owner,
       note: [`${doneN} of ${steps.length} steps done${activeN ? ` · ${activeN} in progress` : ""}`,
              b.runs, cv.length ? `must agree with the other tracks at: ${cv.join("; ")}` : ""]
@@ -6255,54 +6662,107 @@ function DriveSheet({ hit }) {
    running side by side after pre-design splits, and the merge that waits on
    all three. This renders the same picture from the same data — with this
    project's traffic light on every step, which the PDF cannot have.         */
-function WaveBox({ w, open, done }) {
+function WaveBox({ w, open, done, board = "", expanded, onToggle }) {
   const names = w.steps.map((no) => stepByNo(no)).filter(Boolean);
-  const lights = names.map((st) => stepStatus(st.no, open, done));
-  const agg = lights.every((x) => x === "done") ? "done" : lights.some((x) => x !== "pending") ? "active" : "pending";
+  const lights = names.map((st) => stepStatus(st.no, open, done, board));
+  const d = lights.filter((x) => x === "done").length;
+  const a = lights.filter((x) => x === "active").length;
+  const agg = d === lights.length && lights.length ? "done" : (d || a) ? "active" : "pending";
   const sync = names.some((st) => st.converge && !st.converge.merge);
   const merge = names.some((st) => st.converge?.merge);
+  const edge = sync ? "var(--amber)" : merge ? "var(--acc)" : "var(--bdr)";
   return (
-    <div style={{ border: `1.5px solid ${sync ? "var(--amber)" : merge ? "var(--acc)" : "var(--bdr)"}`,
-                  borderRadius: 10, padding: "8px 10px", background: "var(--s2)",
+    <div className="waveCard" onClick={onToggle} title={expanded ? "" : names.map((x) => x.step).join("  ·  ")}
+         style={{ border: `1.5px solid ${edge}`, borderRadius: 10, background: "var(--s2)",
                   boxShadow: agg !== "pending" ? `inset 3px 0 0 ${planColor(agg)}` : "0 1px 2px rgba(0,0,0,.04)" }}>
-      <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-        <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 800, color: "var(--acc)" }}>{w.id}</span>
-        {w.steps.length > 1 && <span style={{ fontSize: 9, color: "var(--txt3)" }}>{w.steps.length} in parallel</span>}
-        {sync && <span title="Cross-track sync point — the other tracks must be in the room" style={{ fontSize: 9, fontWeight: 800, color: "var(--amber)" }}>SYNC</span>}
-        {merge && <span style={{ fontSize: 9, fontWeight: 800, color: "var(--acc)" }}>MERGE</span>}
+      {/* the collapsed face: everything somebody scans for, nothing else */}
+      <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 10px" }}>
+        <ChevronDown size={12} style={{ transform: expanded ? "none" : "rotate(-90deg)", transition: "transform .15s", color: "var(--txt3)", flexShrink: 0 }} />
+        <span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 800, color: "var(--acc)" }}>{w.id}</span>
+        <span style={{ fontSize: 10, color: "var(--txt3)", whiteSpace: "nowrap" }}>
+          {w.steps.length > 1 ? `${w.steps.length} in parallel` : (names[0]?.step || "").slice(0, 26)}
+        </span>
+        {sync && <span title="Cross-track sync point — the other tracks must be in the room" style={{ fontSize: 8.5, fontWeight: 800, color: "var(--amber)", border: "1px solid var(--amber)", borderRadius: 4, padding: "0 4px" }}>SYNC</span>}
+        {merge && <span style={{ fontSize: 8.5, fontWeight: 800, color: "var(--acc)", border: "1px solid var(--acc)", borderRadius: 4, padding: "0 4px" }}>MERGE</span>}
+        <span style={{ marginLeft: "auto", display: "inline-flex", gap: 5, fontSize: 9.5, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+          {d > 0 && <span style={{ color: "var(--green)" }}>{d}✓</span>}
+          {a > 0 && <span style={{ color: "var(--amber)" }}>{a}…</span>}
+          {lights.length - d - a > 0 && <span style={{ color: "var(--red)" }}>{lights.length - d - a}</span>}
+        </span>
       </div>
-      {names.map((st, i) => (
-        <div key={st.no} style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 2 }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: planColor(lights[i]), flexShrink: 0 }} />
-          <span style={{ fontSize: 10, lineHeight: 1.35, color: st.converge ? "var(--amber)" : "var(--txt2)" }}>{st.step}</span>
+      {/* a slim progress seam even when closed — the column reads at a glance */}
+      <div style={{ height: 3, borderRadius: "0 0 8px 8px", overflow: "hidden", display: "flex", opacity: expanded ? 0 : 1 }}>
+        <span style={{ width: `${(d / Math.max(1, lights.length)) * 100}%`, background: "var(--green)" }} />
+        <span style={{ width: `${(a / Math.max(1, lights.length)) * 100}%`, background: "var(--amber)" }} />
+      </div>
+      {expanded && (
+        <div className="waveSteps" style={{ padding: "0 10px 9px 29px", display: "flex", flexDirection: "column", gap: 4 }}>
+          {names.map((st, i) => (
+            <div key={st.no} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: planColor(lights[i]), flexShrink: 0 }} />
+              <span style={{ fontSize: 10.5, lineHeight: 1.4, color: st.converge ? "var(--amber)" : "var(--txt2)" }}>{st.step}</span>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }
 
-function WaveColumn({ track, title, sub, open, done }) {
+function WaveColumn({ track, title, sub, open, done, board = "", expanded, onToggle }) {
   const waves = WAVES.filter((w) => w.track === track).sort((a, b) => a.order - b.order);
   if (!waves.length) return null;
-  const stepN = waves.reduce((n, w) => n + w.steps.length, 0);
+  const stepNos = waves.flatMap((w) => w.steps);
+  const lights = stepNos.map((no) => stepStatus(no, open, done, board));
+  const d = lights.filter((x) => x === "done").length;
+  const a = lights.filter((x) => x === "active").length;
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt)", marginBottom: 2 }}>{title}</div>
-      <div style={{ fontSize: 9.5, color: "var(--txt3)", marginBottom: 7 }}>{stepN} steps · {waves.length} waves{sub ? ` · ${sub}` : ""}</div>
+      <div style={{ position: "sticky", top: 0, background: "var(--bg)", paddingBottom: 6, zIndex: 1 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt)" }}>{title}</div>
+        <div style={{ fontSize: 9.5, color: "var(--txt3)", margin: "2px 0 5px" }}>{stepNos.length} steps · {waves.length} waves{sub ? ` · ${sub}` : ""}</div>
+        <div style={{ height: 4, borderRadius: 3, background: "color-mix(in srgb, var(--red) 22%, transparent)", overflow: "hidden", display: "flex" }}>
+          <span style={{ width: `${(d / Math.max(1, lights.length)) * 100}%`, background: "var(--green)" }} />
+          <span style={{ width: `${(a / Math.max(1, lights.length)) * 100}%`, background: "var(--amber)" }} />
+        </div>
+      </div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch" }}>
-        {waves.map((w, i) => (
-          <div key={w.id}>
-            {i > 0 && <div style={{ width: 2, height: 10, background: "var(--bdr2)", margin: "0 auto" }} />}
-            <WaveBox w={w} open={open} done={done} />
-          </div>
-        ))}
+        {waves.map((w, i) => {
+          const key = `${w.id}${board ? `|${board}` : ""}`;
+          return (
+            <div key={key}>
+              {i > 0 && <div style={{ width: 2, height: 10, background: "var(--bdr2)", margin: "0 auto" }} />}
+              <WaveBox w={w} open={open} done={done} board={board}
+                       expanded={expanded.has(key)} onToggle={() => onToggle(key)} />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function WaveFlow({ projTasks }) {
-  const { open, done } = tasksByStep(projTasks);
+const BOARD_TRACKS_UI = ["H", "F"];
+function WaveFlow({ projTasks, boards = [] }) {
+  const { open, done } = tasksByStep(projTasks, boards);
+  const multi = boards.length > 1;
+  /* Collapsed by default: 147 waves as compact cards is a diagram somebody
+     can hold; a click opens the box they are actually asking about. */
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [allOpen, setAllOpen] = useState(false);
+  const onToggle = (key) => setExpanded((cur) => { const n = new Set(cur); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const everyKey = () => {
+    const keys = [];
+    for (const w of WAVES) {
+      if (multi && BOARD_TRACKS_UI.includes(w.track)) for (const b of boards) keys.push(`${w.id}|${b}`);
+      else keys.push(w.id);
+    }
+    return keys;
+  };
+  const toggleAll = () => {
+    setAllOpen((v) => !v);
+    setExpanded(allOpen ? new Set() : new Set(everyKey()));
+  };
   const arrow = (label) => (
     <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "14px 0" }}>
       <div style={{ flex: 1, height: 2, background: "var(--bdr2)" }} />
@@ -6312,23 +6772,36 @@ function WaveFlow({ projTasks }) {
   );
   return (
     <div className="fade">
-      <div style={{ fontSize: 11, color: "var(--txt3)", lineHeight: 1.6, marginBottom: 12 }}>
-        A wave holds steps with no dependency on each other — everything in one box starts together, and the
-        wave order inside a track is fixed. <span style={{ color: "var(--amber)", fontWeight: 700 }}>Amber outline</span> = cross-track
-        sync point. The merge waits on all three tracks — pulling in firmware alone does not move it.
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 12 }}>
+        <div style={{ fontSize: 11, color: "var(--txt3)", lineHeight: 1.6, flex: 1 }}>
+          A wave holds steps with no dependency on each other — everything in one box starts together, and the
+          wave order inside a track is fixed. Click a wave to open its steps.
+          <span style={{ color: "var(--amber)", fontWeight: 700 }}> Amber outline</span> = cross-track
+          sync point. The merge waits on every track — pulling in one alone does not move it.
+        </div>
+        <Btn small kind="ghost" icon={allOpen ? EyeOff : Eye} onClick={toggleAll}>{allOpen ? "Collapse all" : "Expand all"}</Btn>
       </div>
-      <div style={{ maxWidth: 400 }}><WaveColumn track="P" title="Pre-design feasibility" open={open} done={done} /></div>
+      <div style={{ maxWidth: 400 }}><WaveColumn track="P" title="Pre-design feasibility" open={open} done={done} expanded={expanded} onToggle={onToggle} /></div>
       {arrow("SPLIT — hardware, firmware and enclosure all start here, together")}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-        <WaveColumn track="H" title="Hardware" sub="concurrent track 1" open={open} done={done} />
-        <WaveColumn track="F" title="Firmware" sub="concurrent track 2" open={open} done={done} />
-        <WaveColumn track="E" title="Enclosure" sub="concurrent track 3" open={open} done={done} />
+        {/* Hardware and firmware run ONCE PER BOARD — a two-board project has
+            two hardware columns side by side, each with its own light, and the
+            merge waits on every one of them. Enclosure is the product's. */}
+        {(multi ? boards : [""]).map((b) => (
+          <WaveColumn key={`H${b}`} track="H" board={b}
+            title={b ? `Hardware — ${b}` : "Hardware"} sub="concurrent track, per board" open={open} done={done} expanded={expanded} onToggle={onToggle} />
+        ))}
+        {(multi ? boards : [""]).map((b) => (
+          <WaveColumn key={`F${b}`} track="F" board={b}
+            title={b ? `Firmware — ${b}` : "Firmware"} sub="concurrent track, per board" open={open} done={done} expanded={expanded} onToggle={onToggle} />
+        ))}
+        <WaveColumn track="E" title="Enclosure" sub="one per product" open={open} done={done} expanded={expanded} onToggle={onToggle} />
       </div>
       {arrow("MERGE at the Prototype Checklist — waits on all three tracks")}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-        <WaveColumn track="R" title="Prototype" sub="after the merge" open={open} done={done} />
-        <WaveColumn track="L" title="Pilot" sub="after prototype" open={open} done={done} />
-        <WaveColumn track="M" title="Mass production" sub="after pilot" open={open} done={done} />
+        <WaveColumn track="R" title="Prototype" sub="after the merge" open={open} done={done} expanded={expanded} onToggle={onToggle} />
+        <WaveColumn track="L" title="Pilot" sub="after prototype" open={open} done={done} expanded={expanded} onToggle={onToggle} />
+        <WaveColumn track="M" title="Mass production" sub="after pilot" open={open} done={done} expanded={expanded} onToggle={onToggle} />
       </div>
       <div style={{ marginTop: 12, fontSize: 10.5, color: "var(--txt3)" }}>Project closure follows mass production. Step detail sits in the Process view, keyed by the same wave ids.</div>
     </div>
@@ -6345,6 +6818,9 @@ function ConvergeMark({ c }) {
 }
 
 export function ProcessPlan({ p, users, meId, tasks = [] }) {
+  /* setTasks comes from the app's context; the component still renders
+     without one (tests mount it bare), it just cannot raise to-dos there. */
+  const appCtx = useCtx() || {};
   const [openBlocks, setOpenBlocks] = useState(() => new Set());
   const [mine, setMine] = useState(false);
   /* What Drive actually holds, keyed by step number. A path is a claim about
@@ -6400,7 +6876,9 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       : `Pinned, but Drive answered: ${SOURCE.error || "nothing"} — the pin will be used next time Drive is reachable`);
   };
   const unpin = () => { clearPin(); setPinUrl(""); setSrcNote("Pin cleared — the workbook is found by name again."); };
-  const board = (p.linkedIds || [])[0] || "";
+  const boards = boardsOf(p);
+  const board = boards[0] || "";
+  const [boardPick, setBoardPick] = useState("all");
   /* The loaded workbook can be a PROJECT COPY — then every step carries an
      Open link to that project's own file, which is the most exact link that
      can exist. It belongs to that project alone: shown here only when the ids
@@ -6416,17 +6894,18 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
      nothing — so a to-do lands on the step it names or on none at all. A
      wrong placement would put somebody's work in the wrong block and be
      invisible; an unplaced one is at least visibly unplaced. */
-  const { open: todosByStep, done: doneByStep } = useMemo(() => tasksByStep(tasks), [tasks]);
+  const { open: todosByStep, done: doneByStep } = useMemo(() => tasksByStep(tasks, boards), [tasks, boards.join(",")]);
   const unplacedTodos = useMemo(
-    () => tasks.filter((t) => t.status !== "done" && !matchStep(t)), [tasks]);
+    () => tasks.filter((t) => t.status !== "done" && !matchStep(t))
+      .sort((a, b) => String(a.date || "9999").localeCompare(String(b.date || "9999"))), [tasks]);
   const plan = useMemo(
     () => buildProcessPlan(p, users, {
       // Two trees, not one: PM artefacts live under the project folder and
-      // engineering artefacts under the board's own PCB-ID folder.
-      projectRoot: pmPath(p.projectId), pcbRoot: board ? pcbPath(board) : "",
+      // engineering artefacts under each board's own PCB-ID folder.
+      projectRoot: pmPath(p.projectId), pcbRootFor: (b) => pcbPath(b),
     }),
     // mapAt: a pinned or uploaded workbook replaces STEPS wholesale.
-    [p.projectId, p.startDate, p.deadline, p.team, users, board, mapAt]);
+    [p.projectId, p.startDate, p.deadline, p.team, users, boards.join(","), mapAt]);
 
   /* Ask Drive for the real sheet behind every step in one block. What comes
      back is the file as it is actually saved — which is often not the name the
@@ -6436,22 +6915,44 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
     if (finding) return;
     setFinding(blockId);
     try {
-      const wanted = rows.filter((r) => r.folder && !found[r.no]);
+      const wanted = rows.filter((r) => r.folder && !found[r.key || r.no]);
       for (let i = 0; i < wanted.length; i += 4) {
         const batch = wanted.slice(i, i + 4);
         const got = await Promise.all(batch.map((r) =>
-          driveStepFile({ projectId: r.serves === "pcb" && board ? board : p.projectId,
+          driveStepFile({ projectId: r.serves === "pcb" && (r.board || board) ? (r.board || board) : p.projectId,
                           folder: r.folder, fileName: r.fileName, template: r.template })
-            .then((d) => [r.no, d]).catch((e) => [r.no, { found: false, error: String(e?.message || e) }])));
+            .then((d) => [r.key || r.no, d]).catch((e) => [r.key || r.no, { found: false, error: String(e?.message || e) }])));
         setFound((cur) => ({ ...cur, ...Object.fromEntries(got) }));
       }
     } finally { setFinding(""); }
   };
 
   const groups = blocksInSequence();
-  const rows = mine ? plan.filter((r) => String(r.assigneeId) === String(meId)) : plan;
+  const byBoard = boardPick === "all" ? plan
+    : plan.filter((r) => !r.board || r.board === boardPick);
+  const rows = mine ? byBoard.filter((r) => String(r.assigneeId) === String(meId)) : byBoard;
   const inBlock = (id) => rows.filter((r) => r.block === id);
   const toggle = (id) => setOpenBlocks((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  /* System-raised to-dos COME FROM THE 308 — the step's own words, its owner,
+     its date, and a hard stepNo link so the traffic light and the plan agree
+     for ever. One block at a time, and never a duplicate: a step that already
+     has its to-do (open or done, on this board) is left alone. */
+  const [raised, setRaised] = useState("");
+  const raiseBlock = (b, list) => {
+    if (!appCtx.setTasks) return;
+    const hasOne = (r) => [...(todosByStep[r.no] || []), ...(doneByStep[r.no] || [])]
+      .some((t) => !r.board || !t._board || t._board === r.board);
+    const missing = list.filter((r) => !hasOne(r));
+    if (!missing.length) { setRaised(`${b.id}: every step here already has its to-do`); return; }
+    const stamp = new Date().toISOString();
+    appCtx.setTasks((ts) => [...ts, ...missing.map((r) => ({
+      id: uid(), projectId: p.projectId, title: r.title, stepNo: r.no,
+      assigneeId: r.assigneeId || "", date: r.start || todayStr(),
+      status: "pending", createdAt: stamp, createdBy: meId || "", origin: "process",
+    }))]);
+    setRaised(`${b.id}: ${missing.length} to-do${missing.length === 1 ? "" : "s"} raised from the method — they start red until somebody starts them`);
+  };
   const allOpen = openBlocks.size === BLOCKS.length;
   const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "";
 
@@ -6504,6 +7005,23 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         </div>
       </div>
 
+      {boards.length > 1 && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em" }}>Boards</span>
+          {["all", ...boards].map((b) => (
+            <button key={b} onClick={() => setBoardPick(b)}
+              style={{ padding: "4px 11px", borderRadius: 999, cursor: "pointer", fontSize: 11, fontWeight: 700,
+                       border: `1px solid ${boardPick === b ? "var(--acc)" : "var(--bdr2)"}`,
+                       background: boardPick === b ? "color-mix(in srgb, var(--acc) 10%, transparent)" : "var(--s1)",
+                       color: boardPick === b ? "var(--acc)" : "var(--txt2)", fontFamily: b === "all" ? "inherit" : MONO }}>
+              {b === "all" ? "All boards" : b}
+            </button>
+          ))}
+          <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
+            hardware and firmware run once per board; the rest is the project's
+          </span>
+        </div>
+      )}
       {pinOpen && (
         <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", border: "1px solid var(--bdr2)", borderRadius: 9 }}>
           <span style={{ fontSize: 11, color: "var(--txt2)" }}>Paste the Drive link of the master workbook:</span>
@@ -6518,6 +7036,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         </div>
       )}
       {srcNote && <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10 }}>{srcNote}</div>}
+      {raised && <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10 }}>{raised}</div>}
 
       {mine && rows.length === 0 && (
         <Empty icon={ListChecks} title="No steps land on you in this project" sub="Steps are handed out by the slot somebody holds on this project's team. If that looks wrong, check the team on the Overview tab." />
@@ -6546,7 +7065,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                   <span style={{ fontSize: 12.5, fontWeight: 700 }}>{b.name}</span>
                   <span style={{ fontSize: 11, color: "var(--txt3)" }}>{list.length} step{list.length === 1 ? "" : "s"}{mine && list.length !== b.steps ? ` of ${b.steps}` : ""}</span>
                   {(() => {
-                    const st = list.map((r) => stepStatus(r.no, todosByStep, doneByStep));
+                    const st = list.map((r) => stepStatus(r.no, todosByStep, doneByStep, r.board));
                     const d = st.filter((x) => x === "done").length, a = st.filter((x) => x === "active").length;
                     return (
                       <span style={{ display: "inline-flex", gap: 7, fontSize: 10, fontWeight: 700 }}>
@@ -6566,13 +7085,17 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                       onClick={() => findInDrive(b.id, list)}>
                       {finding === b.id ? "Looking in Drive…" : "Open the real sheets"}
                     </Btn>
+                    {appCtx.setTasks && (
+                      <Btn small kind="ghost" icon={ListChecks} title="One to-do per step of this block — the step's own words, owner and date, linked for ever"
+                        onClick={() => raiseBlock(b, list)}>Raise these steps as to-dos</Btn>
+                    )}
                     <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
                       the files as they are actually saved in {p.projectId}{board ? ` and ${board}` : ""}
                     </span>
                     {(() => {
-                      const seen = list.filter((r) => found[r.no]);
+                      const seen = list.filter((r) => found[r.key || r.no]);
                       if (!seen.length) return null;
-                      const have = seen.filter((r) => found[r.no]?.found).length;
+                      const have = seen.filter((r) => found[r.key || r.no]?.found).length;
                       return <Pill color={have === seen.length ? "var(--green)" : "var(--amber)"}>{have} of {seen.length} are there</Pill>;
                     })()}
                   </div>
@@ -6594,12 +7117,13 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                       </tr></thead>
                       <tbody>
                         {list.map((r) => (
-                          <tr key={r.no}>
+                          <tr key={r.key || r.no}>
                             <td style={{ ...td, fontFamily: MONO, color: "var(--txt3)" }}>{r.no}</td>
                             <td style={td}>{r.category}</td>
                             <td style={{ ...td, color: "var(--txt)" }}>
                               <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
-                                <span style={{ fontWeight: 600 }}>{r.title}</span>
+                                <span style={{ fontWeight: 600 }}>{r.board ? r.title.replace(` — ${r.board}`, "") : r.title}</span>
+                                {r.board && <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, padding: "1px 6px", borderRadius: 5, background: "color-mix(in srgb, var(--blue) 14%, transparent)", color: "var(--blue)" }}>{r.board}</span>}
                                 <ConvergeMark c={r.converge} />
                               </div>
                               {/* What the step IS, not where its file sits. A
@@ -6628,8 +7152,12 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                                   <div style={{ fontSize: 10, color: "var(--amber)" }}>no folder is recorded for {r.folderUnknown}</div>
                                 )}
                               </div>
-                              <DriveSheet hit={found[r.no]} />
-                              {(todosByStep[r.no] || []).map((t) => (
+                              <DriveSheet hit={found[r.key || r.no]} />
+                              {/* only THIS board's to-dos — a task naming
+                                  GW-124 has no business under GW-123's row */}
+                              {(todosByStep[r.no] || [])
+                                .filter((t) => !r.board || !t._board || t._board === r.board)
+                                .map((t) => (
                                 <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap", marginTop: 3, fontSize: 10.5 }}>
                                   <span style={{ padding: "0 5px", borderRadius: 4, background: "color-mix(in srgb, var(--acc) 14%, transparent)", color: "var(--acc)", fontWeight: 800, fontSize: 9 }}>SCRUM</span>
                                   <span style={{ color: "var(--txt)" }}>{t.title}</span>
@@ -6673,7 +7201,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                             </td>
                             <td style={{ ...td, fontSize: 10.5 }}>
                               {(() => {
-                                const st = stepStatus(r.no, todosByStep, doneByStep);
+                                const st = stepStatus(r.no, todosByStep, doneByStep, r.board);
                                 return (
                                   <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: planColor(st), fontWeight: 700 }}>
                                     <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st), flexShrink: 0 }} />
@@ -6959,7 +7487,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
           </div>
         )}
 
-        {view === "flow" && <WaveFlow projTasks={projTasks} />}
+        {view === "flow" && <WaveFlow projTasks={projTasks} boards={boardsOf(p)} />}
 
         {view === "log" && (
           (plan?.log || []).length === 0

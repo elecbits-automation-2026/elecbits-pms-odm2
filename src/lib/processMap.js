@@ -344,6 +344,9 @@ export async function loadProcessMapFromUpload(file) {
     templateId: col(/^template id/),
     template: col(/^template to work|^template$/),
     open: col(/^open\b/),
+    // EVERY per-board link column, not just the first: one project workbook
+    // carries one "Open — <board>" column per PCB, and each is a source.
+    opens: H.map((h, i) => (/^open\b/.test(h) ? i : -1)).filter((i) => i >= 0),
     master: col(/^master/),
     location: col(/^location/),
     action: col(/^action/),
@@ -376,6 +379,12 @@ export async function loadProcessMapFromUpload(file) {
          location. Links that came off the sheet somebody deliberately built
          are exactly the "cannot be wrong" links asked for. */
       openLink: flowLink(i, C.open),
+      /* keyed by the column's own label — "Open — GW-123" → "GW-123" — so a
+         two-board workbook hands each board its own link. A plain "Open"
+         column keys as "" and serves the single-board case unchanged. */
+      openLinks: Object.fromEntries(C.opens
+        .map((c) => [clean(flow[headerRow][c]).replace(/^open\s*[—–-]?\s*/i, ""), flowLink(i, c)])
+        .filter(([, url]) => url)),
       masterLink: flowLink(i, C.master),
       location: cell("location"),
     });
@@ -451,10 +460,14 @@ export async function loadProcessMapFromUpload(file) {
       return i < 0 ? ["", ""] : [clean(pr[i][1]), prLink(i, 1)];
     };
     const [projectId] = find("Project ID");
-    const [pcbId] = find("PCB ID");
+    const pcbIds = pr
+      .filter((r) => /^pcb id/i.test(clean(r[0])))
+      .flatMap((r) => clean(r[1]).split(/[,;]/))
+      .map((x) => x.trim()).filter(Boolean);
+    const pcbId = pcbIds[0] || "";
     const [pmText, pmLink] = find("Project folder");
     const [pcbText, pcbLink] = find("PCB folder");
-    if (projectId) projectCopy = { projectId, pcbId,
+    if (projectId) projectCopy = { projectId, pcbId, pcbIds,
       pmFolderLink: pmLink || pmText, pcbFolderLink: pcbLink || pcbText };
   }
 
@@ -494,6 +507,41 @@ export function sourceLine() {
     return `Drive unreachable — using the copy last read${when}${SOURCE.error ? ` (${SOURCE.error})` : ""}`;
   }
   return `Not synced from Drive yet${SOURCE.error ? ` — ${SOURCE.error}` : ""}`;
+}
+
+/* ── one project, several boards ─────────────────────────────────────────────
+   A project runs once; a board runs per board. Which is which comes from the
+   diagram's own tracks, because the waves already encode it: hardware and
+   firmware waves follow the board (each PCB has its own schematic, its own
+   layout, its own FW image — their inline tests and DFx gates joined those
+   waves by number, so they follow automatically). Enclosure is one per
+   product even when two boards sit inside it, and pre-design, prototype,
+   pilot and mass production belong to the project.
+
+   Changing the rule is one line — a product whose enclosure ships per board
+   would add "E" here. */
+export const BOARD_TRACKS = ["H", "F"];
+export const boardScoped = (step) => BOARD_TRACKS.includes(String(step?.wave || "").charAt(0));
+export const boardsOf = (project) => (project?.linkedIds || []).map((x) => String(x).trim()).filter(Boolean);
+
+/* The project workbook stays in the Project ID folder — ONE file per project,
+   with one "Open — <board>" column per board. This resolves a step's own
+   link for a given board: the column whose label names the board wins, and a
+   lone unlabelled Open column serves a single-board project as it always
+   did. Never the WRONG board's link — a near-miss falls through to none. */
+export function openLinkFor(step, board) {
+  const links = step?.openLinks || null;
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (links) {
+    const keys = Object.keys(links);
+    if (board) {
+      const hit = keys.find((k) => k && (norm(k).includes(norm(board)) || norm(board).includes(norm(k))));
+      if (hit) return links[hit];
+    }
+    if (!boardScoped(step) || keys.length === 1) return links[keys[0]] || "";
+    return board ? "" : links[keys[0]] || "";
+  }
+  return step?.openLink || "";
 }
 
 export const stepByNo = (no) => STEPS.find((s) => s.no === Number(no)) || null;
@@ -898,16 +946,35 @@ export function buildPlan(project, users = [], opts = {}) {
   const only = opts.categories ? new Set(opts.categories) : null;
   // A project can carry several boards; the first is the one the steps that
   // name [PCB-ID] belong to unless a caller says otherwise.
-  const pcbId = opts.pcbId || (project?.linkedIds || [])[0] || "";
-  const roots = { pm: opts.projectRoot || "", pcb: opts.pcbRoot || "" };
+  const boards = opts.boards || boardsOf(project);
+  const multi = boards.length > 1;
+  const pcbId = opts.pcbId || boards[0] || "";
+  const rootsFor = (board) => ({
+    pm: opts.projectRoot || "",
+    pcb: typeof opts.pcbRootFor === "function" ? (board ? opts.pcbRootFor(board) : "") : (opts.pcbRoot || ""),
+  });
 
   const steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
   const categories = only ? CATEGORIES.filter((c) => only.has(c.name)) : CATEGORIES;
   const when = scheduleSteps({ start, end, milestones: opts.milestones || [], steps, categories });
 
-  return steps.map((s) => {
+  /* A board-scoped step on a two-board project is two pieces of work: two
+     schematics, two DRC gates, two fab releases — each with its own file, its
+     own link, its own status. They share the wave's dates, which is exactly
+     right: the boards' tracks run concurrently, like every concurrent track
+     in this process. Project-scoped steps stay single whatever the board
+     count, and a single-board project builds the same plan it always did. */
+  return steps.flatMap((s) => {
     const w = when.get(s.no) || {};
-    return {
+    const perBoard = multi && boardScoped(s);
+    const instances = perBoard ? boards : [""];
+    return instances.map((board) => {
+      const useBoard = board || pcbId;
+      const roots = rootsFor(useBoard);
+      return {
+      key: board ? `${s.no}:${board}` : String(s.no),
+      board,
+      boardScoped: boardScoped(s),
       no: s.no,
       /* Category, step, template id and responsibility travel together — those
          four are what makes a plan row actionable rather than a name on a
@@ -918,7 +985,7 @@ export function buildPlan(project, users = [], opts = {}) {
       phase: w.phase,
       block: s.block || "",
       blockName: blockById(s.block)?.label || "",
-      title: s.step,
+      title: board ? `${s.step} — ${board}` : s.step,
       action: s.action,
       template: s.template,
       templateId: s.templateId,
@@ -929,19 +996,19 @@ export function buildPlan(project, users = [], opts = {}) {
       // verified against Drive after the fact — render-time lookups only. The
       // step's OWN links are different: they came off the project workbook
       // somebody deliberately built, and they are the row's payload.
-      openLink: s.openLink || "",
+      openLink: openLinkFor(s, board),
       masterLink: s.masterLink || "",
       location: s.location || "",
 
       templateStandard: templateStandard(s),
       // Where the parallel tracks have to stop and agree before this can close.
       converge: s.converge || null,
-      fileName: fileNameFor(s, projectId, pcbId),
+      fileName: fileNameFor(s, projectId, useBoard),
       folder: folderFor(s),
       // Every place this step's file belongs — one for most steps, two for the
       // 109 whose template serves the project folder AND the board folder.
-      paths: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, pcbId) : [],
-      path: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, pcbId)[0]?.path || "" : "",
+      paths: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, useBoard) : [],
+      path: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, useBoard)[0]?.path || "" : "",
       serves: servesOf(s),
       // Named so a screen can say WHY there is no path rather than showing a
       // blank and letting somebody assume the file has no home.
@@ -958,7 +1025,8 @@ export function buildPlan(project, users = [], opts = {}) {
       end: w.end || end,
       parallel: !!w.parallel,
       wave: w.wave || "",
-    };
+      };
+    });
   });
 }
 
