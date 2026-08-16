@@ -3148,6 +3148,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
+          {tab === "files" && <BoardsCard p={p} upd={upd} />}
           {tab === "files" && <ReportsCard p={p} upd={upd} users={users} />}
           {tab === "email" && <EmailTab p={p} upd={upd} users={users} />}
           {tab === "files" && (
@@ -4673,6 +4674,53 @@ function EmailTab({ p, upd, users }) {
           ))}
         </div>
       )}
+    </Section>
+  );
+}
+
+/* ═══ THE PROJECT'S BOARDS ══════════════════════════════════════════════════
+   One project, several PCBs — each with its own PCB-ID folder, its own
+   hardware and firmware lanes, its own step instances. This is where boards
+   are added to a project that already exists; everything downstream (the
+   board picker, the doubled hardware track, the per-board links and lights)
+   follows from this list on its own. */
+function BoardsCard({ p, upd }) {
+  const { toast } = useCtx();
+  const [draft, setDraft] = useState("");
+  const boards = boardsOf(p);
+  const add = () => {
+    const id = draft.trim().toUpperCase();
+    if (!id) return;
+    if (boards.some((b) => b.toUpperCase() === id)) { toast(`${id} is already on this project`, "amber"); return; }
+    upd((cur) => ({ linkedIds: [...(cur.linkedIds || []), id] }));
+    setDraft("");
+    toast(`${id} added — hardware and firmware now run once per board`, "green");
+  };
+  const remove = (b) => {
+    upd((cur) => ({ linkedIds: (cur.linkedIds || []).filter((x) => x !== b) }));
+    toast(`${b} removed from this project`, "amber");
+  };
+  return (
+    <Section>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Boards on this project</span>
+        <Pill color="var(--blue)">{boards.length || "no"} PCB{boards.length === 1 ? "" : "s"}</Pill>
+      </div>
+      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+        {boards.map((b) => (
+          <span key={b} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: MONO, fontSize: 11.5, fontWeight: 700, padding: "4px 6px 4px 11px", borderRadius: 999, border: "1px solid var(--bdr)", background: "color-mix(in srgb, var(--blue) 9%, transparent)", color: "var(--blue)" }}>
+            {b}
+            <button onClick={() => remove(b)} title={`Remove ${b} from this project`}
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt3)", display: "flex", padding: 2 }}><X size={12} /></button>
+          </span>
+        ))}
+        <input className="inp" style={{ width: 220, fontFamily: MONO, fontSize: 12 }} placeholder="add a PCB ID, e.g. …-1880-GW-124"
+               value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <Btn small kind="ghost" icon={Plus} disabled={!draft.trim()} onClick={add}>Add board</Btn>
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 7, lineHeight: 1.55 }}>
+        Each board gets its own PCB-ID folder in Drive, its own hardware and firmware lanes in the plan, and its own step instances with their own lights. Enclosure and everything serial stays the project's.
+      </div>
     </Section>
   );
 }
