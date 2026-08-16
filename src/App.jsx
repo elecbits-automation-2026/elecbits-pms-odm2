@@ -33,6 +33,7 @@ import {
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
+import { matchStep, fileNameFor, folderFor, pathFor, waveOf } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -448,6 +449,22 @@ async function userJwt() {
    hand. Deletion is deliberately not offered here: removing a file stays a
    deliberate act done by a person in Drive, not something a chat message can
    trigger. */
+/* Where a process step's file actually is. A lookup, never a creation — the
+   templates are already in the project folder. */
+async function driveStepFile({ projectId, folder, fileName, template }) {
+  if (!DRIVE_READ_URL) return { found: false, error: "Drive isn't connected in this build — set VITE_DRIVE_READ_URL." };
+  try {
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "step_file", projectId, folder, fileName, template, token: DRIVE_READ_TOKEN, userJwt: await userJwt() }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (d.error) return { found: false, error: d.error };
+    return d;
+  } catch (e) { return { found: false, error: `Couldn't reach Drive: ${e?.message || e}` }; }
+}
+
 async function driveReadFile({ projectId, folderPath, fileName, scope }) {
   const r = await driveManageFile("read_file", { projectId, folderPath, fileName, scope });
   return r;
@@ -4519,6 +4536,11 @@ function WorkWindow({ t, onClose, onComplete }) {
   const [checks, setChecks] = useState(t.stepsDone || []);
   const p = projects.find((x) => x.projectId === t.projectId);
   const sitemaps = memory.filter((m) => m.type === "sitemap");
+  /* Which step of the method this task actually is. Most tasks are typed by
+     hand, so this matches on the words and returns nothing when it is not
+     sure — showing the wrong step's file and Drive path would be worse than
+     showing the generic sitemap. */
+  const step = useMemo(() => matchStep(t), [t.id, t.title, t.stepNo]);
   const bar = memory.find((m) => m.type === "instruction");
   const save = (silent) => { setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, work: w, stepsDone: checks } : x))); if (!silent) { toast("Progress saved", "green"); onClose(); } };
   return (
@@ -4541,11 +4563,13 @@ function WorkWindow({ t, onClose, onComplete }) {
             </div>
           ) : <div style={{ color: "var(--txt2)", marginBottom: 10 }}>No sub-steps written — the title is the scope.</div>}
           <ConditionRail conditions={t.conditions} />
-          <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
-            <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>Where things live</div>
-            {t.projectId && <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", marginBottom: 5 }}>{pmPath(t.projectId)} → Checklist.xlsx</div>}
-            {sitemaps.map((m) => <div key={m.id} style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", whiteSpace: "pre-wrap", marginBottom: 5 }}>{m.content.split("\n").slice(0, 2).join("\n")}</div>)}
-          </div>
+          {step ? <StepGuidance step={step} task={t} onUse={(name, path) => setW((v) => ({ ...v, fileName: v.fileName || name, fileLocation: v.fileLocation || path }))} /> : (
+            <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>Where things live</div>
+              {t.projectId && <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", marginBottom: 5 }}>{pmPath(t.projectId)} → Checklist.xlsx</div>}
+              {sitemaps.map((m) => <div key={m.id} style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", whiteSpace: "pre-wrap", marginBottom: 5 }}>{m.content.split("\n").slice(0, 2).join("\n")}</div>)}
+            </div>
+          )}
           {bar && <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--soft)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)" }}><b style={{ color: "var(--acc)" }}>{bar.title}:</b> {bar.content}</div>}
           {p && <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--txt2)" }}>Deadline {fmtDate(p.deadline)} · <Countdown task={t} now={now} /></div>}
         </div>
@@ -4562,6 +4586,115 @@ function WorkWindow({ t, onClose, onComplete }) {
         </div>
       </div>
     </Modal>
+  );
+}
+
+/* ── THE METHOD, IN THE WORK WINDOW ──────────────────────────────────────────
+   When a task is a step of the process, this is what makes it doable without
+   opening Drive first: the exact file it writes to and where that file sits,
+   the question that has to be answerable before starting, the one that has to
+   be answerable before closing, and the written guidance for the step itself.
+
+   The path and file name are offered rather than imposed — one click fills the
+   evidence fields, because the commonest reason a closure has no artefact
+   recorded is that typing a 90-character Drive path by hand is miserable. */
+function StepGuidance({ step, task, onUse }) {
+  const [file, setFile] = useState(null);
+  const [looking, setLooking] = useState(false);
+  const wave = waveOf(step.no);
+  const name = fileNameFor(step, task.projectId);
+  const folder = folderFor(step);
+  const path = pathFor(step, task.projectId, pmPath(task.projectId).replace(/\/$/, ""));
+
+  /* Ask Drive where the file actually is. The templates are pre-stored in the
+     project folder, so this is a lookup, never a creation — and half of them
+     are saved under a name nobody expected, which is exactly why the answer
+     has to come from Drive rather than from the workbook's ideal name. */
+  const locate = async () => {
+    setLooking(true);
+    const r = await driveStepFile({ projectId: task.projectId, folder, fileName: name, template: step.template });
+    setLooking(false);
+    setFile(r);
+  };
+
+  return (
+    <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 7 }}>
+        <Pill color="var(--purple)">Step {step.no}</Pill>
+        {wave && <Pill color="var(--txt2)">{wave.id}</Pill>}
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{step.category}</span>
+      </div>
+
+      <div style={{ fontSize: 12.5, marginBottom: 9 }}><b>{step.action}:</b> {step.whatToDo}</div>
+
+      {/* The two gates. The workbook is explicit that a step whose entry
+          question cannot be answered yes has not started, whatever the
+          calendar says — so both are shown as questions, not prose. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+        <div style={{ fontSize: 11.5 }}>
+          <span style={{ fontWeight: 700, color: "var(--amber)" }}>Before you start — </span>
+          <span style={{ color: "var(--txt2)" }}>{step.entryQuestion}</span>
+        </div>
+        <div style={{ fontSize: 11.5 }}>
+          <span style={{ fontWeight: 700, color: "var(--green)" }}>Before you close — </span>
+          <span style={{ color: "var(--txt2)" }}>{step.exitQuestion}</span>
+        </div>
+      </div>
+
+      <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>
+        The file this step writes to
+      </div>
+      <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", wordBreak: "break-all", marginBottom: 3 }}>{name}</div>
+      <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginBottom: 7 }}>{path}</div>
+      <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 8 }}>{step.template} · {step.templateId}</div>
+
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>
+        <Btn kind="ghost" icon={looking ? Loader2 : Search} disabled={looking || !task.projectId}
+             style={{ padding: "4px 9px", fontSize: 11.5 }} onClick={locate}>
+          {looking ? "Looking…" : file ? "Look again" : "Open it in Drive"}
+        </Btn>
+        <Btn kind="ghost" style={{ padding: "4px 9px", fontSize: 11.5 }}
+             onClick={() => onUse(name, path)}>Use as my evidence</Btn>
+      </div>
+
+      {file && (file.found ? (
+        <div style={{ fontSize: 11.5, border: "1px solid var(--bdr)", borderRadius: 9, padding: 9, background: "var(--s1)" }}>
+          <div style={{ fontFamily: MONO, fontSize: 11, marginBottom: 5, wordBreak: "break-all" }}>{file.file.name}</div>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <a href={file.file.openLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)" }}>Open ↗</a>
+            <a href={file.file.downloadLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)" }}>Download</a>
+            <span style={{ cursor: "pointer", color: "var(--txt2)" }}
+                  onClick={() => onUse(file.file.name, file.file.path)}>Use this one</span>
+          </div>
+          {/* Saved under a different name from the one the method expects.
+              Finding it anyway is right; not saying so is how the drift keeps
+              spreading. */}
+          {file.renamed && (
+            <div style={{ marginTop: 6, fontSize: 11, color: "var(--amber)" }}>
+              Saved as this, not as {file.renamed}.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ fontSize: 11.5, color: "var(--amber)", border: "1px solid var(--bdr)", borderRadius: 9, padding: 9 }}>
+          {file.error || file.reason || "Not found."}
+          {file.candidates?.length > 0 && (
+            <div style={{ marginTop: 7 }}>
+              <div style={{ color: "var(--txt2)", marginBottom: 4 }}>What is in that folder:</div>
+              {file.candidates.map((c) => (
+                <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}>
+                  <a href={c.openLink} target="_blank" rel="noreferrer" style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--acc)", wordBreak: "break-all" }}>{c.name}</a>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--s1)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55 }}>
+        {step.guidelines}
+      </div>
+    </div>
   );
 }
 

@@ -504,3 +504,36 @@ export const planFor = (plan, userId) =>
 /* Everything that writes to one template, so a person opening a file can see
    every step that will touch it rather than just their own. */
 export const stepsTouching = (templateId) => (TEMPLATES[templateId]?.steps || []).map(stepByNo).filter(Boolean);
+
+/* ── which process step a task actually is ───────────────────────────────────
+   Tasks are raised from the scrum, from client calls and by hand, so most
+   carry a title somebody typed rather than a step number. Matching on the
+   words is how the work window can show a task the method behind it without
+   waiting for every task to be created from the plan.
+
+   It is deliberately strict. A wrong match would show somebody the guidance,
+   the file and the Drive path for a DIFFERENT piece of work, which is worse
+   than showing none — so a weak overlap returns nothing and the window falls
+   back to what it always showed. */
+export function matchStep(task) {
+  if (task?.stepNo) return stepByNo(task.stepNo);
+  const words = (s) => new Set(String(s || "").toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+    // "the", "of", "and" match everything and mean nothing.
+    .filter((w) => w.length > 2 && !["the", "and", "for", "with", "all", "any", "its", "from", "into", "this", "that", "pending"].includes(w)));
+  const want = words(task?.title);
+  if (want.size < 2) return null;
+
+  let best = null, bestScore = 0;
+  for (const s of STEPS) {
+    const have = words(s.step);
+    let hit = 0;
+    for (const w of want) if (have.has(w)) hit++;
+    // Both directions: a long task title should not beat a short step name
+    // just by containing more words.
+    const score = hit / Math.max(want.size, have.size);
+    if (score > bestScore) { bestScore = score; best = s; }
+  }
+  // Half the significant words in common, or it is a guess.
+  return bestScore >= 0.5 ? best : null;
+}
