@@ -884,8 +884,29 @@ Deno.serve(async (req) => {
     }
 
     if (body.action === "process_map") {
+      /* A pinned file id ends the guessing. Somebody pasted the workbook's own
+         Drive link into the app, so the exact file is named — no search, no
+         ranking, no chance of an archive copy winning. Renames and moves do
+         not break it; only deleting the file does, and that failure is said
+         out loud rather than silently falling back to a search that might
+         find a different workbook than the one they pinned. */
+      const pinnedId = String(body.fileId || "").trim();
+      let pinnedPick: { f: GFile; path: string } | null = null;
+      if (pinnedId) {
+        let f: GFile;
+        try {
+          f = await drive(token, `files/${pinnedId}?fields=id,name,mimeType,modifiedTime,webViewLink,parents,trashed&supportsAllDrives=true`);
+        } catch (e) {
+          return json({ error: `The pinned workbook link doesn't open for the service account (${e}). Re-share the file with ${SA_EMAIL}, or clear the pin to go back to searching by name.` }, 404);
+        }
+        if ((f as GFile & { trashed?: boolean }).trashed) {
+          return json({ error: `The pinned workbook (${f.name}) is in the trash. Restore it, or pin the link of the live copy.` }, 404);
+        }
+        const path = await folderPath(token, f).catch(() => "");
+        pinnedPick = { f, path };
+      }
       const want = String(body.name || "Master Process Flow");
-      const found = await searchUnder(token, ROOT_CHAIN[0], want, 20);
+      const found = pinnedPick ? [] : await searchUnder(token, ROOT_CHAIN[0], want, 20);
       /* Prefer the copy that actually sits in a Process folder — old versions
          of this workbook exist, and one under Archive must never win. Then
          prefer the most recently edited, because the live method is the one
@@ -899,10 +920,10 @@ Deno.serve(async (req) => {
         .filter((x) => /\.xlsx?$/i.test(x.f.name) || x.f.mimeType === SHEET_MIME)
         .sort((a, b) => b.score - a.score || String(b.at).localeCompare(String(a.at)));
 
-      if (!ranked.length) {
+      if (!pinnedPick && !ranked.length) {
         return json({ error: `I couldn't find a workbook called "${want}" anywhere the service account can see. Share the Process folder with ${SA_EMAIL} and try again.` }, 404);
       }
-      const pick = ranked[0];
+      const pick = pinnedPick || ranked[0];
 
       let tabs: Record<string, string[][]>;
       try {
@@ -1095,6 +1116,9 @@ Deno.serve(async (req) => {
           path: pick.path,
           editLink: pick.f.webViewLink || `https://drive.google.com/open?id=${pick.f.id}`,
         },
+        // Whether the file was named by a pasted link (no search ran) or
+        // found by name — the UI says which, because they fail differently.
+        pinned: !!pinnedPick,
         // Say what else is out there. When two copies of the method exist,
         // knowing which one was NOT used matters.
         alternates: ranked.slice(1, 4).map((x) => ({ name: x.f.name, path: x.path, modifiedTime: x.f.modifiedTime || "" })),

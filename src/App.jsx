@@ -36,7 +36,9 @@ const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", bac
 import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes,
          BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
          sourceLine, servesOf, templateFor,
-         LINKS, loadTemplateLinks, templateLinkFor, linksLine } from "./lib/processMap.js";
+         LINKS, loadTemplateLinks, templateLinkFor, linksLine,
+         loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
+         projectCopyOf, WAVES, stepByNo } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -6247,6 +6249,92 @@ function DriveSheet({ hit }) {
   );
 }
 
+/* ═══ THE FLOW, DRAWN THE WAY THE DIAGRAM DRAWS IT ═══════════════════════════
+   EbODM_Process_Flow.pdf is the picture people actually recognise: waves as
+   boxes, everything inside one box starting together, the three design tracks
+   running side by side after pre-design splits, and the merge that waits on
+   all three. This renders the same picture from the same data — with this
+   project's traffic light on every step, which the PDF cannot have.         */
+function WaveBox({ w, open, done }) {
+  const names = w.steps.map((no) => stepByNo(no)).filter(Boolean);
+  const lights = names.map((st) => stepStatus(st.no, open, done));
+  const agg = lights.every((x) => x === "done") ? "done" : lights.some((x) => x !== "pending") ? "active" : "pending";
+  const sync = names.some((st) => st.converge && !st.converge.merge);
+  const merge = names.some((st) => st.converge?.merge);
+  return (
+    <div style={{ border: `1.5px solid ${sync ? "var(--amber)" : merge ? "var(--acc)" : "var(--bd)"}`,
+                  borderRadius: 8, padding: "6px 8px", background: "var(--s1)",
+                  boxShadow: agg !== "pending" ? `inset 3px 0 0 ${planColor(agg)}` : "none" }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 800, color: "var(--acc)" }}>{w.id}</span>
+        {w.steps.length > 1 && <span style={{ fontSize: 9, color: "var(--txt3)" }}>{w.steps.length} in parallel</span>}
+        {sync && <span title="Cross-track sync point — the other tracks must be in the room" style={{ fontSize: 9, fontWeight: 800, color: "var(--amber)" }}>SYNC</span>}
+        {merge && <span style={{ fontSize: 9, fontWeight: 800, color: "var(--acc)" }}>MERGE</span>}
+      </div>
+      {names.map((st, i) => (
+        <div key={st.no} style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 2 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: planColor(lights[i]), flexShrink: 0 }} />
+          <span style={{ fontSize: 10, lineHeight: 1.35, color: st.converge ? "var(--amber)" : "var(--txt2)" }}>{st.step}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WaveColumn({ track, title, sub, open, done }) {
+  const waves = WAVES.filter((w) => w.track === track).sort((a, b) => a.order - b.order);
+  if (!waves.length) return null;
+  const stepN = waves.reduce((n, w) => n + w.steps.length, 0);
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt)", marginBottom: 2 }}>{title}</div>
+      <div style={{ fontSize: 9.5, color: "var(--txt3)", marginBottom: 7 }}>{stepN} steps · {waves.length} waves{sub ? ` · ${sub}` : ""}</div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch" }}>
+        {waves.map((w, i) => (
+          <div key={w.id}>
+            {i > 0 && <div style={{ width: 2, height: 10, background: "var(--bdr2)", margin: "0 auto" }} />}
+            <WaveBox w={w} open={open} done={done} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WaveFlow({ projTasks }) {
+  const { open, done } = tasksByStep(projTasks);
+  const arrow = (label) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "14px 0" }}>
+      <div style={{ flex: 1, height: 2, background: "var(--bdr2)" }} />
+      <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", whiteSpace: "nowrap" }}>{label}</span>
+      <div style={{ flex: 1, height: 2, background: "var(--bdr2)" }} />
+    </div>
+  );
+  return (
+    <div className="fade">
+      <div style={{ fontSize: 11, color: "var(--txt3)", lineHeight: 1.6, marginBottom: 12 }}>
+        A wave holds steps with no dependency on each other — everything in one box starts together, and the
+        wave order inside a track is fixed. <span style={{ color: "var(--amber)", fontWeight: 700 }}>Amber outline</span> = cross-track
+        sync point. The merge waits on all three tracks — pulling in firmware alone does not move it.
+      </div>
+      <WaveColumn track="P" title="Pre-design feasibility" open={open} done={done} />
+      {arrow("SPLIT — hardware, firmware and enclosure all start here, together")}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+        <WaveColumn track="H" title="Hardware" sub="concurrent track 1" open={open} done={done} />
+        <WaveColumn track="F" title="Firmware" sub="concurrent track 2" open={open} done={done} />
+        <WaveColumn track="E" title="Enclosure" sub="concurrent track 3" open={open} done={done} />
+      </div>
+      {arrow("MERGE at the Prototype Checklist — waits on all three tracks")}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+        <WaveColumn track="R" title="Prototype" sub="after the merge" open={open} done={done} />
+        <WaveColumn track="L" title="Pilot" sub="after prototype" open={open} done={done} />
+        <WaveColumn track="M" title="Mass production" sub="after pilot" open={open} done={done} />
+      </div>
+      <div style={{ marginTop: 12, fontSize: 10.5, color: "var(--txt3)" }}>Project closure follows mass production. Step detail sits in the Process view, keyed by the same wave ids.</div>
+    </div>
+  );
+}
+
 function ConvergeMark({ c }) {
   if (!c) return null;
   return (
@@ -6277,7 +6365,52 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
     try { await loadTemplateLinks(driveAction, { force: true }); }
     finally { setLinksBusy(false); setLinkTick((n) => n + 1); }
   };
+
+  /* Where the method itself comes from. Three doors, most exact first: a
+     pinned Drive link that names the workbook outright, an uploaded copy of
+     the file, and the by-name search as the fallback. The process rarely
+     changes — where it lives does, and a pin survives renames and moves. */
+  const [mapAt, setMapAt] = useState(0);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinUrl, setPinUrl] = useState(PIN.url);
+  const [srcNote, setSrcNote] = useState("");
+  const wbRef = useRef(null);
+  useEffect(() => {
+    const bump = () => setMapAt((n) => n + 1);
+    window.addEventListener("eb-process-map", bump);
+    return () => window.removeEventListener("eb-process-map", bump);
+  }, []);
+  useEffect(() => { loadProcessMap(driveAction).then(() => setMapAt((n) => n + 1)); }, []);
+  const uploadWorkbook = async (file) => {
+    setSrcNote(`Reading ${file.name}…`);
+    try {
+      const r = await loadProcessMapFromUpload(file);
+      setSrcNote(r.error || `${file.name}: ${r.steps} steps adopted as the method`);
+    } catch (e) { setSrcNote(`Couldn't read ${file.name}: ${e?.message || e}`); }
+  };
+  const savePin = async () => {
+    const r = pinWorkbook(pinUrl);
+    if (r.error) { setSrcNote(r.error); return; }
+    setPinOpen(false);
+    setSrcNote("Pinned — reading that exact file from Drive…");
+    await loadProcessMap(driveAction, { force: true });
+    setMapAt((n) => n + 1);
+    setSrcNote(SOURCE.from === "drive"
+      ? `Reading ${SOURCE.fileName} from the pinned link`
+      : `Pinned, but Drive answered: ${SOURCE.error || "nothing"} — the pin will be used next time Drive is reachable`);
+  };
+  const unpin = () => { clearPin(); setPinUrl(""); setSrcNote("Pin cleared — the workbook is found by name again."); };
   const board = (p.linkedIds || [])[0] || "";
+  /* The loaded workbook can be a PROJECT COPY — then every step carries an
+     Open link to that project's own file, which is the most exact link that
+     can exist. It belongs to that project alone: shown here only when the ids
+     agree, and said out loud when they do not. */
+  const normId = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const copy = projectCopyOf();
+  const copyMatches = !!copy && !!normId(p.projectId) &&
+    (normId(copy.projectId) === normId(p.projectId) ||
+     normId(copy.projectId).includes(normId(p.projectId)) ||
+     normId(p.projectId).includes(normId(copy.projectId)));
   /* Where each open to-do belongs. matchStep reads the words and is
      deliberately strict — half the significant words in common or it returns
      nothing — so a to-do lands on the step it names or on none at all. A
@@ -6292,7 +6425,8 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       // engineering artefacts under the board's own PCB-ID folder.
       projectRoot: pmPath(p.projectId), pcbRoot: board ? pcbPath(board) : "",
     }),
-    [p.projectId, p.startDate, p.deadline, p.team, users, board]);
+    // mapAt: a pinned or uploaded workbook replaces STEPS wholesale.
+    [p.projectId, p.startDate, p.deadline, p.team, users, board, mapAt]);
 
   /* Ask Drive for the real sheet behind every step in one block. What comes
      back is the file as it is actually saved — which is often not the name the
@@ -6331,14 +6465,38 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         {CONVERGENCE.length > 0 && <Pill color="var(--amber)">{CONVERGENCE.length} convergence points</Pill>}
         <span style={{ fontSize: 11, color: "var(--txt3)" }}>{sourceLine()}</span>
         <span style={{ fontSize: 11, color: LINKS.links ? "var(--txt3)" : "var(--amber)" }}>{linksLine()}</span>
+        {copy && copyMatches && <Pill color="var(--green)">step links from {copy.projectId}'s own workbook</Pill>}
+        {copy && !copyMatches && <Pill color="var(--amber)">the loaded workbook is {copy.projectId}'s copy — its step links don't apply here</Pill>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 7 }}>
           <Btn small kind="ghost" icon={linksBusy ? Loader2 : RefreshCw} disabled={linksBusy}
                title="Ask Drive which template files are actually alive and relink every sheet — the register's own links can point at deleted copies"
                onClick={refreshLinks}>{linksBusy ? "Checking Drive…" : "Refresh the file links"}</Btn>
+          <input ref={wbRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+                 onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) uploadWorkbook(f); }} />
+          <Btn small kind="ghost" icon={Upload} title="Hand over the process workbook directly — parsed here, no Drive needed"
+               onClick={() => wbRef.current?.click()}>Upload the workbook</Btn>
+          <Btn small kind={PIN.fileId ? "primary" : "ghost"} icon={Paperclip}
+               title="Paste the workbook's own Drive link — the exact file is read from then on, no searching, no wrong copy"
+               onClick={() => setPinOpen((v) => !v)}>{PIN.fileId ? "Workbook pinned" : "Pin the workbook link"}</Btn>
           <Btn small kind={mine ? "primary" : "ghost"} icon={Users} onClick={() => setMine((v) => !v)}>{mine ? "Everyone's steps" : "Only mine"}</Btn>
           <Btn small kind="ghost" icon={allOpen ? EyeOff : Eye} onClick={() => setOpenBlocks(allOpen ? new Set() : new Set(BLOCKS.map((b) => b.id)))}>{allOpen ? "Collapse all" : "Open all"}</Btn>
         </div>
       </div>
+
+      {pinOpen && (
+        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", border: "1px solid var(--bd)", borderRadius: 9 }}>
+          <span style={{ fontSize: 11, color: "var(--txt2)" }}>Paste the Drive link of the master workbook:</span>
+          <input value={pinUrl} onChange={(e) => setPinUrl(e.target.value)}
+                 placeholder="https://docs.google.com/spreadsheets/d/…"
+                 style={{ flex: "1 1 260px", padding: "6px 9px", borderRadius: 7, border: "1px solid var(--bdr2)", background: "var(--s1)", color: "var(--txt)", fontSize: 11.5, fontFamily: MONO }} />
+          <Btn small kind="primary" disabled={!pinUrl.trim()} onClick={savePin}>Use this file</Btn>
+          {PIN.fileId && <Btn small kind="ghost" onClick={unpin}>Unpin</Btn>}
+          <span style={{ flexBasis: "100%", fontSize: 10.5, color: "var(--txt3)" }}>
+            The exact file behind the link is read from then on — renames and moves don't break it, and the by-name search never runs. Share it with the service account first.
+          </span>
+        </div>
+      )}
+      {srcNote && <div style={{ fontSize: 11.5, color: "var(--txt2)", marginBottom: 10 }}>{srcNote}</div>}
 
       {mine && rows.length === 0 && (
         <Empty icon={ListChecks} title="No steps land on you in this project" sub="Steps are handed out by the slot somebody holds on this project's team. If that looks wrong, check the team on the Overview tab." />
@@ -6429,6 +6587,13 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                                   thing that tells them whether they can start
                                   and when they are done — and the path is on
                                   the sheet's own link anyway. */}
+                              {copyMatches && (r.openLink || r.masterLink) && (
+                                <div style={{ display: "flex", gap: 9, alignItems: "baseline", marginTop: 3 }}>
+                                  {r.openLink && <a href={r.openLink} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>}
+                                  {r.masterLink && <a href={r.masterLink} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: "var(--txt3)", textDecoration: "underline" }}>master</a>}
+                                  {r.location && <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--txt3)" }}>{r.location}</span>}
+                                </div>
+                              )}
                               <div style={{ marginTop: 3, display: "flex", flexDirection: "column", gap: 2 }}>
                                 {(r.entryQuestion || r.entryTrigger) && (
                                   <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>
@@ -6679,9 +6844,15 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
      with this project's dates and team in them, plus whatever this project has
      had to add. Whatever an AI or an uploaded checklist put in plan.stages is
      left exactly where it is; it is simply no longer what the plan means. */
+  const [mapAt, setMapAt] = useState(0);
+  useEffect(() => {
+    const bump = () => setMapAt((n) => n + 1);
+    window.addEventListener("eb-process-map", bump);
+    return () => window.removeEventListener("eb-process-map", bump);
+  }, []);
   const processStages = useMemo(
     () => stagesFromProcess(p, users, projTasks),
-    [p.projectId, p.startDate, p.deadline, p.team, p.linkedIds, users, projTasks]);
+    [p.projectId, p.startDate, p.deadline, p.team, p.linkedIds, users, projTasks, mapAt]);
   const edits = plan?.stageEdits || {};
   /* Anything this project needs that the method does not have comes off the
      daily scrum. A to-do already carries its title, its owner and its dates —
@@ -6690,7 +6861,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
      against the step it belongs to inside the Process view. */
   const unplaced = useMemo(
     () => projTasks.filter((t) => t.status !== "done" && !matchStep(t)),
-    [projTasks]);
+    [projTasks, mapAt]);
   const stages = useMemo(() => {
     const fromMethod = processStages.map((s) => ({ ...s, ...(edits[s.id] || {}) }));
     const extra = unplaced.map((t) => ({
@@ -6777,32 +6948,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
           </div>
         )}
 
-        {view === "flow" && (
-          /* One row per workstream — parallel work reads as parallel rows. */
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {groups.map(([track, list]) => (
-              <div key={track}>
-                {showTracks && <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 5 }}>{track}</div>}
-                <div style={{ display: "flex", gap: 0, overflowX: "auto", paddingBottom: 4 }}>
-                  {list.map((s, i) => (
-                    <div key={s.id} style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
-                      <button onClick={() => setOpenId(openId === s.id ? "" : s.id)}
-                        style={{ width: 128, padding: "10px 11px", borderRadius: 10, cursor: "pointer", textAlign: "left", background: openId === s.id ? "var(--soft)" : "var(--s1)", border: `1.5px solid ${openId === s.id ? "var(--acc)" : planColor(s.status)}` }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(s.status), flexShrink: 0 }} />
-                          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", fontFamily: MONO }}>{String(stages.indexOf(s) + 1).padStart(2, "0")}</span>
-                        </div>
-                        <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.35, marginBottom: 4 }}>{s.name}</div>
-                        <div style={{ fontSize: 10, color: "var(--txt3)" }}>{String(s.end || "").slice(5)}</div>
-                      </button>
-                      {i < list.length - 1 && <span style={{ width: 16, height: 2, background: "var(--bdr2)", flexShrink: 0 }} />}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        {view === "flow" && <WaveFlow projTasks={projTasks} />}
 
         {view === "log" && (
           (plan?.log || []).length === 0

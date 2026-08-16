@@ -160,6 +160,9 @@ function adopt(map) {
   BLOCKS = MAP.blocks || [];
   CONVERGENCE = MAP.convergence || [];
   WAVES = MAP.waves || [];
+  // Views memoise plans built from STEPS and BLOCKS; without a signal they
+  // would keep showing the old method after a new one was adopted.
+  try { window.dispatchEvent(new Event("eb-process-map")); } catch { /* not a browser */ }
   return MAP;
 }
 
@@ -193,6 +196,32 @@ export const convergenceAt = (step) =>
    data is used, and SOURCE says it is a cached copy and how old it is.       */
 const CACHE_KEY = "eb-process-map-v1";
 
+/* ── pinning the workbook ────────────────────────────────────────────────────
+   Finding the master workbook by name is a guess that usually lands — but a
+   guess. A pasted Drive link removes the guess: the file id inside it names
+   the exact file, however it is renamed or moved, and the search never runs.
+   The process itself rarely changes; WHERE it lives does. */
+const PIN_KEY = "eb-process-pin-v1";
+export const PIN = { fileId: "", url: "" };
+try {
+  const saved = JSON.parse(localStorage.getItem(PIN_KEY) || "null");
+  if (saved?.fileId) Object.assign(PIN, saved);
+} catch { /* no localStorage here */ }
+
+/* Every shape a Drive link comes in — /file/d/<id>/, /spreadsheets/d/<id>/,
+   ?id=<id> — carries the same 25+ character id. */
+export function pinWorkbook(url) {
+  const m = /[-\w]{25,}/.exec(String(url || ""));
+  if (!m) return { error: "That doesn't look like a Drive link — it should contain the long file id." };
+  Object.assign(PIN, { fileId: m[0], url: String(url).trim() });
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(PIN)); } catch { /* session-only then */ }
+  return { ok: true, fileId: PIN.fileId };
+}
+export function clearPin() {
+  Object.assign(PIN, { fileId: "", url: "" });
+  try { localStorage.removeItem(PIN_KEY); } catch { /* fine */ }
+}
+
 function fromCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
@@ -203,23 +232,32 @@ function fromCache() {
 }
 
 export async function loadProcessMap(readDrive, { force = false } = {}) {
-  if (!force && SOURCE.from === "drive") return MAP;
+  /* An uploaded workbook was handed over deliberately — including a project
+     copy whose per-step links a by-name Drive search could never reproduce.
+     A background refresh must not quietly replace it; only an explicit act
+     (pinning, or the refresh the user forces) may. */
+  if (!force && (SOURCE.from === "drive" || SOURCE.from === "upload")) return MAP;
 
   // A cached copy first, so the app is usable in the second before Drive
   // answers — then replaced the moment the live one arrives.
   const cached = fromCache();
   if (cached && SOURCE.from === "bundled") {
     adopt(cached.map);
-    Object.assign(SOURCE, cached.source, { from: "cache" });
+    const wasUpload = cached.source?.from === "upload";
+    Object.assign(SOURCE, cached.source, wasUpload ? {} : { from: "cache" });
+    if (wasUpload && !force) return MAP;
   }
 
   if (typeof readDrive !== "function") return MAP;
   try {
-    const r = await readDrive({ action: "process_map" });
+    const r = await readDrive({ action: "process_map", ...(PIN.fileId ? { fileId: PIN.fileId } : {}) });
     if (r?.error) throw new Error(r.error);
     if (!r?.steps?.length) throw new Error("Drive returned a workbook with no steps in it.");
 
-    adopt({ steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [],
+    adopt({ steps: r.steps, templates: r.templates || {},
+             // A workbook without a Flow Map (or a server that read none) must
+             // not dissolve the block structure the whole plan is read by.
+             blocks: r.blocks?.length ? r.blocks : BUNDLED.blocks || [],
              convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [] });
     Object.assign(SOURCE, {
       from: "drive", error: "",
@@ -230,7 +268,8 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
     });
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({
-        map: { steps: r.steps, templates: r.templates || {}, blocks: r.blocks || [],
+        map: { steps: r.steps, templates: r.templates || {},
+               blocks: r.blocks?.length ? r.blocks : BUNDLED.blocks || [],
                convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [] },
         source: { ...SOURCE },
       }));
@@ -245,8 +284,207 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
   return MAP;
 }
 
+/* ── an uploaded workbook ────────────────────────────────────────────────────
+   The same file, handed over directly instead of found in Drive — for the day
+   Drive is slow, the pin is stale, or somebody has the improved copy on their
+   desk before it is uploaded. Parsed in the browser with exactly the reading
+   the Drive path uses: steps from Process Flow, templates from Template
+   Actions, blocks and convergence from a Flow Map read whole by its own
+   section headers.
+
+   What the workbook cannot know is filled from the bundled register: folders
+   for the templates it never declares, the tree each one belongs to, what
+   good looks like. An upload should improve the method, not amputate it.    */
+export async function loadProcessMapFromUpload(file) {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  /* blankrows matters: sheet_to_json silently DROPS fully-empty rows, which
+     shifts every later row index off the sheet's real rows — and hyperlinks
+     are addressed by the sheet's real rows. With blank rows kept and the
+     range's own origin subtracted, JSON coordinates and cell coordinates are
+     the same thing again. */
+  const sheetRows = (name) => wb.Sheets[name]
+    ? XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: "", blankrows: true }) : null;
+  const clean = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+
+  /* Hyperlinks live on cells, not in values — and they are the whole point of
+     the project copy: an Open link per step that goes to THIS project's own
+     file. Keyed in JSON-row space so callers never think about the offset. */
+  const linksOf = (name) => {
+    const sh = wb.Sheets[name] || {};
+    let origin = { r: 0, c: 0 };
+    try { origin = XLSX.utils.decode_range(sh["!ref"]).s; } catch { /* empty sheet */ }
+    const at = new Map();
+    for (const addr in sh) {
+      if (addr[0] === "!") continue;
+      const t = sh[addr]?.l?.Target;
+      if (t) { const c = XLSX.utils.decode_cell(addr); at.set(`${c.r - origin.r}:${c.c - origin.c}`, t); }
+    }
+    return (r, c) => (c >= 0 ? at.get(`${r}:${c}`) || "" : "");
+  };
+
+  const flow = sheetRows("Process Flow");
+  if (!flow) return { error: `${file.name} has no "Process Flow" tab — is this the master workbook or a project copy of it?` };
+
+  /* Columns are found by their HEADER, not their position. The master and the
+     per-project copies lay the same information out differently, and the
+     sheet was designed so the app never has to be taught a layout twice —
+     which only holds if the app reads the words, not the column letters. */
+  const headerRow = flow.findIndex((r) => /^s\.?\s?no\.?$/i.test(clean(r[0])));
+  if (headerRow < 0) return { error: `${file.name}: no header row starting with "S. No." on the Process Flow tab.` };
+  const H = flow[headerRow].map((h) => clean(h).toLowerCase());
+  const col = (...res) => H.findIndex((h) => res.some((re) => re.test(h)));
+  const C = {
+    no: 0,
+    category: col(/^category/),
+    step: col(/^steps?$/),
+    entryTrigger: col(/^entry trigger/), exitTrigger: col(/^exit trigger/),
+    entryQuestion: col(/^entry question/), exitQuestion: col(/^exit question/),
+    templateFile: col(/template link|file name/),
+    templateId: col(/^template id/),
+    template: col(/^template to work|^template$/),
+    open: col(/^open\b/),
+    master: col(/^master/),
+    location: col(/^location/),
+    action: col(/^action/),
+    whatToDo: col(/^what to do/),
+    owner: col(/^owner/),
+    responsibility: col(/^responsibility/),
+    guidelines: col(/^guidelines/),
+  };
+  for (const need of ["category", "step", "responsibility"]) {
+    if (C[need] < 0) return { error: `${file.name}: the Process Flow tab has no "${need}" column — the header row reads: ${H.filter(Boolean).join(" | ")}` };
+  }
+
+  const flowLink = linksOf("Process Flow");
+  const steps = [];
+  for (let i = headerRow + 1; i < flow.length; i++) {
+    const r = flow[i];
+    const no = Number(clean(r[C.no]));
+    if (!Number.isFinite(no) || !clean(r[C.step])) continue;
+    const cell = (k) => (C[k] >= 0 ? clean(r[C[k]]) : "");
+    steps.push({
+      no, category: cell("category"), step: cell("step"),
+      entryTrigger: cell("entryTrigger"), exitTrigger: cell("exitTrigger"),
+      entryQuestion: cell("entryQuestion"), exitQuestion: cell("exitQuestion"),
+      templateFile: cell("templateFile").replace(/^EB-T-\d+\s*[·|:-]\s*/, ""),
+      templateId: cell("templateId"), template: cell("template"),
+      action: cell("action"), whatToDo: cell("whatToDo"),
+      owner: cell("owner"), responsibility: cell("responsibility"), guidelines: cell("guidelines"),
+      /* The three columns that make the sheet the source of truth for WHERE:
+         the project's own file, the blank it came from, and the human-readable
+         location. Links that came off the sheet somebody deliberately built
+         are exactly the "cannot be wrong" links asked for. */
+      openLink: flowLink(i, C.open),
+      masterLink: flowLink(i, C.master),
+      location: cell("location"),
+    });
+  }
+  if (!steps.length) return { error: `${file.name} opened, but its Process Flow tab has no step rows.` };
+
+  const templates = {};
+  {
+    const ta = sheetRows("Template Actions") || [];
+    const taLink = linksOf("Template Actions");
+    const th = ta.findIndex((r) => /^template id/i.test(clean(r[0])));
+    for (let i = (th < 0 ? 4 : th + 1); i < ta.length; i++) {
+      const r = ta[i];
+      const id = clean(r[0]);
+      if (!/^EB-T-/.test(id)) continue;
+      templates[id] = {
+        id, name: clean(r[1]), folder: clean(r[3]),
+        steps: clean(r[4]).split(",").map((x) => Number(x.trim())).filter(Number.isFinite),
+        actions: clean(r[6]).split("·").map((x) => x.trim()).filter(Boolean),
+        link: taLink(i, 2) || "",
+      };
+    }
+  }
+  for (const [id, base] of Object.entries(BUNDLED.templates || {})) {
+    const t = templates[id];
+    if (!t) { templates[id] = { ...base }; continue; }
+    templates[id] = { ...base, ...t, folder: t.folder || base.folder };
+  }
+
+  const blocks = [], convergence = [];
+  {
+    const fm = sheetRows("Flow Map") || [];
+    let section = "";
+    for (let i = 0; i < fm.length; i++) {
+      const c = (fm[i] || []).map(clean);
+      if (!c.some(Boolean)) continue;
+      if (c[0] === "Block" && /categor/i.test(c[1] || "")) { section = "blocks"; continue; }
+      if (/convergence step/i.test(c[1] || "")) { section = "convergence"; continue; }
+      if (/^cross-track convergence/i.test(c[0] || "")) { section = ""; continue; }
+      if (section === "blocks") {
+        if (/^TOTAL$/i.test(c[0]) || /^TOTAL$/i.test(c[2])) { section = ""; continue; }
+        if (!c[0] || !c[1]) continue;
+        const group = (c[0].match(/^([A-Z])\b/) || [])[1] || "X";
+        const nth = blocks.filter((b) => b.group === group).length + 1;
+        const name = (c[1].replace(/^\d+\s*·\s*/, "") || c[1]).trim();
+        blocks.push({ seq: blocks.length + 1, id: `${group}${nth}`, group,
+          kind: c[0].replace(/^[A-Z]\s*[—–-]\s*/, "").trim() || "Serial",
+          name, label: `${group}${nth} · ${name}`, block: c[0], category: c[1],
+          sourceRows: c[2] || "", steps: Number(c[3]) || 0, runs: c[4] || "", convergesWith: c[5] || "" });
+      } else if (section === "convergence") {
+        if (!c[1]) continue;
+        convergence.push({ n: Number(c[0]) || convergence.length + 1,
+          name: c[1].replace(/\s*\(row\s*\d+\)\s*$/i, "").trim(),
+          tracks: c[2] || "", agree: c[3] || "", merge: /merge/i.test(c[2] || ""), steps: [] });
+      }
+    }
+    const known = new Set(steps.map((x) => x.category));
+    for (const b of blocks) {
+      if (known.has(b.category)) continue;
+      const stem = b.category.replace(/\s*\([^)]*\)\s*$/, "");
+      if (known.has(stem)) b.category = stem;
+    }
+  }
+
+  /* The Project tab names whose copy this is — its per-step links belong to
+     that project and no other. */
+  let projectCopy = null;
+  {
+    const pr = sheetRows("Project") || [];
+    const prLink = linksOf("Project");
+    const find = (label) => {
+      const i = pr.findIndex((r) => new RegExp(`^${label}$`, "i").test(clean(r[0])));
+      return i < 0 ? ["", ""] : [clean(pr[i][1]), prLink(i, 1)];
+    };
+    const [projectId] = find("Project ID");
+    const [pcbId] = find("PCB ID");
+    const [pmText, pmLink] = find("Project folder");
+    const [pcbText, pcbLink] = find("PCB folder");
+    if (projectId) projectCopy = { projectId, pcbId,
+      pmFolderLink: pmLink || pmText, pcbFolderLink: pcbLink || pcbText };
+  }
+
+  adopt({ steps, templates,
+    blocks: blocks.length ? blocks : (BUNDLED.blocks || []),
+    convergence: convergence.length ? convergence : (BUNDLED.convergence || []),
+    projectCopy });
+  Object.assign(SOURCE, {
+    from: "upload", error: "", fileName: file.name, path: "", editLink: "",
+    modifiedTime: "", fetchedAt: new Date().toISOString(),
+  });
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy },
+      source: { ...SOURCE },
+    }));
+  } catch { /* quota */ }
+  const linked = steps.filter((x) => x.openLink).length;
+  return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked,
+           projectCopy: projectCopy?.projectId || "" };
+}
+
+/* Whose copy the loaded workbook is, if it is one. */
+export const projectCopyOf = () => MAP.projectCopy || null;
+
 /* One line for the UI: which method this plan is built from. */
 export function sourceLine() {
+  if (SOURCE.from === "upload") {
+    return `From ${SOURCE.fileName || "an uploaded workbook"} — uploaded${SOURCE.fetchedAt ? ` ${SOURCE.fetchedAt.slice(0, 10)}` : ""}`;
+  }
   if (SOURCE.from === "drive") {
     const when = SOURCE.modifiedTime ? ` · edited ${SOURCE.modifiedTime.slice(0, 10)}` : "";
     return `From ${SOURCE.fileName || "the workbook"} in Drive${when}`;
@@ -687,9 +925,13 @@ export function buildPlan(project, users = [], opts = {}) {
       // The sheet's actual name, from the register. A template id on its own
       // tells nobody what they are about to open.
       templateName: templateFor(s)?.name || "",
-      // Deliberately NOT the link: rows are memoised and links are verified
-      // against Drive after the fact — a link baked in here would be the very
-      // staleness this module exists to kill. Render-time lookups only.
+      // Deliberately NOT the template link: rows are memoised and those are
+      // verified against Drive after the fact — render-time lookups only. The
+      // step's OWN links are different: they came off the project workbook
+      // somebody deliberately built, and they are the row's payload.
+      openLink: s.openLink || "",
+      masterLink: s.masterLink || "",
+      location: s.location || "",
 
       templateStandard: templateStandard(s),
       // Where the parallel tracks have to stop and agree before this can close.
