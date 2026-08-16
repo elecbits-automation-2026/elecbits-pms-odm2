@@ -823,19 +823,54 @@ Deno.serve(async (req) => {
         if (!byId.has(m[1])) byId.set(m[1], []);
         byId.get(m[1])!.push(f);
       }
+      /* Which copy is the master. The template trees have been copied into
+         project folders wholesale, so most ids have several live copies — and
+         "newest wins" would happily link the copy inside whichever project
+         somebody touched last. The library master is the copy that does NOT
+         live under the execution branches (Project Management - …, PCB &
+         Firmware - …), so for contested ids the parent folder's path decides.
+         Paths are resolved per distinct PARENT, not per file — the copies
+         cluster into few folders, and the ancestor walk is cached anyway. */
+      const contested = [...byId.values()].filter((fs) => fs.length > 1).flatMap((fs) => fs);
+      const parentIds = [...new Set(contested.map((f) => f.parents?.[0]).filter(Boolean))] as string[];
+      const parentPath = new Map<string, string>();
+      await inParallel(parentIds.slice(0, 120), 6, async (pid) => {
+        /* folderPath(f) resolves f's ancestors from parents[0], so handing it
+           the parent as its own parent yields the parent's full chain. The
+           probe id keeps this out of the real path cache. */
+        const path = await folderPath(token, { id: `${pid}|probe`, name: "", parents: [pid] } as GFile).catch(() => "");
+        parentPath.set(pid, path);
+      });
+      const inExecution = (f: GFile) => {
+        const path = parentPath.get(f.parents?.[0] || "") || "";
+        return /\/(project management|pcb & firmware)[^/]*\//i.test(path);
+      };
+
+      /* The link people click must land them IN the file, editing. Drive's
+         webViewLink opens a preview for a .docx; the docs.google.com /edit
+         form opens the real editor for native and Office files alike — the
+         same shape as a link copied out of Docs itself. Anything else (PDF,
+         STEP, ZIP) keeps its preview link, because there is no editor. */
+      const editKind = (mime: string) =>
+        /spreadsheet|sheet\b|spreadsheetml/.test(mime) ? "spreadsheets"
+          : /presentation|presentationml/.test(mime) ? "presentation"
+          : /document\b|wordprocessingml/.test(mime) ? "document" : "";
+
       const links: Record<string, unknown> = {};
       const duplicates: { id: string; copies: number }[] = [];
       for (const [id, files] of byId) {
-        files.sort((a, b) => String(b.modifiedTime || "").localeCompare(String(a.modifiedTime || "")));
+        files.sort((a, b) =>
+          (Number(inExecution(a)) - Number(inExecution(b))) ||
+          String(b.modifiedTime || "").localeCompare(String(a.modifiedTime || "")));
         const f = files[0];
         if (files.length > 1) duplicates.push({ id, copies: files.length });
         const native = (f.mimeType || "").startsWith("application/vnd.google-apps.");
-        const kind = /spreadsheet/.test(f.mimeType || "") ? "spreadsheets"
-          : /presentation/.test(f.mimeType || "") ? "presentation" : "document";
+        const kind = editKind(f.mimeType || "");
         links[id] = {
           id: f.id, name: f.name, mimeType: f.mimeType || "", modifiedTime: f.modifiedTime || "",
-          link: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
-          downloadLink: native
+          link: kind ? `https://docs.google.com/${kind}/d/${f.id}/edit`
+                     : (f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`),
+          downloadLink: native && kind
             ? `https://docs.google.com/${kind}/d/${f.id}/export?format=${kind === "spreadsheets" ? "xlsx" : kind === "presentation" ? "pptx" : "docx"}`
             : `https://drive.google.com/uc?export=download&id=${f.id}`,
           copies: files.length,
@@ -1151,8 +1186,9 @@ Deno.serve(async (req) => {
          in Drive downloads directly. Getting this wrong hands someone a link
          that 404s at the moment they need the file. */
       const native = (hit.mimeType || "").startsWith("application/vnd.google-apps.");
-      const kind = /spreadsheet/.test(hit.mimeType || "") ? "spreadsheets"
-        : /presentation/.test(hit.mimeType || "") ? "presentation" : "document";
+      const kind = /spreadsheet|spreadsheetml/.test(hit.mimeType || "") ? "spreadsheets"
+        : /presentation|presentationml/.test(hit.mimeType || "") ? "presentation"
+        : /document\b|wordprocessingml/.test(hit.mimeType || "") ? "document" : "";
       const asFormat = kind === "spreadsheets" ? "xlsx" : kind === "presentation" ? "pptx" : "docx";
       return json({
         ok: true, found: true,
@@ -1161,8 +1197,14 @@ Deno.serve(async (req) => {
           id: hit.id, name: hit.name, mimeType: hit.mimeType,
           modifiedTime: hit.modifiedTime || "", size: hit.size || "",
           path: "/" + walked.join("/") + "/" + hit.name,
-          openLink: hit.webViewLink || `https://drive.google.com/open?id=${hit.id}`,
-          downloadLink: native
+          /* The editor, not the preview. A .docx behind webViewLink opens a
+             read-only pane with an "Open with" hop; the /edit form is the
+             link somebody would copy out of Docs itself. Files with no
+             editor (PDF, STEP, ZIP) keep the preview. */
+          openLink: kind
+            ? `https://docs.google.com/${kind}/d/${hit.id}/edit`
+            : (hit.webViewLink || `https://drive.google.com/open?id=${hit.id}`),
+          downloadLink: native && kind
             ? `https://docs.google.com/${kind}/d/${hit.id}/export?format=${asFormat}`
             : `https://drive.google.com/uc?export=download&id=${hit.id}`,
         },
