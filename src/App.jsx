@@ -35,7 +35,7 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes,
          BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
-         sourceLine, templateLink } from "./lib/processMap.js";
+         sourceLine, templateLink, servesOf, templateFor } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -4646,7 +4646,7 @@ function WorkWindow({ t, onClose, onComplete }) {
           ) : <div style={{ color: "var(--txt2)", marginBottom: 10 }}>No sub-steps written — the title is the scope.</div>}
           <ConditionRail conditions={t.conditions} />
           {step ? (
-            <StepGuidance step={step} task={t} onPick={pickStep}
+            <StepGuidance step={step} task={t} onPick={pickStep} board={(p?.linkedIds || [])[0] || ""}
                           onUse={(name, path) => setW((v) => ({ ...v, fileName: v.fileName || name, fileLocation: v.fileLocation || path }))} />
           ) : (<>
             <StepPicker task={t} onPick={pickStep} />
@@ -4733,13 +4733,19 @@ function StepPicker({ task, onPick }) {
    The path and file name are offered rather than imposed — one click fills the
    evidence fields, because the commonest reason a closure has no artefact
    recorded is that typing a 90-character Drive path by hand is miserable. */
-function StepGuidance({ step, task, onUse, onPick }) {
+function StepGuidance({ step, task, onUse, onPick, board = "" }) {
   const [file, setFile] = useState(null);
   const [looking, setLooking] = useState(false);
   const wave = waveOf(step.no);
-  const name = fileNameFor(step, task.projectId);
+  const name = fileNameFor(step, task.projectId, board);
   const folder = folderFor(step);
-  const path = pathFor(step, task.projectId, pmPath(task.projectId).replace(/\/$/, ""));
+  /* Two trees, not one. The template library's own layout says whether this
+     step's sheet lives in the project folder or the board's PCB-ID folder —
+     an engineering step pointed at the PM tree names a file that will never
+     be there. */
+  const inPcb = servesOf(step) === "pcb" && board;
+  const root = (inPcb ? pcbPath(board) : pmPath(task.projectId)).replace(/\/$/, "");
+  const path = pathFor(step, task.projectId, root, board);
 
   /* Ask Drive where the file actually is. The templates are pre-stored in the
      project folder, so this is a lookup, never a creation — and half of them
@@ -4747,7 +4753,7 @@ function StepGuidance({ step, task, onUse, onPick }) {
      has to come from Drive rather than from the workbook's ideal name. */
   const locate = async () => {
     setLooking(true);
-    const r = await driveStepFile({ projectId: task.projectId, folder, fileName: name, template: step.template });
+    const r = await driveStepFile({ projectId: inPcb ? board : task.projectId, folder, fileName: name, template: step.template });
     setLooking(false);
     setFile(r);
   };
@@ -6069,7 +6075,29 @@ function IdeaBoard({ credit, compact }) {
    Gantt for the shape of the schedule, Flow for the sequence, Steps for the
    detail, Changes for who moved what and when. Clicking anything anywhere
    opens the same stage detail.                                              */
-const PLAN_VIEWS = [["steps", "Steps"], ["flow", "Flow"], ["gantt", "Timeline"], ["process", "Process"], ["log", "Changes"]];
+/* The process IS the plan. There is no separate list of stages somebody made
+   up alongside it — Flow and Timeline draw the same ten blocks the Process
+   view lists, and Changes is the record of what has been added to them. */
+const PLAN_VIEWS = [["process", "Process"], ["flow", "Flow"], ["gantt", "Timeline"], ["log", "Changes"]];
+
+/* Work this project needs that the method does not have arrives from the daily
+   scrum, not from a form somebody fills in twice. A to-do raised in the scrum
+   already carries its title, its owner and its dates — the only thing missing
+   is WHERE in the process it belongs, and the words are usually enough to say.
+
+   What a to-do demands is read from those same words. It changes nothing about
+   the task; it just means the block shows "a sheet has to be created" rather
+   than making somebody re-read the title to work that out. */
+const TASK_DEMANDS = [
+  [/\b(sheet|tracker|bom|checklist|xlsx|excel)\b/i, "a sheet to create or fill"],
+  [/\b(doc|document|report|write|draft|spec|letter)\b/i, "a document to write"],
+  [/\b(e-?mail|mail|send to|reply|follow up)\b/i, "an email to send"],
+  [/\b(call|meeting|review with|sync|discuss)\b/i, "a call to hold"],
+  [/\b(approv|sign-?off|sanction|confirm)\b/i, "an approval to get"],
+  [/\b(order|procure|purchase|po\b|quote|vendor)\b/i, "something to order"],
+  [/\b(test|measure|validat|verif)\b/i, "something to test"],
+];
+const demandOf = (t) => TASK_DEMANDS.find(([re]) => re.test(String(t?.title || "")))?.[1] || "";
 
 /* ═══ THE PROCESS PLAN ═══════════════════════════════════════════════════════
    The company's method, instantiated for one project. Not an AI's reading of
@@ -6081,6 +6109,91 @@ const PLAN_VIEWS = [["steps", "Steps"], ["flow", "Flow"], ["gantt", "Timeline"],
    name on a list: which part of the process it belongs to, what it is, the
    template it writes to, and whose job it is. Those four were asked for by
    name, and they are the row — everything else is secondary detail.          */
+/* The plan, built from the method instead of guessed at.
+
+   The other two builders ask an AI to invent stages or read whatever checklist
+   somebody uploaded, and both produce a plan that is about this project but is
+   not the company's process. This one is the process: the ten blocks the Flow
+   Map names, in its order, on the tracks it says run at the same time, dated
+   from the wave graph and the project's own milestones.
+
+   Deliberately ten stages and not 308. The Timeline and Flow views are for the
+   SHAPE of the project — what overlaps, what waits — and 308 bars is not a
+   shape anybody can read. The steps themselves live in the Process view, which
+   is where somebody goes to do the work. */
+const TRACK_OF_BLOCK = [
+  [/Hardware/i, "Hardware"], [/Firmware/i, "Firmware"], [/Enclosure/i, "Enclosure"],
+  [/Test/i, "Testing"], [/DFx/i, "DFx gates"],
+];
+function stagesFromProcess(p, users) {
+  const rows = buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId) });
+  const stages = [];
+  for (const b of BLOCKS) {
+    const mine = rows.filter((r) => r.block === b.id);
+    if (!mine.length) continue;
+    const start = mine.map((r) => r.start).filter(Boolean).sort()[0] || "";
+    const end = mine.map((r) => r.end).filter(Boolean).sort().at(-1) || "";
+    // Whoever holds most of the block's steps is the person to ask about it.
+    const tally = {};
+    for (const r of mine) if (r.assigneeId) tally[r.assigneeId] = (tally[r.assigneeId] || 0) + 1;
+    const owner = users.find((u) => String(u.id) === (Object.entries(tally).sort((a, c) => c[1] - a[1])[0] || [])[0])?.name || "";
+    const cv = [...new Set(mine.filter((r) => r.converge).map((r) => r.converge.name))];
+    stages.push({
+      id: `block-${b.id.toLowerCase()}`,
+      name: `${b.id} · ${b.name}`,
+      // Never "done": nothing here has been checked against Drive, and a stage
+      // claiming to be finished when nobody looked is worse than an empty plan.
+      status: "pending",
+      track: TRACK_OF_BLOCK.find(([re]) => re.test(b.name))?.[1] || "Plan",
+      start, end, owner,
+      note: [`${mine.length} steps of the process`, b.runs, cv.length ? `must agree with the other tracks at: ${cv.join("; ")}` : ""]
+        .filter(Boolean).join(" · "),
+      evidence: [],
+    });
+  }
+  return stages;
+}
+
+/* The actual sheet, once Drive has been asked for it. Three answers and all
+   three matter: here it is, it is here under a different name, it is not here.
+   The middle one is the common one — the crawl behind the sitemaps found the
+   same artefact under three spellings across 122 projects — and quietly
+   opening it without saying so is how the drift keeps spreading. */
+function DriveSheet({ hit }) {
+  if (!hit) return null;
+  if (hit.error) return <div style={{ fontSize: 10.5, color: "var(--amber)", marginTop: 3 }}>Drive: {hit.error}</div>;
+  if (!hit.found) {
+    /* "Not found" is a dead end; the files that ARE in that folder are a
+       choice. Half of these folders hold the right artefact under a name
+       nobody expected, and one of these links is usually it. */
+    const near = (hit.candidates || []).slice(0, 3);
+    return (
+      <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 3 }}>
+        <div style={{ color: "var(--amber)" }}>{hit.missingFolder ? `no "${hit.missingFolder}" folder yet` : "not in the folder yet"}</div>
+        {near.length > 0 && (
+          <div style={{ marginTop: 1 }}>
+            what is there:{" "}
+            {near.map((c, i) => (
+              <span key={c.id}>{i > 0 ? ", " : ""}
+                <a href={c.openLink} target="_blank" rel="noreferrer" style={{ color: "var(--txt2)" }}>{c.name}</a>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  const f = hit.file || hit;
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", marginTop: 3 }}>
+      {f.openLink && <a href={f.openLink} target="_blank" rel="noreferrer" style={{ fontSize: 10.5, fontWeight: 700, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>}
+      {f.downloadLink && <a href={f.downloadLink} target="_blank" rel="noreferrer" style={{ fontSize: 10.5, color: "var(--txt2)", textDecoration: "none" }}>Download</a>}
+      <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--txt3)" }}>{f.name}</span>
+      {hit.renamed && <span style={{ fontSize: 9.5, color: "var(--amber)" }}>saved as this, not as the workbook's name</span>}
+    </div>
+  );
+}
+
 function ConvergeMark({ c }) {
   if (!c) return null;
   return (
@@ -6090,15 +6203,58 @@ function ConvergeMark({ c }) {
   );
 }
 
-export function ProcessPlan({ p, users, meId }) {
+export function ProcessPlan({ p, users, meId, tasks = [] }) {
   const [openBlocks, setOpenBlocks] = useState(() => new Set());
   const [mine, setMine] = useState(false);
-
-  /* 308 rows through the scheduler on every keystroke would make the whole tab
-     feel broken; it only changes when the project's window or team does. */
+  /* What Drive actually holds, keyed by step number. A path is a claim about
+     where a file ought to be; this is the file. Resolved a block at a time —
+     308 lookups on open would hammer Drive for rows nobody is looking at. */
+  const [found, setFound] = useState({});
+  const [finding, setFinding] = useState("");
+  const board = (p.linkedIds || [])[0] || "";
+  /* Where each open to-do belongs. matchStep reads the words and is
+     deliberately strict — half the significant words in common or it returns
+     nothing — so a to-do lands on the step it names or on none at all. A
+     wrong placement would put somebody's work in the wrong block and be
+     invisible; an unplaced one is at least visibly unplaced. */
+  const todosByStep = useMemo(() => {
+    const at = {};
+    for (const t of tasks) {
+      if (t.status === "done") continue;
+      const step = matchStep(t);
+      if (step) (at[step.no] ||= []).push(t);
+    }
+    return at;
+  }, [tasks]);
+  const unplacedTodos = useMemo(
+    () => tasks.filter((t) => t.status !== "done" && !matchStep(t)), [tasks]);
   const plan = useMemo(
-    () => buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId) }),
-    [p.projectId, p.startDate, p.deadline, p.team, users]);
+    () => buildProcessPlan(p, users, {
+      // Two trees, not one: PM artefacts live under the project folder and
+      // engineering artefacts under the board's own PCB-ID folder.
+      projectRoot: pmPath(p.projectId), pcbRoot: board ? pcbPath(board) : "",
+    }),
+    [p.projectId, p.startDate, p.deadline, p.team, users, board]);
+
+  /* Ask Drive for the real sheet behind every step in one block. What comes
+     back is the file as it is actually saved — which is often not the name the
+     workbook says, and sometimes is not there at all. Both answers are worth
+     having; only one of them is worth pretending about, and it is neither. */
+  const findInDrive = async (blockId, rows) => {
+    if (finding) return;
+    setFinding(blockId);
+    try {
+      const wanted = rows.filter((r) => r.folder && !found[r.no]);
+      for (let i = 0; i < wanted.length; i += 4) {
+        const batch = wanted.slice(i, i + 4);
+        const got = await Promise.all(batch.map((r) =>
+          driveStepFile({ projectId: r.serves === "pcb" && board ? board : p.projectId,
+                          folder: r.folder, fileName: r.fileName, template: r.template })
+            .then((d) => [r.no, d]).catch((e) => [r.no, { found: false, error: String(e?.message || e) }])));
+        setFound((cur) => ({ ...cur, ...Object.fromEntries(got) }));
+      }
+    } finally { setFinding(""); }
+  };
 
   const groups = blocksInSequence();
   const rows = mine ? plan.filter((r) => String(r.assigneeId) === String(meId)) : plan;
@@ -6152,6 +6308,23 @@ export function ProcessPlan({ p, users, meId }) {
                   {/gated/i.test(b.runs) && <Pill color="var(--amber)">gated</Pill>}
                   <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--txt3)", textAlign: "right" }}>{b.convergesWith}</span>
                 </button>
+                {isOpen && list.some((r) => r.folder) && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 11px", borderTop: "1px solid var(--bd)", flexWrap: "wrap" }}>
+                    <Btn small kind="ghost" icon={finding === b.id ? Loader2 : Search} disabled={!!finding}
+                      onClick={() => findInDrive(b.id, list)}>
+                      {finding === b.id ? "Looking in Drive…" : "Open the real sheets"}
+                    </Btn>
+                    <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
+                      the files as they are actually saved in {p.projectId}{board ? ` and ${board}` : ""}
+                    </span>
+                    {(() => {
+                      const seen = list.filter((r) => found[r.no]);
+                      if (!seen.length) return null;
+                      const have = seen.filter((r) => found[r.no]?.found).length;
+                      return <Pill color={have === seen.length ? "var(--green)" : "var(--amber)"}>{have} of {seen.length} are there</Pill>;
+                    })()}
+                  </div>
+                )}
 
                 {isOpen && (list.length === 0 ? (
                   <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--txt3)" }}>Nothing in this block is yours.</div>
@@ -6176,18 +6349,64 @@ export function ProcessPlan({ p, users, meId }) {
                                 <span style={{ fontWeight: 600 }}>{r.title}</span>
                                 <ConvergeMark c={r.converge} />
                               </div>
-                              {r.fileName && (
-                                <div style={{ fontFamily: MONO, fontSize: 10, color: "var(--txt3)", marginTop: 2 }}>
-                                  {r.path || r.fileName}
-                                  {!r.path && r.folderUnknown && <span style={{ color: "var(--amber)" }}> · no folder is recorded for {r.folderUnknown}</span>}
+                              {/* What the step IS, not where its file sits. A
+                                  Drive path is four lines of folder names
+                                  somebody has to read past to reach the only
+                                  thing that tells them whether they can start
+                                  and when they are done — and the path is on
+                                  the sheet's own link anyway. */}
+                              <div style={{ marginTop: 3, display: "flex", flexDirection: "column", gap: 2 }}>
+                                {(r.entryQuestion || r.entryTrigger) && (
+                                  <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>
+                                    <span style={{ fontWeight: 700, color: "var(--amber)" }}>Before you start — </span>
+                                    {r.entryQuestion || r.entryTrigger}
+                                  </div>
+                                )}
+                                {(r.exitQuestion || r.exitTrigger) && (
+                                  <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>
+                                    <span style={{ fontWeight: 700, color: "var(--green)" }}>Before you close — </span>
+                                    {r.exitQuestion || r.exitTrigger}
+                                  </div>
+                                )}
+                                {(r.guidelines || r.whatToDo) && (
+                                  <div style={{ fontSize: 10.5, color: "var(--txt3)", lineHeight: 1.5 }}>{r.guidelines || r.whatToDo}</div>
+                                )}
+                                {!r.path && r.folderUnknown && (
+                                  <div style={{ fontSize: 10, color: "var(--amber)" }}>no folder is recorded for {r.folderUnknown}</div>
+                                )}
+                              </div>
+                              <DriveSheet hit={found[r.no]} />
+                              {(todosByStep[r.no] || []).map((t) => (
+                                <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap", marginTop: 3, fontSize: 10.5 }}>
+                                  <span style={{ padding: "0 5px", borderRadius: 4, background: "color-mix(in srgb, var(--acc) 14%, transparent)", color: "var(--acc)", fontWeight: 800, fontSize: 9 }}>SCRUM</span>
+                                  <span style={{ color: "var(--txt)" }}>{t.title}</span>
+                                  {demandOf(t) && <span style={{ color: "var(--txt3)" }}>· {demandOf(t)}</span>}
+                                  <span style={{ color: "var(--txt3)" }}>
+                                    · {users.find((u) => u.id === t.assigneeId)?.name || "unassigned"}{t.date ? ` · ${fmtDate(t.date)}` : ""}
+                                  </span>
                                 </div>
-                              )}
+                              ))}
                               {r.converge?.agree && <div style={{ fontSize: 10.5, color: "var(--amber)", marginTop: 2 }}>Must agree: {r.converge.agree}</div>}
                             </td>
                             <td style={{ ...td, fontFamily: MONO, fontSize: 10.5 }}>
-                              {r.templateLink
-                                ? <a href={r.templateLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateId}</a>
-                                : (r.templateId || <span style={{ color: "var(--txt3)" }}>—</span>)}
+                              {/* The id names the template, and that is all it
+                                  is for. The link that matters is on the row's
+                                  own sheet in the project folder, not on the
+                                  blank in the library — so the blank is a
+                                  quiet second line, not the headline. */}
+                              <div style={{ color: "var(--txt3)" }}>{r.templateId || "—"}</div>
+                              {/* The number is not the sheet. "EB-T-030" tells
+                                  nobody what they are opening; the register
+                                  knows it is the Test Environment Setup
+                                  Record, so say so. */}
+                              {r.templateName && (
+                                <div style={{ fontFamily: "inherit", fontSize: 10.5, color: "var(--txt2)", lineHeight: 1.35, marginTop: 1 }}>
+                                  {r.templateLink
+                                    ? <a href={r.templateLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateName}</a>
+                                    : r.templateName}
+                                </div>
+                              )}
+                              {r.fileName && <div style={{ fontSize: 9.5, color: "var(--txt3)", marginTop: 1 }}>{r.fileName}</div>}
                             </td>
                             <td style={td}>{r.responsibility || <span style={{ color: "var(--txt3)" }}>—</span>}</td>
                             <td style={{ ...td, fontSize: 10.5 }}>
@@ -6205,6 +6424,31 @@ export function ProcessPlan({ p, users, meId }) {
           })}
         </div>
       ))}
+
+      {unplacedTodos.length > 0 && (
+        <div style={{ border: "1px solid var(--bd)", borderRadius: 9, padding: "11px 13px", marginBottom: 10 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 7 }}>
+            Raised in the scrum, not yet part of the process
+          </div>
+          <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 7 }}>
+            {/* Guessing a block from a title the matcher already rejected would
+                bury real work under the wrong heading, where nobody would look
+                for it. Unplaced and visible beats placed and wrong. */}
+            The words in these don't name a step of the method. Link one to its step from the work window and it moves into that block.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {unplacedTodos.map((t) => (
+              <div key={t.id} style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", fontSize: 11.5 }}>
+                <span style={{ color: "var(--txt)" }}>{t.title}</span>
+                {demandOf(t) && <span style={{ color: "var(--acc)", fontSize: 10.5 }}>{demandOf(t)}</span>}
+                <span style={{ color: "var(--txt3)", fontSize: 10.5 }}>
+                  {users.find((u) => u.id === t.assigneeId)?.name || "unassigned"}{t.date ? ` · ${fmtDate(t.date)}` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {CONVERGENCE.length > 0 && (
         <div style={{ border: "1px solid var(--bd)", borderRadius: 9, padding: "11px 13px", marginTop: 4 }}>
@@ -6314,40 +6558,43 @@ function StageDetail({ stage, tasks, users, onClose }) {
 }
 
 function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, filing, myName, meId }) {
-  const [view, setView] = useState("steps");
+  /* Opens on the METHOD, not on a guess about it. The other views show a plan
+     an AI or an uploaded checklist produced; this one shows the company's own
+     308-step process with this project's dates in it. Which of the two a PM
+     sees first decides which one they work to. */
+  const [view, setView] = useState("process");
   const [openId, setOpenId] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState([]);
-  const sheetRef = useRef(null);
   const plan = p.plan;
-  const stages = plan?.stages || [];
+  /* Flow, Timeline and Changes all read THIS — the ten blocks of the method
+     with this project's dates and team in them, plus whatever this project has
+     had to add. Whatever an AI or an uploaded checklist put in plan.stages is
+     left exactly where it is; it is simply no longer what the plan means. */
+  const processStages = useMemo(
+    () => stagesFromProcess(p, users),
+    [p.projectId, p.startDate, p.deadline, p.team, p.linkedIds, users]);
+  const edits = plan?.stageEdits || {};
+  /* Anything this project needs that the method does not have comes off the
+     daily scrum. A to-do already carries its title, its owner and its dates —
+     it is only unplaced, and the only ones worth showing beside the blocks are
+     those the words cannot place, because everything else is already sitting
+     against the step it belongs to inside the Process view. */
+  const unplaced = useMemo(
+    () => projTasks.filter((t) => t.status !== "done" && !matchStep(t)),
+    [projTasks]);
+  const stages = useMemo(() => {
+    const fromMethod = processStages.map((s) => ({ ...s, ...(edits[s.id] || {}) }));
+    const extra = unplaced.map((t) => ({
+      id: `todo-${t.id}`, name: t.title, status: t.status === "blocked" ? "blocked" : "pending",
+      track: "Raised in the scrum", start: t.date || todayStr(), end: t.date || todayStr(),
+      owner: users.find((u) => u.id === t.assigneeId)?.name || "",
+      note: [demandOf(t), "raised in the scrum, not yet placed in the process"].filter(Boolean).join(" · "),
+      evidence: [], added: true,
+    }));
+    return [...fromMethod, ...extra].sort((x, y) => String(x.start).localeCompare(String(y.start)));
+  }, [processStages, unplaced, edits, users]);
+  const legacy = plan?.stages || [];
   const open = stages.find((s) => s.id === openId) || null;
   const knownTracks = [...new Set([...stages.map((s) => s.track).filter(Boolean), "Hardware", "Firmware", "Enclosure", "Testing", "Supply chain", "PM"])];
-
-  /* Editing works on a copy; nothing moves until Save, and Save writes one
-     log entry describing exactly what changed. */
-  const startEdit = () => { setDraft(stages.map((s) => ({ ...s }))); setEditing(true); setOpenId(""); };
-  const saveEdits = () => {
-    const kept = draft.filter((s) => String(s.name || "").trim()).map((s, i) => ({ ...s, name: s.name.trim(), id: s.id || `stage-${i}` }));
-    const before = stages;
-    const bits = [];
-    if (kept.length !== before.length) bits.push(`${before.length} → ${kept.length} stages`);
-    if (kept.map((s) => s.id).join() !== before.map((s) => s.id).join()) bits.push("order or membership changed");
-    for (const s of kept) {
-      const b = before.find((x) => x.id === s.id);
-      if (!b) { bits.push(`added ${s.name}`); continue; }
-      const d = [];
-      if (b.name !== s.name) d.push(`renamed from ${b.name}`);
-      if (b.status !== s.status) d.push(`${b.status} → ${s.status}`);
-      if (b.start !== s.start || b.end !== s.end) d.push(`dates ${b.start || "?"}–${b.end || "?"} → ${s.start || "?"}–${s.end || "?"}`);
-      if ((b.track || "") !== (s.track || "")) d.push(`workstream → ${s.track || "none"}`);
-      if ((b.owner || "") !== (s.owner || "")) d.push(`owner → ${s.owner || "nobody"}`);
-      if (d.length) bits.push(`${s.name}: ${d.join(", ")}`);
-    }
-    const entry = { id: uid(), at: new Date().toISOString(), byName: myName || "someone", why: "Edited the steps by hand", what: bits.join(" · ").slice(0, 600) || "no change" };
-    upd((cur) => ({ plan: { ...(cur.plan || {}), stages: kept, updatedAt: entry.at, log: [entry, ...(cur.plan?.log || [])].slice(0, 100) } }));
-    setEditing(false);
-  };
 
   /* One shared date window for the bars. */
   const dates = stages.flatMap((s) => [s.start, s.end]).filter(Boolean).map((d) => new Date(d).getTime()).filter((n) => !Number.isNaN(n));
@@ -6370,51 +6617,22 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
         {stages.length > 0 && <Pill color="var(--green)">{doneN}/{stages.length} stages done</Pill>}
         {activeStage && <Pill color={planColor(activeStage.status)}>Now: {activeStage.name}</Pill>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          {/* The process view does not need an AI-built plan to exist — it is
-              the company's own method with this project's dates in it — so the
-              switcher is here even before anybody has built a plan. */}
-          {!editing && (
-            <div style={{ display: "flex", gap: 2, background: "var(--s2)", borderRadius: 8, padding: 2 }}>
-              {PLAN_VIEWS.map(([k, label]) => (
-                <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
-              ))}
-            </div>
-          )}
-          {editing ? (<>
-            <Btn small kind="green" icon={CheckCircle2} onClick={saveEdits}>Save plan</Btn>
-            <Btn small kind="ghost" onClick={() => setEditing(false)}>Cancel</Btn>
-          </>) : (<>
-            <input ref={sheetRef} type="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.md" style={{ display: "none" }}
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onSheet(f); }} />
-            <Btn small kind="ghost" icon={busy ? Loader2 : Upload} disabled={busy} title="Build the plan from your own checklist" onClick={() => sheetRef.current?.click()}>Upload checklist</Btn>
-            {stages.length > 0 && <Btn small kind="ghost" icon={filing ? Loader2 : ListChecks} disabled={filing} title="Put every open to-do under the stage it belongs to" onClick={() => onFile()}>{filing ? "Filing…" : "File the to-dos"}</Btn>}
-            {stages.length > 0 && <Btn small kind="ghost" icon={Pencil} onClick={startEdit}>Edit steps</Btn>}
-            <Btn small kind={stages.length ? "ghost" : "primary"} icon={busy ? Loader2 : Sparkles} disabled={busy} onClick={onBuild}>
-              {busy ? "Working…" : stages.length ? "Refresh from Drive" : "Build from Drive"}
-            </Btn>
-          </>)}
+          <div style={{ display: "flex", gap: 2, background: "var(--s2)", borderRadius: 8, padding: 2 }}>
+            {PLAN_VIEWS.map(([k, label]) => (
+              <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
+            ))}
+          </div>
+          <Btn small kind="ghost" icon={filing ? Loader2 : ListChecks} disabled={filing} title="Put every open to-do against the process step it belongs to" onClick={() => onFile(stages)}>{filing ? "Filing…" : "File the to-dos"}</Btn>
         </div>
       </div>
 
-      {view === "process" && !editing ? (
-        <ProcessPlan p={p} users={users} meId={meId} />
-      ) : stages.length === 0 && !editing ? (
-        <Empty icon={Gauge} title={busy ? "Reading the project's files…" : "No plan yet"} sub="Build it from Drive and the AI reads this project's folders — the checklist, the reports, the board folders — and lays out the real stages, what runs alongside what, and where you are now. Or upload your own checklist and it will follow that instead. After that, tell the chat about a customer's feedback or a vendor delay and it moves the plan for you." />
-      ) : editing ? (
-        <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6 }}>
-            Put things that run at the same time on the same dates with different workstreams — Hardware and Firmware side by side, for example. The order here is the order everywhere else.
-          </div>
-          {draft.map((s, i) => (
-            <StageEditRow key={s.id} s={s} i={i} count={draft.length} trackList={knownTracks}
-              onChange={(idx, patch) => setDraft((d) => d.map((x, j) => (j === idx ? { ...x, ...patch } : x)))}
-              onMove={(idx, dir) => setDraft((d) => { const n = [...d]; const [x] = n.splice(idx, 1); n.splice(Math.max(0, Math.min(n.length, idx + dir)), 0, x); return n; })}
-              onDelete={(idx) => setDraft((d) => d.filter((_, j) => j !== idx))} />
-          ))}
-          <Btn small kind="ghost" icon={Plus} onClick={() => setDraft((d) => [...d, { id: `stage-${uid()}`, name: "", status: "pending", track: d[d.length - 1]?.track || "", start: todayStr(), end: todayStr(), owner: "", note: "", evidence: [] }])}>Add a stage</Btn>
-        </div>
+      {view === "process" ? (
+        <ProcessPlan p={p} users={users} meId={meId} tasks={projTasks} />
       ) : (<>
-        {plan?.summary && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.65, marginBottom: 12 }}>{plan.summary}</div>}
+        <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 12 }}>
+          The company's process — {BLOCKS.length} blocks, {STEPS.length} steps — with this project's dates and team in it{unplaced.length ? `, plus ${unplaced.length} to-do${unplaced.length === 1 ? "" : "s"} from the scrum that the words could not place` : ""}.
+          {legacy.length > 0 && <span style={{ color: "var(--txt3)" }}> An older {legacy.length}-stage plan is still saved against this project; it is no longer what the plan means.</span>}
+        </div>
 
         {view === "gantt" && (
           <div>
@@ -6476,70 +6694,6 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
           </div>
         )}
 
-        {view === "steps" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: showTracks ? 10 : 0 }}>
-            {groups.map(([track, list]) => (
-              <div key={track}>
-                {showTracks && <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 4 }}>{track}</div>}
-                {list.map((s, i) => {
-                  // Anything overlapping this stage's dates on a different
-                  // workstream is being worked on at the same time.
-                  const alongside = stages.filter((o) => o.id !== s.id && (o.track || "") !== (s.track || "")
-                    && s.start && s.end && o.start && o.end && o.start <= s.end && o.end >= s.start).map((o) => o.name);
-                  const mine = projTasks.filter((t) => t.stageId === s.id);
-                  const openN = mine.filter((t) => t.status !== "done").length;
-                  const isOpen = openId === s.id;
-                  return (
-                    <div key={s.id}>
-                    <button onClick={() => setOpenId(isOpen ? "" : s.id)}
-                      style={{ display: "flex", gap: 11, background: isOpen ? "var(--s2)" : "transparent", border: "none", borderRadius: 8, padding: "8px 7px", cursor: "pointer", textAlign: "left", width: "100%" }}>
-                      <span style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
-                        <span style={{ width: 15, height: 15, borderRadius: "50%", border: `2px solid ${planColor(s.status)}`, background: s.status === "done" ? planColor(s.status) : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          {s.status === "done" && <CheckCircle2 size={9} style={{ color: "#fff" }} />}
-                        </span>
-                        {i < list.length - 1 && <span style={{ flex: 1, width: 2, minHeight: 16, background: "var(--bdr2)", marginTop: 3 }} />}
-                      </span>
-                      <span style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
-                        <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                          <ChevronDown size={13} style={{ color: "var(--txt3)", flexShrink: 0, transform: isOpen ? "none" : "rotate(-90deg)", transition: "transform .15s" }} />
-                          <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
-                          <Pill color={planColor(s.status)}>{planLabel(s.status)}</Pill>
-                          {mine.length > 0 && <Pill color="var(--purple)"><ListChecks size={10} /> {openN ? `${openN} open` : "all done"} · {mine.length}</Pill>}
-                          {s.owner && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{s.owner}</span>}
-                          <span style={{ fontSize: 11, color: "var(--txt3)", fontFamily: MONO }}>{fmtDate(s.start)} → {fmtDate(s.end)}</span>
-                        </span>
-                        {s.note && <span style={{ display: "block", fontSize: 12, color: "var(--txt2)", marginTop: 3, lineHeight: 1.55 }}>{s.note}</span>}
-                        {alongside.length > 0 && (
-                          <span style={{ display: "block", fontSize: 11, color: "var(--txt3)", marginTop: 3 }}>
-                            runs alongside {alongside.slice(0, 3).join(", ")}{alongside.length > 3 ? ` and ${alongside.length - 3} more` : ""}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                    {/* the to-dos of this stage, nested under it */}
-                    {isOpen && (
-                      <div className="fade" style={{ margin: "0 0 8px 26px", paddingLeft: 12, borderLeft: "2px solid var(--bdr2)", display: "flex", flexDirection: "column", gap: 5 }}>
-                        {mine.length === 0
-                          ? <div style={{ fontSize: 12, color: "var(--txt3)", padding: "3px 0" }}>No to-dos filed under this stage yet.</div>
-                          : mine.map((t) => <StageTaskRow key={t.id} t={t} users={users} />)}
-                        {(s.evidence || []).length > 0 && (
-                          <div style={{ marginTop: 5 }}>
-                            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>Proof in Drive</div>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                              {s.evidence.map((f, k) => <Pill key={k} color="var(--acc)"><FileText size={10} /> {f}</Pill>)}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-        )}
-
         {view === "log" && (
           (plan?.log || []).length === 0
             ? <Empty icon={Clock} title="No changes yet" sub="Every time the plan moves — a customer's feedback, a vendor delay, a stage finishing — it is recorded here with who did it and when." />
@@ -6559,7 +6713,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
             )
         )}
 
-        {view !== "log" && view !== "steps" && <StageDetail stage={open} tasks={projTasks} users={users} onClose={() => setOpenId("")} />}
+        {view !== "log" && <StageDetail stage={open} tasks={projTasks} users={users} onClose={() => setOpenId("")} />}
       </>)}
     </Section>
   );

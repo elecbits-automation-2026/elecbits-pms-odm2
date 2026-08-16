@@ -134,14 +134,26 @@ if (indexSrc) {
     const r = ir[i];
     const id = clean(r[IX.id]);
     if (!/^EB-T-/.test(id)) continue;
+    /* WHERE THE TEMPLATE ACTUALLY IS.
+
+       The register has two location columns and they disagree for 33 rows. The
+       library column wins, because it describes the folder tree that has been
+       copied into every project — 01-Project-ID-Folder-PM/… and
+       02-PCB-ID-Folder-Engineering/… were uploaded whole, so a template's
+       library path IS the path of the pre-stored copy inside the project. The
+       instance-path column is somebody's separate note about where the filled
+       copy should end up, and following it sends people to folders that do not
+       exist (the developer LLD to 02-Hardware/00-Design/ when the file is
+       sitting in 03-LLD-HLD/02-Developer-LLD/).
+
+       Its first segment also says WHICH of the two trees — the project folder
+       or the board's PCB-ID folder — which is the only reliable statement of
+       that anywhere in either document. */
+    const lib = clean(r[IX.library]);
+    const tree = /^02-PCB-ID/i.test(lib) ? "pcb" : /^01-Project-ID/i.test(lib) ? "pm" : "";
+    const library = lib.replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
     const instance = clean(r[IX.instancePath]);
-    /* A few rows put the FILE in the instance-path column. A file is not a
-       folder, and treating one as the other would drop everything that step
-       writes into the folder above it. The library column has the folder in
-       those cases — one segment deeper, because it is written from the top of
-       the project rather than from inside it, so that root is taken off. */
-    const library = clean(r[IX.library]).replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
-    const folder = /\.[a-z0-9]{2,5}$/i.test(instance) ? library : instance;
+    const folder = library || (/\.[a-z0-9]{2,5}$/i.test(instance) ? "" : instance);
     const t = templates[id];
     if (!t) {
       templates[id] = { id, name: clean(r[IX.name]), folder, steps: [], actions: [] };
@@ -159,9 +171,11 @@ if (indexSrc) {
       description: clean(r[IX.description]),
       whatGood: clean(r[IX.whatGood]),
       serves: clean(r[IX.serves]),
-      library: clean(r[IX.library]),
+      library: lib,
+      tree,
       instanceName: clean(r[IX.instanceName]),
       stage: clean(r[IX.stage]),
+      instancePath: instance,
       owner: clean(r[IX.owner]),
       filledBy: clean(r[IX.filledBy]),
       auditRow: clean(r[IX.auditRow]),
@@ -718,21 +732,19 @@ for (const c of categories) {
   const glued = steps.filter((s) => /^EB-T-\d+\s*[·|:-]/.test(clean(flow.find((r) => Number(clean(r[COL.no])) === s.no)?.[COL.templateFile] || "")));
   if (glued.length) console.log(`\n  · ${glued.length} step(s) in the workbook have the template id glued onto the filename — stripped here, but worth fixing in Drive (steps ${glued.slice(0, 6).map((s) => s.no).join(", ")}${glued.length > 6 ? " …" : ""})`);
 }
-/* A template whose blank lives in one tree and whose filled-in copy is said to
-   live in a completely different one is almost always a copy-paste in the
-   register — and it sends somebody's work to the wrong half of the project. */
+/* The register's two location columns disagree. The library column is used
+   because it is the tree that was actually copied into every project — but a
+   disagreement is still somebody's note that has gone stale, and it is the
+   reason a step can point at a folder nobody ever created. */
 {
-  /* Compared without the leading numbers: the register writes the same folder
-     as "06-Assembly" in one column and "05-Assembly" in the other, and a
-     literal comparison would report two dozen renumberings as if they were
-     misfiled templates. Noise like that gets the whole report ignored. */
-  const top = (p) => (String(p || "").split("/").filter(Boolean)[0] || "").replace(/^\d+[-.]?\s*/, "").toLowerCase();
-  const strip = (p) => String(p || "").replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
-  const odd = Object.values(templates).filter((t) => t.library && t.folder &&
-    top(strip(t.library)) && top(t.folder) && top(strip(t.library)) !== top(t.folder));
-  if (odd.length) {
-    console.log(`\n  ! ${odd.length} template(s) whose blank and whose filled-in copy are in different parts of the project — check these in the index:`);
-    for (const t of odd.slice(0, 8)) console.log(`      ${t.id} ${t.name}\n          blank: ${t.library}\n          copy:  ${t.folder}`);
+  const drift = Object.values(templates).filter((t) => {
+    const inst = String(t.instancePath || "").replace(/\/+$/, "");
+    return inst && t.folder && inst !== t.folder.replace(/\/+$/, "");
+  });
+  if (drift.length) {
+    console.log(`\n  ! ${drift.length} template(s) where the index's two location columns disagree — the library column is used, because that is the tree copied into each project:`);
+    for (const t of drift.slice(0, 6)) console.log(`      ${t.id} ${t.name}\n          used:    ${t.folder}\n          ignored: ${t.instancePath}`);
+    if (drift.length > 6) console.log(`      …and ${drift.length - 6} more`);
   }
 }
 const orphanTemplates = [...new Set(steps.filter((s) => !templates[s.templateId]).map((s) => s.templateId))];

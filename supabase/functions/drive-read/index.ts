@@ -938,13 +938,18 @@ Deno.serve(async (req) => {
           for (const r of itabs["Index"] ?? []) {
             const id = cell(r, 0);
             if (!/^EB-T-/.test(id)) continue;
+            /* The register has two location columns and they disagree for 33
+               rows. The LIBRARY column wins: that tree was copied whole into
+               every project, so a template's library path IS the path of the
+               pre-stored copy inside the project folder. The instance-path
+               column is a separate note that has drifted — following it sends
+               people to folders that were never created. Its first segment
+               also says WHICH tree: the project folder or the PCB-ID folder. */
+            const lib = cell(r, 8);
+            const tree = /^02-PCB-ID/i.test(lib) ? "pcb" : /^01-Project-ID/i.test(lib) ? "pm" : "";
+            const library = lib.replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
             const instance = cell(r, 9);
-            /* A file is not a folder, and a few rows put the filename in this
-               column. The library column has the folder in those cases, one
-               segment deeper because it is written from the top of the project
-               rather than from inside it — so that root comes off. */
-            const library = cell(r, 8).replace(/^0[12]-(Project-ID-Folder-PM|PCB-ID-Folder-Engineering)\//, "");
-            const folder = /\.[a-z0-9]{2,5}$/i.test(instance) ? library : instance;
+            const folder = library || (/\.[a-z0-9]{2,5}$/i.test(instance) ? "" : instance);
             const existing = (templates[id] ?? {}) as Record<string, unknown>;
             templates[id] = {
               ...existing,
@@ -953,11 +958,12 @@ Deno.serve(async (req) => {
               // The index carries the real Drive folder names where the master
               // workbook uses shorthand stems, so it wins on the folder.
               folder: folder || (existing.folder as string) || "",
+              tree,
               steps: (existing.steps as number[]) || [],
               actions: (existing.actions as string[]) || [],
               format: cell(r, 3), kind: cell(r, 4),
               description: cell(r, 5), whatGood: cell(r, 6), serves: cell(r, 7),
-              library: cell(r, 8), instanceName: cell(r, 10), stage: cell(r, 11),
+              library: lib, instancePath: instance, instanceName: cell(r, 10), stage: cell(r, 11),
               owner: cell(r, 14), filledBy: cell(r, 15), auditRow: cell(r, 16), version: cell(r, 17),
             };
             n++;

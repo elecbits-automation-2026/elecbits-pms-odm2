@@ -292,13 +292,54 @@ export const templateLibraryFolder = (step) => templateFor(step)?.library || "";
    confidence. Callers show the gap instead. */
 export const knowsWhereItGoes = (step) => !!folderFor(step);
 
-/* The full path, given the project's own root folder (which the app already
-   knows as pmPath(projectId)). Kept as one function so a path never gets
-   assembled two different ways in two different screens. */
-export function pathFor(step, projectId, projectRoot = "", pcbId = "") {
+/* ── which folder a step's file belongs in ───────────────────────────────────
+   There are TWO trees, not one. The project folder under Project Management
+   holds the PM-side artefacts; the PCB-ID folder under PCB & Firmware holds
+   the engineering ones. 128 of the 308 steps write to the PCB-ID folder and 71
+   to the project folder — showing all of them under one root sends more than a
+   third of the work to a folder that will never hold it.
+
+   The template register is what knows which: its "Serves" column says PCB ID
+   folder, Project Management folder, or Both. Both means the artefact has a
+   home in each tree, and both are shown rather than one being picked. */
+export function servesOf(step) {
+  const t = templateFor(step);
+  /* The template library's own first folder is the answer and it is never
+     ambiguous: 01-Project-ID-Folder-PM or 02-PCB-ID-Folder-Engineering. Those
+     two trees were copied whole into every project, so where the blank sits in
+     the library is exactly where the project's copy sits. The register's
+     "Serves" column is a second opinion, used only when there is no library
+     path to read. */
+  if (t?.tree === "pcb" || t?.tree === "pm") return t.tree;
+  const v = String(t?.serves || "").toLowerCase();
+  if (/both/.test(v)) return "both";
+  if (/pcb/.test(v)) return "pcb";
+  if (/project|management/.test(v)) return "pm";
+  return "";
+}
+
+/* The full path (or paths), given the two roots the app already knows as
+   pmPath(projectId) and pcbPath(boardId). Kept as one function so a path never
+   gets assembled two different ways in two different screens. */
+export function pathsFor(step, projectId, roots = {}, pcbId = "") {
   const folder = folderFor(step);
-  const root = String(projectRoot || "").replace(/\/+$/, "");
-  return `${root}/${folder}${fileNameFor(step, projectId, pcbId)}`.replace(/\/{2,}/g, "/");
+  if (!folder) return [];
+  const name = fileNameFor(step, projectId, pcbId);
+  const join = (root) => `${String(root || "").replace(/\/+$/, "")}/${folder}${name}`.replace(/\/{2,}/g, "/");
+  const serves = servesOf(step);
+  const out = [];
+  // The project folder is the fallback root: a template the register says
+  // nothing about is a PM artefact until somebody says otherwise, and that is
+  // the tree a PM will look in first.
+  if (serves !== "pcb" && roots.pm) out.push({ where: "project folder", path: join(roots.pm) });
+  if (serves !== "pm" && roots.pcb) out.push({ where: "PCB-ID folder", path: join(roots.pcb) });
+  if (!out.length && roots.pm) out.push({ where: "project folder", path: join(roots.pm) });
+  return out;
+}
+
+export function pathFor(step, projectId, projectRoot = "", pcbId = "") {
+  const roots = typeof projectRoot === "string" ? { pm: projectRoot } : (projectRoot || {});
+  return pathsFor(step, projectId, roots, pcbId)[0]?.path || "";
 }
 
 /* ── who does it ─────────────────────────────────────────────────────────────
@@ -568,6 +609,7 @@ export function buildPlan(project, users = [], opts = {}) {
   // A project can carry several boards; the first is the one the steps that
   // name [PCB-ID] belong to unless a caller says otherwise.
   const pcbId = opts.pcbId || (project?.linkedIds || [])[0] || "";
+  const roots = { pm: opts.projectRoot || "", pcb: opts.pcbRoot || "" };
 
   const steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
   const categories = only ? CATEGORIES.filter((c) => only.has(c.name)) : CATEGORIES;
@@ -590,13 +632,20 @@ export function buildPlan(project, users = [], opts = {}) {
       action: s.action,
       template: s.template,
       templateId: s.templateId,
+      // The sheet's actual name, from the register. A template id on its own
+      // tells nobody what they are about to open.
+      templateName: templateFor(s)?.name || "",
       templateLink: templateLink(s),
       templateStandard: templateStandard(s),
       // Where the parallel tracks have to stop and agree before this can close.
       converge: s.converge || null,
       fileName: fileNameFor(s, projectId, pcbId),
       folder: folderFor(s),
-      path: knowsWhereItGoes(s) ? pathFor(s, projectId, opts.projectRoot || "", pcbId) : "",
+      // Every place this step's file belongs — one for most steps, two for the
+      // 109 whose template serves the project folder AND the board folder.
+      paths: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, pcbId) : [],
+      path: knowsWhereItGoes(s) ? pathsFor(s, projectId, roots, pcbId)[0]?.path || "" : "",
+      serves: servesOf(s),
       // Named so a screen can say WHY there is no path rather than showing a
       // blank and letting somebody assume the file has no home.
       folderUnknown: knowsWhereItGoes(s) ? "" : (s.templateId || "the template"),
