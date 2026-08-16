@@ -35,7 +35,8 @@ import elecbitsLogo from "./assets/elecbits-logo.jpg";
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes,
          BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
-         sourceLine, templateLink, servesOf, templateFor } from "./lib/processMap.js";
+         sourceLine, servesOf, templateFor,
+         LINKS, loadTemplateLinks, templateLinkFor, linksLine } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -516,6 +517,20 @@ async function userJwt() {
    trigger. */
 /* Where a process step's file actually is. A lookup, never a creation — the
    templates are already in the project folder. */
+/* One call shape for anything the drive-read function does. The per-action
+   helpers wrap this; new actions should not each grow their own fetch. */
+async function driveAction(payload) {
+  if (!DRIVE_READ_URL) return { error: "Drive isn't connected in this build — set VITE_DRIVE_READ_URL." };
+  try {
+    const res = await fetch(DRIVE_READ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ ...payload, token: DRIVE_READ_TOKEN, userJwt: await userJwt() }),
+    });
+    return await res.json().catch(() => ({ error: "Drive answered with something that was not JSON." }));
+  } catch (e) { return { error: `Couldn't reach Drive: ${e?.message || e}` }; }
+}
+
 async function driveStepFile({ projectId, folder, fileName, template }) {
   if (!DRIVE_READ_URL) return { found: false, error: "Drive isn't connected in this build — set VITE_DRIVE_READ_URL." };
   try {
@@ -1316,11 +1331,16 @@ WHAT THEY SAID: """${String(q).slice(0, 1500)}"""`;
    each one — drawn from the project's own Drive folders and its tasks. It is
    what the Gantt, the flow chart and the step list all read from, and every
    edit is stamped with who made it and when.                                 */
+/* The traffic light. Red is not started, orange is going on, green is done —
+   asked for in exactly those words, and it holds in every plan view: the
+   process table, the flow cards, the timeline bars and the stage detail. A
+   grey "not started" reads as neutral; red reads as WAITING ON SOMEBODY,
+   which is what an unstarted step of a committed plan actually is. */
 const PLAN_STATUS = [
   { k: "done", label: "Done", c: "var(--green)" },
-  { k: "active", label: "In progress", c: "var(--blue)" },
+  { k: "active", label: "In progress", c: "var(--amber)" },
   { k: "blocked", label: "Blocked", c: "var(--red)" },
-  { k: "pending", label: "Not started", c: "var(--txt3)" },
+  { k: "pending", label: "Not started", c: "var(--red)" },
 ];
 const planColor = (s) => PLAN_STATUS.find((x) => x.k === s)?.c || "var(--txt3)";
 const planLabel = (s) => PLAN_STATUS.find((x) => x.k === s)?.label || "Not started";
@@ -6088,6 +6108,27 @@ const PLAN_VIEWS = [["process", "Process"], ["flow", "Flow"], ["gantt", "Timelin
    What a to-do demands is read from those same words. It changes nothing about
    the task; it just means the block shows "a sheet has to be created" rather
    than making somebody re-read the title to work that out. */
+/* What state a process step is in. The scrum is the record of work, so the
+   tasks whose words matched this step ARE its status: every one closed means
+   done, any of them open or in flight means going on, none raised means not
+   started. Nothing here guesses from the calendar — a step past its date with
+   nobody on it is exactly what red is for. */
+function tasksByStep(tasks = []) {
+  const open = {}, done = {};
+  for (const t of tasks) {
+    const st = matchStep(t);
+    if (!st) continue;
+    ((t.status === "done" ? done : open)[st.no] ||= []).push(t);
+  }
+  return { open, done };
+}
+function stepStatus(stepNo, todosByStep, doneByStep) {
+  const open = todosByStep[stepNo] || [];
+  const closed = doneByStep[stepNo] || [];
+  if (open.length) return "active";
+  if (closed.length) return "done";
+  return "pending";
+}
 const TASK_DEMANDS = [
   [/\b(sheet|tracker|bom|checklist|xlsx|excel)\b/i, "a sheet to create or fill"],
   [/\b(doc|document|report|write|draft|spec|letter)\b/i, "a document to write"],
@@ -6125,8 +6166,10 @@ const TRACK_OF_BLOCK = [
   [/Hardware/i, "Hardware"], [/Firmware/i, "Firmware"], [/Enclosure/i, "Enclosure"],
   [/Test/i, "Testing"], [/DFx/i, "DFx gates"],
 ];
-function stagesFromProcess(p, users) {
+function stagesFromProcess(p, users, tasks = []) {
   const rows = buildProcessPlan(p, users, { projectRoot: pmPath(p.projectId) });
+  const { open, done } = tasksByStep(tasks);
+  const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "";
   const stages = [];
   for (const b of BLOCKS) {
     const mine = rows.filter((r) => r.block === b.id);
@@ -6138,17 +6181,27 @@ function stagesFromProcess(p, users) {
     for (const r of mine) if (r.assigneeId) tally[r.assigneeId] = (tally[r.assigneeId] || 0) + 1;
     const owner = users.find((u) => String(u.id) === (Object.entries(tally).sort((a, c) => c[1] - a[1])[0] || [])[0])?.name || "";
     const cv = [...new Set(mine.filter((r) => r.converge).map((r) => r.converge.name))];
+    /* Every step, with who and when and where it stands — the detail card
+       shows this list, because "35 steps of the process" answers nothing. */
+    const steps = mine.map((r) => ({
+      no: r.no, title: r.title, who: nameOf(r.assigneeId), start: r.start, end: r.end,
+      status: stepStatus(r.no, open, done),
+    }));
+    const doneN = steps.filter((x) => x.status === "done").length;
+    const activeN = steps.filter((x) => x.status === "active").length;
     stages.push({
       id: `block-${b.id.toLowerCase()}`,
       name: `${b.id} · ${b.name}`,
-      // Never "done": nothing here has been checked against Drive, and a stage
-      // claiming to be finished when nobody looked is worse than an empty plan.
-      status: "pending",
+      /* The block is the sum of its steps: green only when every step's scrum
+         work is closed, orange the moment anything moves, red untouched. */
+      status: doneN === steps.length ? "done" : (doneN || activeN) ? "active" : "pending",
       track: TRACK_OF_BLOCK.find(([re]) => re.test(b.name))?.[1] || "Plan",
       start, end, owner,
-      note: [`${mine.length} steps of the process`, b.runs, cv.length ? `must agree with the other tracks at: ${cv.join("; ")}` : ""]
+      note: [`${doneN} of ${steps.length} steps done${activeN ? ` · ${activeN} in progress` : ""}`,
+             b.runs, cv.length ? `must agree with the other tracks at: ${cv.join("; ")}` : ""]
         .filter(Boolean).join(" · "),
       evidence: [],
+      steps,
     });
   }
   return stages;
@@ -6211,21 +6264,26 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
      308 lookups on open would hammer Drive for rows nobody is looking at. */
   const [found, setFound] = useState({});
   const [finding, setFinding] = useState("");
+  /* The sheet links are only ever shown once Drive has confirmed them alive —
+     the register's own hyperlinks pointed at least one person at a file in
+     the trash. Verified once per session on open; the button re-verifies on
+     demand, because a Drive cleanup can happen at any moment. */
+  const [, setLinkTick] = useState(0);
+  const [linksBusy, setLinksBusy] = useState(false);
+  useEffect(() => { loadTemplateLinks(driveAction).then(() => setLinkTick((n) => n + 1)); }, []);
+  const refreshLinks = async () => {
+    if (linksBusy) return;
+    setLinksBusy(true);
+    try { await loadTemplateLinks(driveAction, { force: true }); }
+    finally { setLinksBusy(false); setLinkTick((n) => n + 1); }
+  };
   const board = (p.linkedIds || [])[0] || "";
   /* Where each open to-do belongs. matchStep reads the words and is
      deliberately strict — half the significant words in common or it returns
      nothing — so a to-do lands on the step it names or on none at all. A
      wrong placement would put somebody's work in the wrong block and be
      invisible; an unplaced one is at least visibly unplaced. */
-  const todosByStep = useMemo(() => {
-    const at = {};
-    for (const t of tasks) {
-      if (t.status === "done") continue;
-      const step = matchStep(t);
-      if (step) (at[step.no] ||= []).push(t);
-    }
-    return at;
-  }, [tasks]);
+  const { open: todosByStep, done: doneByStep } = useMemo(() => tasksByStep(tasks), [tasks]);
   const unplacedTodos = useMemo(
     () => tasks.filter((t) => t.status !== "done" && !matchStep(t)), [tasks]);
   const plan = useMemo(
@@ -6272,7 +6330,11 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         <Pill color="var(--acc)">{plan.length} steps · {BLOCKS.length} blocks</Pill>
         {CONVERGENCE.length > 0 && <Pill color="var(--amber)">{CONVERGENCE.length} convergence points</Pill>}
         <span style={{ fontSize: 11, color: "var(--txt3)" }}>{sourceLine()}</span>
+        <span style={{ fontSize: 11, color: LINKS.links ? "var(--txt3)" : "var(--amber)" }}>{linksLine()}</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 7 }}>
+          <Btn small kind="ghost" icon={linksBusy ? Loader2 : RefreshCw} disabled={linksBusy}
+               title="Ask Drive which template files are actually alive and relink every sheet — the register's own links can point at deleted copies"
+               onClick={refreshLinks}>{linksBusy ? "Checking Drive…" : "Refresh the file links"}</Btn>
           <Btn small kind={mine ? "primary" : "ghost"} icon={Users} onClick={() => setMine((v) => !v)}>{mine ? "Everyone's steps" : "Only mine"}</Btn>
           <Btn small kind="ghost" icon={allOpen ? EyeOff : Eye} onClick={() => setOpenBlocks(allOpen ? new Set() : new Set(BLOCKS.map((b) => b.id)))}>{allOpen ? "Collapse all" : "Open all"}</Btn>
         </div>
@@ -6304,6 +6366,17 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                   <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: "var(--acc)" }}>{b.id}</span>
                   <span style={{ fontSize: 12.5, fontWeight: 700 }}>{b.name}</span>
                   <span style={{ fontSize: 11, color: "var(--txt3)" }}>{list.length} step{list.length === 1 ? "" : "s"}{mine && list.length !== b.steps ? ` of ${b.steps}` : ""}</span>
+                  {(() => {
+                    const st = list.map((r) => stepStatus(r.no, todosByStep, doneByStep));
+                    const d = st.filter((x) => x === "done").length, a = st.filter((x) => x === "active").length;
+                    return (
+                      <span style={{ display: "inline-flex", gap: 7, fontSize: 10, fontWeight: 700 }}>
+                        <span style={{ color: "var(--green)" }}>● {d}</span>
+                        <span style={{ color: "var(--amber)" }}>● {a}</span>
+                        <span style={{ color: "var(--red)" }}>● {st.length - d - a}</span>
+                      </span>
+                    );
+                  })()}
                   {/concurrent/i.test(b.runs) && <Pill color="var(--acc)">concurrent</Pill>}
                   {/gated/i.test(b.runs) && <Pill color="var(--amber)">gated</Pill>}
                   <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--txt3)", textAlign: "right" }}>{b.convergesWith}</span>
@@ -6338,6 +6411,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                         <th style={{ ...th, width: 108 }}>Template ID</th>
                         <th style={{ ...th, width: 168 }}>Responsibility</th>
                         <th style={{ ...th, width: 132 }}>Who · when</th>
+                        <th style={{ ...th, width: 96 }}>Status</th>
                       </tr></thead>
                       <tbody>
                         {list.map((r) => (
@@ -6399,19 +6473,38 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                                   nobody what they are opening; the register
                                   knows it is the Test Environment Setup
                                   Record, so say so. */}
-                              {r.templateName && (
-                                <div style={{ fontFamily: "inherit", fontSize: 10.5, color: "var(--txt2)", lineHeight: 1.35, marginTop: 1 }}>
-                                  {r.templateLink
-                                    ? <a href={r.templateLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateName}</a>
-                                    : r.templateName}
-                                </div>
-                              )}
+                              {r.templateName && (() => {
+                                /* Looked up at render, not baked into the row:
+                                   the verified set can arrive or be refreshed
+                                   at any moment, and a stale closure here is
+                                   the same bug as the stale register. */
+                                const live = templateLinkFor(r.templateId);
+                                return (
+                                  <div style={{ fontFamily: "inherit", fontSize: 10.5, color: "var(--txt2)", lineHeight: 1.35, marginTop: 1 }}>
+                                    {live
+                                      ? <a href={live.link} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", textDecoration: "none" }}>{r.templateName}</a>
+                                      : r.templateName}
+                                    {live?.copies > 1 && <span style={{ color: "var(--amber)", fontSize: 9 }}> · {live.copies} copies live in Drive</span>}
+                                  </div>
+                                );
+                              })()}
                               {r.fileName && <div style={{ fontSize: 9.5, color: "var(--txt3)", marginTop: 1 }}>{r.fileName}</div>}
                             </td>
                             <td style={td}>{r.responsibility || <span style={{ color: "var(--txt3)" }}>—</span>}</td>
                             <td style={{ ...td, fontSize: 10.5 }}>
                               <div>{nameOf(r.assigneeId) || <span style={{ color: "var(--amber)" }}>unassigned</span>}</div>
                               <div style={{ fontFamily: MONO, color: "var(--txt3)" }}>{fmtDate(r.start)} → {fmtDate(r.end)}</div>
+                            </td>
+                            <td style={{ ...td, fontSize: 10.5 }}>
+                              {(() => {
+                                const st = stepStatus(r.no, todosByStep, doneByStep);
+                                return (
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: planColor(st), fontWeight: 700 }}>
+                                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st), flexShrink: 0 }} />
+                                    {planLabel(st)}
+                                  </span>
+                                );
+                              })()}
                             </td>
                           </tr>
                         ))}
@@ -6533,6 +6626,23 @@ function StageDetail({ stage, tasks, users, onClose }) {
         <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: "var(--txt2)", cursor: "pointer", display: "flex", padding: 2 }}><X size={16} /></button>
       </div>
       {stage.note && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 9 }}>{stage.note}</div>}
+      {(stage.steps || []).length > 0 && (
+        <div style={{ marginBottom: 9 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 5 }}>The steps in this block</div>
+          <div style={{ maxHeight: 300, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, paddingRight: 4 }}>
+            {stage.steps.map((st) => (
+              <div key={st.no} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5, flexWrap: "wrap" }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st.status), flexShrink: 0, alignSelf: "center" }} />
+                <span style={{ fontFamily: MONO, color: "var(--txt3)", fontSize: 10 }}>{st.no}</span>
+                <span style={{ color: "var(--txt)" }}>{st.title}</span>
+                <span style={{ color: "var(--txt3)", fontSize: 10.5 }}>
+                  {st.who || "unassigned"} · {fmtDate(st.start)} → {fmtDate(st.end)} · {planLabel(st.status)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {(stage.evidence || []).length > 0 && (
         <div style={{ marginBottom: 9 }}>
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 5 }}>Proof in Drive</div>
@@ -6570,8 +6680,8 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
      had to add. Whatever an AI or an uploaded checklist put in plan.stages is
      left exactly where it is; it is simply no longer what the plan means. */
   const processStages = useMemo(
-    () => stagesFromProcess(p, users),
-    [p.projectId, p.startDate, p.deadline, p.team, p.linkedIds, users]);
+    () => stagesFromProcess(p, users, projTasks),
+    [p.projectId, p.startDate, p.deadline, p.team, p.linkedIds, users, projTasks]);
   const edits = plan?.stageEdits || {};
   /* Anything this project needs that the method does not have comes off the
      daily scrum. A to-do already carries its title, its owner and its dates —

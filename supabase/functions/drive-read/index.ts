@@ -699,8 +699,12 @@ Deno.serve(async (req) => {
   // ODM folder") as long as there is something to search for — it used to be a
   // flat 400.
   // browsing needs neither a project nor a search term — the folder IS the ask
+  // Actions that carry their whole question in the action itself. This list
+  // is a tax on every new action: forget to add one and its requests are
+  // swallowed here as "no project given" — which is exactly what silently
+  // ate the first process_map and template_links calls.
   if (!needles.length && !String(body.search || "").trim()
-      && !["write", "list", "rename", "read_file"].includes(String(body.action || ""))) {
+      && !["write", "list", "rename", "read_file", "process_map", "template_links"].includes(String(body.action || ""))) {
     return json({ ok: true, digest: "", note: "no project or search term given" });
   }
 
@@ -774,6 +778,76 @@ Deno.serve(async (req) => {
        map plus WHERE it came from and when that file was last touched, so the
        app can say "synced from Drive, edited 3 days ago" instead of asking
        anyone to take a number on trust. */
+    /* ── the template links, verified against Drive itself ──────────────────
+       The register carries a hyperlink per template, and a hyperlink in a
+       spreadsheet is a MEMORY: the day somebody cleans up Drive — deletes the
+       duplicate the register happened to link to — the register keeps pointing
+       at the trash, and the app hands that link out with a straight face.
+       That is exactly what happened with EB-T-133.
+
+       So the links are not read from the register at all. Drive is asked what
+       is actually alive: every non-trashed file whose name starts with a
+       template id, in one paginated query. The id prefix is the naming
+       convention of the whole library (EB-T-133_Internal-MoM.docx), so the
+       grouping is unambiguous, and `trashed = false` is the whole point —
+       a link that comes back from here cannot point at the trash, because the
+       trash was never searched. */
+    if (body.action === "template_links") {
+      const found: GFile[] = [];
+      let pageToken = "";
+      const q = encodeURIComponent(`name contains 'EB-T-' and trashed = false`);
+      for (let page = 0; page < 5; page++) {
+        const data = await drive(token,
+          `files?q=${q}&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents,webViewLink)` +
+          `&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives` +
+          (pageToken ? `&pageToken=${pageToken}` : ""));
+        found.push(...(data.files ?? []));
+        pageToken = data.nextPageToken || "";
+        if (!pageToken) break;
+      }
+
+      /* Group by template id. A project's filled-in copies are named
+         [ProjectID]_… so they never collide with the blanks — but the library
+         trees have been copied around, so the same blank can exist in more
+         than one place. The most recently modified copy wins, because the
+         living master is the one the process owner touches; and every id with
+         more than one live copy is reported, so a wrong pick is a visible
+         cleanup job rather than a silent one. */
+      const byId = new Map<string, GFile[]>();
+      for (const f of found) {
+        // NOT \b: the library names run the id straight into an underscore
+        // (EB-T-133_Internal-MoM.docx) and underscore is a word character, so
+        // a word boundary never fires and every single file fails to group.
+        const m = /^(EB-T-\d+)/.exec(f.name || "");
+        if (!m) continue;
+        if (!byId.has(m[1])) byId.set(m[1], []);
+        byId.get(m[1])!.push(f);
+      }
+      const links: Record<string, unknown> = {};
+      const duplicates: { id: string; copies: number }[] = [];
+      for (const [id, files] of byId) {
+        files.sort((a, b) => String(b.modifiedTime || "").localeCompare(String(a.modifiedTime || "")));
+        const f = files[0];
+        if (files.length > 1) duplicates.push({ id, copies: files.length });
+        const native = (f.mimeType || "").startsWith("application/vnd.google-apps.");
+        const kind = /spreadsheet/.test(f.mimeType || "") ? "spreadsheets"
+          : /presentation/.test(f.mimeType || "") ? "presentation" : "document";
+        links[id] = {
+          id: f.id, name: f.name, mimeType: f.mimeType || "", modifiedTime: f.modifiedTime || "",
+          link: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+          downloadLink: native
+            ? `https://docs.google.com/${kind}/d/${f.id}/export?format=${kind === "spreadsheets" ? "xlsx" : kind === "presentation" ? "pptx" : "docx"}`
+            : `https://drive.google.com/uc?export=download&id=${f.id}`,
+          copies: files.length,
+        };
+      }
+      if (!Object.keys(links).length) {
+        return json({ error: `Drive returned no live files named EB-T-… at all — is the template library shared with ${SA_EMAIL}?` }, 404);
+      }
+      return json({ ok: true, links, count: Object.keys(links).length, duplicates,
+                    scanned: found.length, fetchedAt: new Date().toISOString() });
+    }
+
     if (body.action === "process_map") {
       const want = String(body.name || "Master Process Flow");
       const found = await searchUnder(token, ROOT_CHAIN[0], want, 20);

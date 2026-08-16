@@ -282,7 +282,59 @@ export const folderFor = (step) => TEMPLATES[step?.templateId]?.folder || "";
    can hand somebody the blank template and the standard it will be judged
    against is a step they can do without asking anybody first.                */
 export const templateFor = (step) => TEMPLATES[step?.templateId] || null;
-export const templateLink = (step) => templateFor(step)?.link || "";
+/* ── the links, verified against Drive ───────────────────────────────────────
+   The register stores a hyperlink per template, and that hyperlink is a
+   MEMORY. The day somebody cleans Drive up, the register keeps pointing at
+   the trash — EB-T-133's link opened a file sitting in the owner's bin. A
+   link handed to somebody mid-task is an instruction, so it cannot be wrong:
+   the only links this module ever returns are the ones Drive itself confirmed
+   alive, and until that has happened it returns none at all. The sheet's name
+   still shows; a missing link is an inconvenience, a wrong one is a trap.   */
+const LINKS_KEY = "eb-template-links-v1";
+export const LINKS = { at: "", count: 0, duplicates: [], links: null, error: "" };
+
+function rememberLinks() {
+  try { localStorage.setItem(LINKS_KEY, JSON.stringify({ at: LINKS.at, count: LINKS.count, duplicates: LINKS.duplicates, links: LINKS.links })); }
+  catch { /* quota — the session copy still works */ }
+}
+try {
+  const cached = JSON.parse(localStorage.getItem(LINKS_KEY) || "null");
+  if (cached?.links && Object.keys(cached.links).length) Object.assign(LINKS, cached, { error: "" });
+} catch { /* no localStorage here (tests, SSR) — links stay unverified */ }
+
+export function applyTemplateLinks(r) {
+  if (r?.error || !r?.links) { LINKS.error = String(r?.error || "Drive returned nothing"); return LINKS; }
+  Object.assign(LINKS, { links: r.links, count: r.count || Object.keys(r.links).length,
+                         duplicates: r.duplicates || [], at: r.fetchedAt || new Date().toISOString(), error: "" });
+  rememberLinks();
+  return LINKS;
+}
+
+/* Fetch-and-apply, at most once per session unless forced by the button. */
+let linksLoading = null;
+export function loadTemplateLinks(readDrive, { force = false } = {}) {
+  if (typeof readDrive !== "function") return Promise.resolve(LINKS);
+  if (!force && linksLoading) return linksLoading;
+  linksLoading = (async () => {
+    try { return applyTemplateLinks(await readDrive({ action: "template_links" })); }
+    catch (e) { LINKS.error = String(e?.message || e); return LINKS; }
+  })();
+  return linksLoading;
+}
+
+export const templateLink = (step) => {
+  const id = step?.templateId;
+  return (id && LINKS.links?.[id]?.link) || "";
+};
+export const templateLinkFor = (id) => LINKS.links?.[id] || null;
+/* One line for the UI: are the links trustworthy right now, and since when. */
+export function linksLine() {
+  if (LINKS.links) {
+    const dup = LINKS.duplicates.length ? ` · ${LINKS.duplicates.length} id${LINKS.duplicates.length === 1 ? " has" : "s have"} two live copies in Drive` : "";
+    return `${LINKS.count} sheet links verified against Drive${LINKS.at ? ` · ${LINKS.at.slice(0, 16).replace("T", " ")}` : ""}${dup}`;
+  }
+  return LINKS.error ? `Links not verified — ${LINKS.error}` : "Links not verified against Drive yet";
+}
 export const templateStandard = (step) => templateFor(step)?.whatGood || "";
 export const templateLibraryFolder = (step) => templateFor(step)?.library || "";
 
@@ -635,7 +687,10 @@ export function buildPlan(project, users = [], opts = {}) {
       // The sheet's actual name, from the register. A template id on its own
       // tells nobody what they are about to open.
       templateName: templateFor(s)?.name || "",
-      templateLink: templateLink(s),
+      // Deliberately NOT the link: rows are memoised and links are verified
+      // against Drive after the fact — a link baked in here would be the very
+      // staleness this module exists to kill. Render-time lookups only.
+
       templateStandard: templateStandard(s),
       // Where the parallel tracks have to stop and agree before this can close.
       converge: s.converge || null,
