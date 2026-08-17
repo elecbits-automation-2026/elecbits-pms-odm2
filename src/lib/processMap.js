@@ -429,8 +429,16 @@ export async function loadProcessMapFromUpload(file) {
       const r = ta[i];
       const id = clean(r[0]);
       if (!/^EB-T-/.test(id)) continue;
+      /* The project copy writes "folder/EB-T-141_….docx" in one cell — the
+         folder AND the file as it is actually saved. Split them: walking a
+         .docx as if it were a folder is how every read used to die, and the
+         real saved name is worth more than the idealized one. */
+      const rawLoc = clean(r[3]);
+      const isFile = /\.[a-z0-9]{2,5}$/i.test(rawLoc);
       templates[id] = {
-        id, name: clean(r[1]), folder: clean(r[3]),
+        id, name: clean(r[1]),
+        folder: isFile ? rawLoc.replace(/[^/]*$/, "") : rawLoc,
+        fileNameReal: isFile ? rawLoc.split("/").pop() : "",
         steps: clean(r[4]).split(",").map((x) => Number(x.trim())).filter(Number.isFinite),
         actions: clean(r[6]).split("·").map((x) => x.trim()).filter(Boolean),
         link: taLink(i, 2) || "",
@@ -594,6 +602,33 @@ export function openLinkFor(step, board) {
   return step?.openLink || "";
 }
 export const locationFor = (step, board) => byBoard(step?.locations, board) || step?.location || "";
+
+/* The exact file a step's work lives in, resolved the most truthful way
+   available: the step's own per-board location off the project workbook
+   (which carries the REAL folder spelling and the REAL saved name), else the
+   template's real name in its folder, else the idealized name. Returns the
+   directory relative to the tree root, so the caller prefixes the project or
+   the board path — never both, never guessed. */
+export function fileTargetFor(step, projectId, board = "") {
+  const loc = locationFor(step, board);
+  if (loc && /\.[a-z0-9]{2,5}$/i.test(loc)) {
+    const parts = String(loc).split("/").filter(Boolean);
+    const name = parts.pop();
+    // the first segment often names the project or board folder itself —
+    // that is the tree root's job, so it comes off here
+    const first = parts[0] || "";
+    const isBoardSeg = board && (normB(first).includes(normB(board)) || normB(board).includes(normB(first)));
+    const isProjSeg = projectId && (normB(first).includes(normB(projectId)) || normB(projectId).includes(normB(first)));
+    if (isBoardSeg || isProjSeg) parts.shift();
+    return { name, relDir: parts.join("/"), tree: isBoardSeg ? "pcb" : (servesOf(step) === "pcb" ? "pcb" : "pm") };
+  }
+  const t = templateFor(step);
+  return {
+    name: t?.fileNameReal || fileNameFor(step, projectId, board),
+    relDir: (folderFor(step) || "").replace(/\/+$/, ""),
+    tree: servesOf(step) === "pcb" ? "pcb" : "pm",
+  };
+}
 
 export const stepByNo = (no) => STEPS.find((s) => s.no === Number(no)) || null;
 export const stepsIn = (category) => STEPS.filter((s) => s.category === category);

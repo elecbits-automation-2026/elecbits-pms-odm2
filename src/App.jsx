@@ -39,7 +39,7 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
          loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
          projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES,
-         openLinkFor, locationFor } from "./lib/processMap.js";
+         openLinkFor, locationFor, fileTargetFor } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -5119,10 +5119,14 @@ function WorkChat({ t, p, step, onEvidence }) {
   /* The file this chat can really operate on. The board comes from the task's
      own title when it names one, so GW-124's chat edits GW-124's file. */
   const board = boardsOf(p).find((b) => String(t.title || "").includes(b)) || boardsOf(p)[0] || "";
-  const inPcb = step && servesOf(step) === "pcb" && board;
-  const fileName = step ? fileNameFor(step, t.projectId, board) : "";
-  const folder = step ? folderFor(step) : "";
-  const folderPath = step ? `${(inPcb ? pcbPath(board) : pmPath(t.projectId)).replace(/\/$/, "")}/${folder}` : "";
+  /* The address of the real file comes from the project workbook's own
+     Location column — folder AND saved-as name — not from an idealized
+     name the sheet never promised. fileTargetFor resolves that, falling
+     back to the template register when the sheet is silent. */
+  const tgt = step ? fileTargetFor(step, t.projectId, board) : null;
+  const inPcb = step && tgt?.tree === "pcb" && board;
+  const fileName = tgt?.name || "";
+  const folderPath = step ? `${(inPcb ? pcbPath(board) : pmPath(t.projectId)).replace(/\/$/, "")}${tgt?.relDir ? `/${tgt.relDir.replace(/\/+$/, "")}` : ""}` : "";
   const fileCtx = step ? { name: fileName, folder: folderPath } : null;
   const [msgs, setMsgs] = useState(t.workChat || []);
   const [draft, setDraft] = useState("");
@@ -5216,7 +5220,7 @@ function WorkChat({ t, p, step, onEvidence }) {
   useEffect(() => {
     const userSaid = msgs.filter((m) => m.role === "user").map((m) => m.text).join("\n");
     const fileGuess = (userSaid.match(/[\w][\w .-]*\.(?:pdf|docx|xlsx|csv|zip|step|stl|md|txt|png|jpg)/gi) || []).pop()
-      || (step ? fileNameFor(step, t.projectId) : "");
+      || fileName;
     onEvidence({
       whatDone: userSaid.slice(-2000),
       fileName: fileGuess,
@@ -5322,8 +5326,8 @@ function WorkWindow({ t, onClose, onComplete }) {
           ) : <div style={{ color: "var(--txt2)", marginBottom: 10 }}>No sub-steps written — the title is the scope.</div>}
           <ConditionRail conditions={t.conditions} />
           {step ? (
-            <StepGuidance step={step} task={t} onPick={pickStep} board={(p?.linkedIds || [])[0] || ""}
-                          onUse={(name, path) => setW((v) => ({ ...v, fileName: v.fileName || name, fileLocation: v.fileLocation || path }))} />
+            <StepGuidance step={step} task={t} onPick={pickStep}
+                          board={boardsOf(p).find((b) => String(t.title || "").includes(b)) || (p?.linkedIds || [])[0] || ""} />
           ) : (<>
             <StepPicker task={t} onPick={pickStep} />
             <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
@@ -5404,34 +5408,21 @@ function StepPicker({ task, onPick }) {
    The path and file name are offered rather than imposed — one click fills the
    evidence fields, because the commonest reason a closure has no artefact
    recorded is that typing a 90-character Drive path by hand is miserable. */
-function StepGuidance({ step, task, onUse, onPick, board = "" }) {
-  const [file, setFile] = useState(null);
-  const [looking, setLooking] = useState(false);
+function StepGuidance({ step, task, onPick, board = "" }) {
   const wave = waveOf(step.no);
-  const name = fileNameFor(step, task.projectId, board);
-  const folder = folderFor(step);
-  /* Two trees, not one. The template library's own layout says whether this
-     step's sheet lives in the project folder or the board's PCB-ID folder —
-     an engineering step pointed at the PM tree names a file that will never
-     be there. */
-  const inPcb = servesOf(step) === "pcb" && board;
+  /* One resolver for the file's identity — the workbook's own Location column
+     (folder AND saved-as name) when the sheet speaks, the template register
+     when it is silent. The chat on the right uses the same resolver, so what
+     this panel shows is exactly what the chat will read and write. */
+  const tgt = fileTargetFor(step, task.projectId, board);
+  const inPcb = tgt.tree === "pcb" && board;
   const root = (inPcb ? pcbPath(board) : pmPath(task.projectId)).replace(/\/$/, "");
-  const path = pathFor(step, task.projectId, root, board);
-
-  /* Ask Drive where the file actually is. The templates are pre-stored in the
-     project folder, so this is a lookup, never a creation — and half of them
-     are saved under a name nobody expected, which is exactly why the answer
-     has to come from Drive rather than from the workbook's ideal name. */
-  const locate = async () => {
-    setLooking(true);
-    const r = await driveStepFile({ projectId: inPcb ? board : task.projectId, folder, fileName: name, template: step.template });
-    setLooking(false);
-    setFile(r);
-  };
+  const shownPath = `${root}${tgt.relDir ? `/${tgt.relDir.replace(/\/+$/, "")}` : ""}/${tgt.name}`;
+  const own = openLinkFor(step, board);
 
   return (
     <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 7 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
         <Pill color="var(--purple)">Step {step.no}</Pill>
         {wave && <Pill color="var(--txt2)">{wave.id}</Pill>}
         <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{step.category}</span>
@@ -5443,105 +5434,49 @@ function StepGuidance({ step, task, onUse, onPick, board = "" }) {
         )}
       </div>
 
-      <div style={{ fontSize: 12.5, marginBottom: 9 }}><b>{step.action}:</b> {step.whatToDo}</div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.6, marginBottom: 10 }}><b>{step.action}:</b> {step.whatToDo}</div>
 
       {/* The two gates. The workbook is explicit that a step whose entry
           question cannot be answered yes has not started, whatever the
           calendar says — so both are shown as questions, not prose. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
-        <div style={{ fontSize: 11.5 }}>
-          <span style={{ fontWeight: 700, color: "var(--amber)" }}>Before you start — </span>
-          <span style={{ color: "var(--txt2)" }}>{step.entryQuestion}</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 11 }}>
+        <div style={{ display: "flex", gap: 8, fontSize: 11.5, lineHeight: 1.55 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--amber)", flexShrink: 0, marginTop: 5 }} />
+          <span><b style={{ color: "var(--amber)" }}>Before you start</b> <span style={{ color: "var(--txt2)" }}>— {step.entryQuestion}</span></span>
         </div>
-        <div style={{ fontSize: 11.5 }}>
-          <span style={{ fontWeight: 700, color: "var(--green)" }}>Before you close — </span>
-          <span style={{ color: "var(--txt2)" }}>{step.exitQuestion}</span>
+        <div style={{ display: "flex", gap: 8, fontSize: 11.5, lineHeight: 1.55 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--green)", flexShrink: 0, marginTop: 5 }} />
+          <span><b style={{ color: "var(--green)" }}>Before you close</b> <span style={{ color: "var(--txt2)" }}>— {step.exitQuestion}</span></span>
         </div>
       </div>
 
-      <div style={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 6 }}>
-        The file this step writes to
-      </div>
-      {/* THE LINK, first and clickable. The project workbook carries a hyperlink
-          per step to this project's own file — the exact thing to open and work
-          in. Everything else in this block is orientation around that link. */}
-      {(() => {
-        const own = openLinkFor(step, board);
-        const loc = locationFor(step, board);
-        return (
-          <div style={{ marginBottom: 7 }}>
-            {own ? (
-              <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", marginBottom: 4 }}>
-                <a href={own} target="_blank" rel="noreferrer"
-                   style={{ fontSize: 13, fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open the file ↗</a>
-                {step.masterLink && <a href={step.masterLink} target="_blank" rel="noreferrer"
-                   style={{ fontSize: 11, color: "var(--txt3)", textDecoration: "underline" }}>blank template</a>}
-              </div>
-            ) : (
-              <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 4 }}>
-                No per-step link on file — upload or pin the project workbook in the Plan tab and this becomes one click.
-              </div>
-            )}
-            <div style={{ fontFamily: MONO, fontSize: 11, color: "var(--acc)", wordBreak: "break-all" }}>{name}</div>
-            {loc ? (
-              <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginTop: 2 }}>{loc}</div>
-            ) : knowsWhereItGoes(step) ? (
-              <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginTop: 2 }}>{path}</div>
-            ) : (
-              <div style={{ fontSize: 11, color: "var(--amber)", marginTop: 2, lineHeight: 1.5 }}>
-                The process sheet does not say which folder {step.templateId} lives in — add it to the
-                Template Actions tab and this will fill in.
-              </div>
-            )}
-          </div>
-        );
-      })()}
-      <div style={{ fontSize: 11, color: "var(--txt3)", marginBottom: 8 }}>{step.template} · {step.templateId}</div>
-
-      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 9 }}>
-        <Btn kind="ghost" icon={looking ? Loader2 : Search} disabled={looking || !task.projectId}
-             style={{ padding: "4px 9px", fontSize: 11.5 }} onClick={locate}>
-          {looking ? "Looking…" : file ? "Look again" : "Open it in Drive"}
-        </Btn>
-        <Btn kind="ghost" style={{ padding: "4px 9px", fontSize: 11.5 }}
-             onClick={() => onUse(name, path)}>Use as my evidence</Btn>
-      </div>
-
-      {file && (file.found ? (
-        <div style={{ fontSize: 11.5, border: "1px solid var(--bdr)", borderRadius: 9, padding: 9, background: "var(--s1)" }}>
-          <div style={{ fontFamily: MONO, fontSize: 11, marginBottom: 5, wordBreak: "break-all" }}>{file.file.name}</div>
-          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
-            <a href={file.file.openLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)" }}>Open ↗</a>
-            <a href={file.file.downloadLink} target="_blank" rel="noreferrer" style={{ color: "var(--acc)" }}>Download</a>
-            <span style={{ cursor: "pointer", color: "var(--txt2)" }}
-                  onClick={() => onUse(file.file.name, file.file.path)}>Use this one</span>
-          </div>
-          {/* Saved under a different name from the one the method expects.
-              Finding it anyway is right; not saying so is how the drift keeps
-              spreading. */}
-          {file.renamed && (
-            <div style={{ marginTop: 6, fontSize: 11, color: "var(--amber)" }}>
-              Saved as this, not as {file.renamed}.
-            </div>
+      {/* THE FILE, as one block: the clickable link first — it comes from the
+          project workbook and points at this project's own copy — then the
+          saved-as name and the folder it sits in, so the address the chat
+          will operate on is visible without opening Drive. */}
+      <div style={{ border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)", padding: "10px 12px", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+          <span style={{ fontWeight: 700, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt3)" }}>
+            The file this step writes to
+          </span>
+          {own && (
+            <a href={own} target="_blank" rel="noreferrer"
+               style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 800, color: "var(--acc)", textDecoration: "none", whiteSpace: "nowrap" }}>
+              Open the file ↗
+            </a>
           )}
         </div>
-      ) : (
-        <div style={{ fontSize: 11.5, color: "var(--amber)", border: "1px solid var(--bdr)", borderRadius: 9, padding: 9 }}>
-          {file.error || file.reason || "Not found."}
-          {file.candidates?.length > 0 && (
-            <div style={{ marginTop: 7 }}>
-              <div style={{ color: "var(--txt2)", marginBottom: 4 }}>What is in that folder:</div>
-              {file.candidates.map((c) => (
-                <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}>
-                  <a href={c.openLink} target="_blank" rel="noreferrer" style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--acc)", wordBreak: "break-all" }}>{c.name}</a>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
+        <div style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--acc)", wordBreak: "break-all" }}>{tgt.name}</div>
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--txt3)", wordBreak: "break-all", marginTop: 3 }}>{shownPath}</div>
+        {!own && (
+          <div style={{ fontSize: 11, color: "var(--txt3)", marginTop: 6, lineHeight: 1.5 }}>
+            No per-step link on file yet — upload the project workbook in the Plan tab and this becomes one click.
+          </div>
+        )}
+        <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 6 }}>{step.template} · {step.templateId}{inPcb ? ` · in ${board}'s folder` : ""}</div>
+      </div>
 
-      <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--s1)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55 }}>
+      <div style={{ padding: "8px 10px", borderRadius: 8, background: "var(--s1)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55 }}>
         {step.guidelines}
       </div>
     </div>

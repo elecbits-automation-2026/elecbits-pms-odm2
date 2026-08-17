@@ -1005,8 +1005,14 @@ Deno.serve(async (req) => {
       for (const r of (tabs["Template Actions"] ?? []).slice(4)) {
         const id = cell(r, 0);
         if (!/^EB-T-/.test(id)) continue;
+        // "folder/EB-T-141_….docx" in one cell: split, or every walk tries
+        // to enter the .docx as a directory and dies there.
+        const rawLoc = cell(r, 3);
+        const locIsFile = /\.[a-z0-9]{2,5}$/i.test(rawLoc);
         templates[id] = {
-          id, name: cell(r, 1), folder: cell(r, 3),
+          id, name: cell(r, 1),
+          folder: locIsFile ? rawLoc.replace(/[^/]*$/, "") : rawLoc,
+          fileNameReal: locIsFile ? rawLoc.split("/").pop() : "",
           steps: cell(r, 4).split(",").map((x) => Number(x.trim())).filter(Number.isFinite),
           actions: cell(r, 6).split("·").map((x) => x.trim()).filter(Boolean),
         };
