@@ -7132,9 +7132,10 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
      the file, and the by-name search as the fallback. The process rarely
      changes — where it lives does, and a pin survives renames and moves. */
   const [mapAt, setMapAt] = useState(0);
-  const [pinOpen, setPinOpen] = useState(false);
-  const [pinUrl, setPinUrl] = useState(PIN.url);
   const [srcNote, setSrcNote] = useState("");
+  /* One sync button, one truth: it re-reads the method from Drive and
+     re-verifies every file link, saying which half it is on. */
+  const [syncStage, setSyncStage] = useState("");   // "" | process | links
   const wbRef = useRef(null);
   useEffect(() => {
     const bump = () => setMapAt((n) => n + 1);
@@ -7149,18 +7150,17 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
       setSrcNote(r.error || `${file.name}: ${r.steps} steps adopted as the method`);
     } catch (e) { setSrcNote(`Couldn't read ${file.name}: ${e?.message || e}`); }
   };
-  const savePin = async () => {
-    const r = pinWorkbook(pinUrl);
-    if (r.error) { setSrcNote(r.error); return; }
-    setPinOpen(false);
-    setSrcNote("Pinned — reading that exact file from Drive…");
-    await loadProcessMap(driveAction, { force: true });
-    setMapAt((n) => n + 1);
-    setSrcNote(SOURCE.from === "drive"
-      ? `Reading ${SOURCE.fileName} from the pinned link`
-      : `Pinned, but Drive answered: ${SOURCE.error || "nothing"} — the pin will be used next time Drive is reachable`);
+  const syncNow = async () => {
+    if (syncStage) return;
+    setSyncStage("process");
+    try {
+      await loadProcessMap(driveAction, { force: true });
+      setMapAt((n) => n + 1);
+      setSyncStage("links");
+      await loadTemplateLinks(driveAction, { force: true });
+      setLinkTick((n) => n + 1);
+    } finally { setSyncStage(""); setMapAt((n) => n + 1); }
   };
-  const unpin = () => { clearPin(); setPinUrl(""); setSrcNote("Pin cleared — the workbook is found by name again."); };
   const boards = boardsOf(p);
   const board = boards[0] || "";
   const [boardPick, setBoardPick] = useState("all");
@@ -7254,39 +7254,42 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         {copy && copyMatches && <Pill color="var(--green)">step links from {copy.projectId}'s own workbook</Pill>}
         {copy && !copyMatches && <Pill color="var(--amber)">the loaded workbook is {copy.projectId}'s copy — its step links don't apply here</Pill>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-          {(() => {
-            /* The one indicator that answers "did it take?" without reading a
-               sentence. Green: the method on screen came from the workbook —
-               uploaded or pinned. Amber: from an earlier read, Drive quiet
-               now. Red: still the built-in copy, nothing synced. */
-            const state = SOURCE.from === "upload"
-              ? ["var(--green)", "Synced — uploaded workbook"]
-              : SOURCE.from === "drive"
-              ? ["var(--green)", PIN.fileId ? "Synced — pinned workbook" : "Synced — from Drive"]
-              : SOURCE.from === "cache"
-              ? ["var(--amber)", "Synced earlier — Drive quiet now"]
-              : ["var(--red)", "Not synced"];
-            return (
-              <span title={sourceLine()} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px",
-                borderRadius: 999, border: `1px solid ${state[0]}`, color: state[0], fontSize: 11, fontWeight: 800,
-                background: `color-mix(in srgb, ${state[0]} 10%, transparent)` }}>
-                <span style={{ width: 8, height: 8, borderRadius: "50%", background: state[0] }} />
-                {state[1]}
-              </span>
-            );
-          })()}
-          <Btn small kind="ghost" icon={linksBusy ? Loader2 : RefreshCw} disabled={linksBusy}
-               title="Ask Drive which template files are actually alive and relink every sheet — the register's own links can point at deleted copies"
-               onClick={refreshLinks}>{linksBusy ? "Checking Drive…" : "Refresh the file links"}</Btn>
           <input ref={wbRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) uploadWorkbook(f); }} />
           <Btn small kind="ghost" icon={Upload} title="Hand over the process workbook directly — parsed here, no Drive needed"
                onClick={() => wbRef.current?.click()}>Upload the workbook</Btn>
-          <Btn small kind={PIN.fileId ? "primary" : "ghost"} icon={Paperclip}
-               title="Paste the workbook's own Drive link — the exact file is read from then on, no searching, no wrong copy"
-               onClick={() => setPinOpen((v) => !v)}>{PIN.fileId ? "Workbook pinned" : "Pin the workbook link"}</Btn>
           <Btn small kind={mine ? "primary" : "ghost"} icon={Users} onClick={() => setMine((v) => !v)}>{mine ? "Everyone's steps" : "Only mine"}</Btn>
           <Btn small kind="ghost" icon={allOpen ? EyeOff : Eye} onClick={() => setOpenBlocks(allOpen ? new Set() : new Set(BLOCKS.map((b) => b.id)))}>{allOpen ? "Collapse all" : "Open all"}</Btn>
+          {(() => {
+            /* The sync state IS the sync button. Green, amber or red tells the
+               truth at a glance; pressing it re-reads the method and
+               re-verifies every link, and the bar underneath shows which half
+               it is on. */
+            const state = SOURCE.from === "upload"
+              ? ["var(--green)", "Synced — uploaded workbook"]
+              : SOURCE.from === "drive"
+              ? ["var(--green)", "Synced — from Drive"]
+              : SOURCE.from === "cache"
+              ? ["var(--amber)", "Synced earlier — Drive quiet now"]
+              : ["var(--red)", "Not synced"];
+            const label = syncStage === "process" ? "Reading the workbook…"
+              : syncStage === "links" ? "Verifying the file links…" : state[1];
+            return (
+              <button onClick={syncNow} disabled={!!syncStage} title="Re-read the method and re-verify every file link against Drive"
+                style={{ position: "relative", overflow: "hidden", display: "inline-flex", alignItems: "center", gap: 7,
+                         padding: "7px 13px", borderRadius: 999, border: `1.5px solid ${state[0]}`, cursor: syncStage ? "wait" : "pointer",
+                         color: state[0], fontSize: 11.5, fontWeight: 800,
+                         background: `color-mix(in srgb, ${state[0]} 10%, transparent)` }}>
+                {syncStage ? <Loader2 className="spin" size={12} /> : <span style={{ width: 8, height: 8, borderRadius: "50%", background: state[0] }} />}
+                {label}
+                {!syncStage && <RefreshCw size={11} style={{ opacity: 0.75 }} />}
+                {syncStage && (
+                  <span style={{ position: "absolute", left: 0, bottom: 0, height: 3, background: state[0],
+                                 width: syncStage === "process" ? "45%" : "85%", transition: "width .4s ease" }} />
+                )}
+              </button>
+            );
+          })()}
         </div>
       </div>
 
@@ -7304,19 +7307,6 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
           ))}
           <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>
             hardware and firmware run once per board; the rest is the project's
-          </span>
-        </div>
-      )}
-      {pinOpen && (
-        <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", border: "1px solid var(--bdr2)", borderRadius: 9 }}>
-          <span style={{ fontSize: 11, color: "var(--txt2)" }}>Paste the Drive link of the master workbook:</span>
-          <input value={pinUrl} onChange={(e) => setPinUrl(e.target.value)}
-                 placeholder="https://docs.google.com/spreadsheets/d/…"
-                 style={{ flex: "1 1 260px", padding: "6px 9px", borderRadius: 7, border: "1px solid var(--bdr2)", background: "var(--s1)", color: "var(--txt)", fontSize: 11.5, fontFamily: MONO }} />
-          <Btn small kind="primary" disabled={!pinUrl.trim()} onClick={savePin}>Use this file</Btn>
-          {PIN.fileId && <Btn small kind="ghost" onClick={unpin}>Unpin</Btn>}
-          <span style={{ flexBasis: "100%", fontSize: 10.5, color: "var(--txt3)" }}>
-            The exact file behind the link is read from then on — renames and moves don't break it, and the by-name search never runs. Share it with the service account first.
           </span>
         </div>
       )}
