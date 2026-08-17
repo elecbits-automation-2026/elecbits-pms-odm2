@@ -690,7 +690,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string; newName?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string; newName?: string; rootFolderId?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -724,8 +724,32 @@ Deno.serve(async (req) => {
        walk and the caller is told how far it got. */
     /* `last` is the deepest folder that DID exist when a walk dies — the
        caller uses it to say what's actually in there instead of a bare 404. */
-    const walkPath = async (rawPath: string, make: boolean) => {
+    const walkPath = async (rawPath: string, make: boolean, startId = "") => {
       const parts = rawPath.split("/").map((x) => x.trim()).filter(Boolean);
+      /* An explicit folder ID — the workbook's own link to the project's or a
+         board's folder — beats any walk by name. Anchor there and walk only
+         the relative remainder; folder names drift, an ID cannot. */
+      if (startId) {
+        let node: GFile | null = null;
+        try { node = await drive(token, `files/${startId}?fields=id,name,mimeType&supportsAllDrives=true`) as GFile; } catch { node = null; }
+        if (!node?.id) return { node: null, walked: [] as string[], missing: "the workbook's folder link (is it shared with the service account?)", last: null as GFile | null };
+        const walked: string[] = [node.name || "(linked folder)"];
+        for (let i = 0; i < parts.length; ) {
+          let found: GFile | null = null;
+          let used = 1;
+          for (let take = Math.min(4, parts.length - i); take >= 1; take--) {
+            const name = parts.slice(i, i + take).join(" / ");
+            const kid = await childFolder(token, node!.id, name, take > 1);
+            if (kid) { found = kid; used = take; break; }
+          }
+          if (!found && make) { found = await createFolder(token, node!.id, parts[i]); used = 1; }
+          if (!found) return { node: null, walked, missing: parts[i], last: node };
+          node = found;
+          walked.push(node.name);
+          i += used;
+        }
+        return { node, walked, missing: "", last: node };
+      }
       const top = await searchFolders(token, ROOT_CHAIN[0]);
       let node: GFile | null = top.find((f) => norm(f.name) === norm(ROOT_CHAIN[0])) || top[0] || null;
       if (!node) return { node: null, walked: [] as string[], missing: ROOT_CHAIN[0], last: null as GFile | null };
@@ -1286,7 +1310,7 @@ Deno.serve(async (req) => {
 
     if (body.action === "list") {
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
-      const { node, walked, missing, last } = await walkPath(rawPath, false);
+      const { node, walked, missing, last } = await walkPath(rawPath, false, String(body.rootFolderId || "").trim());
       if (!node) {
         if (missing === ROOT_CHAIN[0]) {
           return json({ error: `I can't see ${ROOT_CHAIN[0]} in Drive at all — share it with the service account.` }, 404);
@@ -1343,8 +1367,9 @@ Deno.serve(async (req) => {
          Missing folders along the way are created, so "put it in a new
          Templates folder" is one instruction rather than a trip to Drive. */
       const rawPath = String(body.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
-      if (rawPath) {
-        const { node, walked, missing } = await walkPath(rawPath, true);
+      const writeRoot = String(body.rootFolderId || "").trim();
+      if (rawPath || writeRoot) {
+        const { node, walked, missing } = await walkPath(rawPath, true, writeRoot);
         if (!node) return json({ error: `I couldn't open or create "${missing}" under /${walked.join("/")}/` }, 502);
         const fid = await writeFile(token, node.id, String(body.fileName), String(body.content), body.mimeType || "text/plain", body.encoding || "");
         return json({ ok: true, fileId: fid, folder: node.name, path: `/${walked.join("/")}/`, savedAs: actingAs || "" });
@@ -1383,8 +1408,9 @@ Deno.serve(async (req) => {
        file you just saved" looks exactly where it was just saved. */
     const locateFolder = async (b: typeof body, tk: string): Promise<{ folder: GFile; where: string } | { error: string }> => {
       const raw = String(b.folderPath || "").trim().replace(/^\/+|\/+$/g, "");
-      if (raw) {
-        const { node, walked, missing, last } = await walkPath(raw, false);
+      const rid = String(b.rootFolderId || "").trim();
+      if (raw || rid) {
+        const { node, walked, missing, last } = await walkPath(raw, false, rid);
         if (!node) {
           const sibs = last ? (await listSafe(tk, last.id)).filter(isFolder).map((k) => k.name) : [];
           const t = (missing.match(/\d{3,}/g) || []).pop() || "";

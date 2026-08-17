@@ -39,7 +39,7 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
          loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
          projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES,
-         openLinkFor, locationFor, fileTargetFor } from "./lib/processMap.js";
+         openLinkFor, locationFor, fileTargetFor, driveRootFor } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
 import { tbl, withLayoutRetry } from "./lib/tables.js";
 import { syncAll } from "./lib/tableSync.js";
@@ -548,12 +548,12 @@ async function driveStepFile({ projectId, folder, fileName, template }) {
   } catch (e) { return { found: false, error: `Couldn't reach Drive: ${e?.message || e}` }; }
 }
 
-async function driveReadFile({ projectId, folderPath, fileName, scope }) {
-  const r = await driveManageFile("read_file", { projectId, folderPath, fileName, scope });
+async function driveReadFile({ projectId, folderPath, fileName, scope, rootFolderId }) {
+  const r = await driveManageFile("read_file", { projectId, folderPath, fileName, scope, rootFolderId });
   return r;
 }
 
-async function driveManageFile(action, { projectId, folderPath, fileName, newName, scope }) {
+async function driveManageFile(action, { projectId, folderPath, fileName, newName, scope, rootFolderId }) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
   if (!fileName) return "Tell me which file.";
   const ctrl = new AbortController();
@@ -564,7 +564,8 @@ async function driveManageFile(action, { projectId, folderPath, fileName, newNam
       signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action, projectId: projectId || "", folderPath: folderPath || "",
-        fileName, newName: newName || "", token: DRIVE_READ_TOKEN, userJwt: await userJwt(), scope: scope || "pm" }),
+        fileName, newName: newName || "", token: DRIVE_READ_TOKEN, userJwt: await userJwt(), scope: scope || "pm",
+        ...(rootFolderId ? { rootFolderId } : {}) }),
     });
     const d = await res.json().catch(() => ({}));
     noteServiceAccount(d);
@@ -579,7 +580,7 @@ async function driveManageFile(action, { projectId, folderPath, fileName, newNam
 
 async function driveWriteFile(projectId, fileName, content, opts = {}) {
   if (!DRIVE_READ_URL) return "Drive isn't connected in this build.";
-  if ((!projectId && !opts.folderPath) || !fileName) return "I need somewhere to put it and a file name.";
+  if ((!projectId && !opts.folderPath && !opts.rootFolderId) || !fileName) return "I need somewhere to put it and a file name.";
   // A big file takes as long as it takes — roughly a second per megabyte on a
   // modest connection, on top of the reader's own budget.
   const mb = String(content || "").length / 1048576;
@@ -590,7 +591,7 @@ async function driveWriteFile(projectId, fileName, content, opts = {}) {
       method: "POST",
       signal: ctrl.signal,
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, userJwt: await userJwt(), ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
+      body: JSON.stringify({ action: "write", projectId, fileName, content, token: DRIVE_READ_TOKEN, userJwt: await userJwt(), ...(opts.folderPath ? { folderPath: opts.folderPath } : {}), ...(opts.rootFolderId ? { rootFolderId: opts.rootFolderId } : {}), ...(opts.encoding ? { encoding: opts.encoding } : {}), ...(opts.mimeType ? { mimeType: opts.mimeType } : {}), scope: opts.scope || "pm" }),
     });
     const data = await res.json().catch(() => ({}));
     // Callers that need the file's identity ask for it; everyone else keeps
@@ -5126,8 +5127,15 @@ function WorkChat({ t, p, step, onEvidence }) {
   const tgt = step ? fileTargetFor(step, t.projectId, board) : null;
   const inPcb = step && tgt?.tree === "pcb" && board;
   const fileName = tgt?.name || "";
-  const folderPath = step ? `${(inPcb ? pcbPath(board) : pmPath(t.projectId)).replace(/\/$/, "")}${tgt?.relDir ? `/${tgt.relDir.replace(/\/+$/, "")}` : ""}` : "";
-  const fileCtx = step ? { name: fileName, folder: folderPath } : null;
+  /* The workbook's Project tab links the real Drive folders. When that link
+     exists the read/write anchors on its ID and walks only the relative
+     folders below it — a name-based walk from the top is the fallback, not
+     the plan. */
+  const rootFolderId = step ? driveRootFor(t.projectId, inPcb ? "pcb" : "pm", board) : "";
+  const relDir = (tgt?.relDir || "").replace(/\/+$/, "");
+  const folderPath = !step ? "" : rootFolderId ? relDir
+    : `${(inPcb ? pcbPath(board) : pmPath(t.projectId)).replace(/\/$/, "")}${relDir ? `/${relDir}` : ""}`;
+  const fileCtx = step ? { name: fileName, folder: folderPath || "the project's linked Drive folder" } : null;
   const [msgs, setMsgs] = useState(t.workChat || []);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState([]);   // attachments waiting on the next send
@@ -5188,7 +5196,7 @@ function WorkChat({ t, p, step, onEvidence }) {
 
         if (act.tool === "read_file" && step) {
           add({ role: "tool", text: `Reading ${fileName} from Drive…` });
-          const r = await driveReadFile({ projectId: inPcb ? board : t.projectId, folderPath, fileName, scope: inPcb ? "pcb" : "pm" });
+          const r = await driveReadFile({ projectId: inPcb ? board : t.projectId, folderPath, fileName, scope: inPcb ? "pcb" : "pm", rootFolderId });
           add({ role: "tool", text: r?.ok
             ? `FILE CONTENT of ${r.fileName} (${(r.text || "").length} chars${r.editable ? "" : " · this format cannot be written back, only read"}):\n${String(r.text || "").slice(0, 20000)}`
             : `Could not read it: ${r?.error || r}` });
@@ -5201,7 +5209,7 @@ function WorkChat({ t, p, step, onEvidence }) {
           const hasRead = convo.some((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text));
           if (!hasRead) { add({ role: "tool", text: "Write refused: the file has not been read in this conversation yet." }); continue; }
           add({ role: "tool", text: `Writing ${fileName} back to Drive…` });
-          const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, String(act.content || ""), { folderPath, scope: inPcb ? "pcb" : "pm", wantFile: true });
+          const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, String(act.content || ""), { folderPath, rootFolderId, scope: inPcb ? "pcb" : "pm", wantFile: true });
           add({ role: "tool", text: (w === true || w?.ok)
             ? `Saved ${fileName} ✓${act.note ? ` — ${act.note}` : ""}`
             : `Drive would not take it: ${typeof w === "string" ? w : "unknown error"}` });

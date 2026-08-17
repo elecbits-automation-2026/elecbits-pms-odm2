@@ -536,6 +536,22 @@ export async function loadProcessMapFromUpload(file) {
 /* Whose copy the loaded workbook is, if it is one. */
 export const projectCopyOf = () => MAP.projectCopy || null;
 
+/* The workbook's Project tab links the actual Drive folders — the project's
+   and each board's. When those links exist they beat any walk by name: Drive
+   folder names drift ("Developers" holding one oddly-named folder is enough
+   to strand a search), a folder ID cannot. Returns the ID to anchor reads and
+   writes on, or "" when the workbook is silent or belongs to another project. */
+export function driveRootFor(projectId, tree, board = "") {
+  const c = MAP.projectCopy;
+  if (!c) return "";
+  if (projectId && c.projectId && !(normB(c.projectId).includes(normB(projectId)) || normB(projectId).includes(normB(c.projectId)))) return "";
+  const link = tree === "pcb"
+    ? (byBoard(c.pcbFolders, board) || c.pcbFolderLink || "")
+    : (c.pmFolderLink || "");
+  const m = String(link).match(/folders\/([A-Za-z0-9_-]{10,})/);
+  return m ? m[1] : "";
+}
+
 /* One line for the UI: which method this plan is built from. */
 export function sourceLine() {
   if (SOURCE.from === "upload") {
