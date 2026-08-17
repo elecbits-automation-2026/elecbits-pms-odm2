@@ -619,6 +619,14 @@ export function openLinkFor(step, board) {
 }
 export const locationFor = (step, board) => byBoard(step?.locations, board) || step?.location || "";
 
+/* A Drive link names its file by ID — docs.google.com/document/d/<ID>/edit,
+   drive.google.com/file/d/<ID>/view, …?id=<ID>. That ID is the one address
+   that cannot drift, which is why the chat reads and writes THROUGH the
+   step's own link and only falls back to folders when no link exists. */
+export const driveFileIdOf = (url) =>
+  (String(url || "").match(/\/d\/([A-Za-z0-9_-]{10,})/) ||
+   String(url || "").match(/[?&]id=([A-Za-z0-9_-]{10,})/) || [])[1] || "";
+
 /* The exact file a step's work lives in, resolved the most truthful way
    available: the step's own per-board location off the project workbook
    (which carries the REAL folder spelling and the REAL saved name), else the
@@ -630,13 +638,21 @@ export function fileTargetFor(step, projectId, board = "") {
   if (loc && /\.[a-z0-9]{2,5}$/i.test(loc)) {
     const parts = String(loc).split("/").filter(Boolean);
     const name = parts.pop();
-    // the first segment often names the project or board folder itself —
-    // that is the tree root's job, so it comes off here
-    const first = parts[0] || "";
-    const isBoardSeg = board && (normB(first).includes(normB(board)) || normB(board).includes(normB(first)));
-    const isProjSeg = projectId && (normB(first).includes(normB(projectId)) || normB(projectId).includes(normB(first)));
+    /* The first segment often names the project or board folder itself —
+       that is the tree root's job, so it comes off here. The order of these
+       two tests is load-bearing: the project id is a PREFIX of the full board
+       id (EbX-…-1880 vs EbX-…-1880-GW-123), so a loose "board contains this
+       segment" test would claim the project's own folder for the board and
+       send a project-management file into a PCB tree. The project is tested
+       first and EXACTLY; only then may the segment be the board's. */
+    const nf = normB(parts[0] || "");
+    const np = normB(projectId || "");
+    const nb = normB(board || "");
+    const isProjSeg = !!np && !!nf && nf === np;
+    const isBoardSeg = !isProjSeg && !!nb && !!nf && (nf === nb || nb.endsWith(nf) || nf.endsWith(nb));
     if (isBoardSeg || isProjSeg) parts.shift();
-    return { name, relDir: parts.join("/"), tree: isBoardSeg ? "pcb" : (servesOf(step) === "pcb" ? "pcb" : "pm") };
+    return { name, relDir: parts.join("/"),
+             tree: isBoardSeg ? "pcb" : isProjSeg ? "pm" : (servesOf(step) === "pcb" ? "pcb" : "pm") };
   }
   const t = templateFor(step);
   return {

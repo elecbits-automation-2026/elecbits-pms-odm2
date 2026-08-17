@@ -683,6 +683,26 @@ async function writeFile(token: string, folderId: string, name: string, content:
   return data.id as string;
 }
 
+/* Write straight into a file the caller already named by ID — the step's own
+   link carries it, and a link is the one address that cannot drift. No name
+   query, no folder walk, no rename: the bytes change, the identity does not. */
+async function writeFileById(token: string, fileId: string, content: string, mimeType = "text/plain", encoding = ""): Promise<string> {
+  const boundary = "ebodm" + Math.random().toString(36).slice(2);
+  const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n`
+    + `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
+  const post = `\r\n--${boundary}--`;
+  const body: BodyInit = encoding === "base64"
+    ? new Blob([pre, decodeBase64(content), post])
+    : `${pre}${content}${post}`;
+  const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  if (!res.ok) throw new Error(await writeFailureReason(res));
+  return (await res.json()).id as string;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -690,7 +710,7 @@ Deno.serve(async (req) => {
 
   // Body is parsed regardless of content-type (the app sends text/plain so the
   // same call also works against the Apps Script backend without a preflight).
-  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string; newName?: string; rootFolderId?: string };
+  let body: { projectId?: string; linkedIds?: string[]; token?: string; action?: string; fileName?: string; content?: string; mimeType?: string; encoding?: string; scope?: string; search?: string; userJwt?: string; folderPath?: string; newName?: string; rootFolderId?: string; fileId?: string };
   try { body = JSON.parse(await req.text()); } catch { return json({ error: "invalid JSON body" }, 400); }
   const expected = Deno.env.get("DRIVE_READ_TOKEN") ?? "";
   if (expected && body.token !== expected) return json({ error: "unauthorized" }, 401);
@@ -1359,7 +1379,16 @@ Deno.serve(async (req) => {
 
     // ── write action: { action:"write", projectId | folderPath, fileName, content } ──
     if (body.action === "write") {
-      if (!body.fileName || body.content == null) return json({ error: "fileName and content required" }, 400);
+      if (body.content == null) return json({ error: "content required" }, 400);
+      /* Same first-class address on the way back: the step's link named the
+         file, so the new content lands in THAT file — no name matching, no
+         folder walk, no chance of a duplicate appearing beside the original. */
+      const directWriteId = String(body.fileId || "").trim();
+      if (directWriteId) {
+        const fid = await writeFileById(token, directWriteId, String(body.content), body.mimeType || "text/plain", body.encoding || "");
+        return json({ ok: true, fileId: fid, folder: "", path: "via the step's own link", savedAs: actingAs || "" });
+      }
+      if (!body.fileName) return json({ error: "fileName and content required" }, 400);
 
       /* An explicit path writes anywhere the service account can reach, not
          only inside a project folder. "Eb-02-ODM/Templates" walks down from the
@@ -1446,6 +1475,23 @@ Deno.serve(async (req) => {
     // returns one file whole, so editing can be a real read-then-write rather
     // than a guess.
     if (body.action === "read_file") {
+      /* The step's own link is the first-class address: it names the file by
+         ID, so there is nothing to find — open it, read it, done. The folder
+         walk below only exists for steps that have no link on file. */
+      const directId = String(body.fileId || "").trim();
+      if (directId) {
+        let hit: GFile | null = null;
+        try { hit = await drive(token, `files/${directId}?fields=id,name,mimeType,modifiedTime,webViewLink&supportsAllDrives=true`) as GFile; } catch { hit = null; }
+        if (!hit?.id) return json({ error: "The step's link points at a file I can't open — is it shared with the service account?" }, 404);
+        const text = await extractText(token, hit, 100_000);
+        const editable = /^text\/|json|csv/.test(hit.mimeType || "")
+          || hit.mimeType === "application/vnd.google-apps.document";
+        return json({
+          ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: "via the step's own link",
+          text, editable,
+          note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
+        });
+      }
       if (!body.fileName) return json({ error: "Tell me which file to read." }, 400);
       const f = await locateFolder(body, token);
       if ("error" in f) return json({ error: f.error }, 404);
