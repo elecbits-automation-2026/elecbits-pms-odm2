@@ -7320,7 +7320,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                         <th style={{ ...th, width: 44 }}>#</th>
                         <th style={{ ...th, width: 168 }}>Category</th>
                         <th style={th}>Step</th>
-                        <th style={{ ...th, width: 118 }}>File link</th>
+                        <th style={{ ...th, width: 170 }}>File link</th>
                         <th style={{ ...th, width: 168 }}>Responsibility</th>
                         <th style={{ ...th, width: 132 }}>Who · when</th>
                         <th style={{ ...th, width: 96 }}>Status</th>
@@ -7388,10 +7388,24 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                                    keep while things were being wired up; for
                                    somebody doing the work they are noise. */
                                 if (copyMatches && r.openLink) {
+                                  /* The saved-as name rides under the link —
+                                     the sheet's Location column ends in the
+                                     real file when it knows it, else the
+                                     idealized name stands in. */
+                                  const shown = /\.[a-z0-9]{2,5}$/i.test(r.location || "")
+                                    ? String(r.location).split("/").filter(Boolean).pop()
+                                    : (r.fileName || "");
                                   return (
-                                    <a href={r.openLink} target="_blank" rel="noreferrer"
-                                       title={r.location || r.fileName || ""}
-                                       style={{ fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>
+                                    <div>
+                                      <a href={r.openLink} target="_blank" rel="noreferrer"
+                                         title={r.location || r.fileName || ""}
+                                         style={{ fontWeight: 800, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>
+                                      {shown && (
+                                        <div style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--txt3)", wordBreak: "break-all", lineHeight: 1.4, marginTop: 2 }}>
+                                          {shown}
+                                        </div>
+                                      )}
+                                    </div>
                                   );
                                 }
                                 const live = templateLinkFor(r.templateId);
