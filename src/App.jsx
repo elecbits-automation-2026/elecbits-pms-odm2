@@ -28,7 +28,7 @@ import {
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
-  Video, Mic
+  Video, Mic, MessagesSquare
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
@@ -5101,11 +5101,25 @@ YOU CAN OPERATE THE FILE ITSELF — really read it and really write it in Drive.
 {"tool":"read_file"} — fetch the current content of this step's file from Drive.
 {"tool":"write_file","content":"the ENTIRE new file content","note":"one line on what changed"} — save it back to Drive.
 Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When no tool is needed, reply in plain text.
+DRIVE THE WORK: you know what the file must end up containing — when information is missing, ask for it ONE question at a time, in the order the file needs it; when you have enough, offer to read the file and fill it in.
 CONVERSATION SO FAR:
 ${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(0, 12000) || "(none yet)"}
 ${attachTexts ? `THEY ATTACHED (extracted content):\n"""${attachTexts.slice(0, 8000)}"""` : ""}
 THEM: ${msg}
 Reply as YOU — plain text, or exactly one tool JSON.`;
+
+/* The chat speaks FIRST. An empty box that waits to be asked is a form with
+   extra steps; the copilot opens by saying what this step's file must end up
+   containing and asking the first question needed to fill it — so the person
+   answers questions in order instead of wondering what to type. */
+const kickoffPrompt = (p, t, step, fileCtx) => `You are the Elecbits ODM work copilot, opening the work chat for one task. Write your OPENING message to the person assigned — you speak first.
+TASK: "${t.title}" on project ${t.projectId || "unlinked"}${p ? ` (${p.name || ""}, deadline ${p.deadline || "?"})` : ""}
+THE METHOD'S STEP ${step.no}: ${step.step}
+DO: ${step.action}: ${step.whatToDo}
+THE FILE: ${fileCtx?.name || step.template} (${step.template})
+GATE TO CLOSE: ${step.exitQuestion}
+GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}
+Write it like: a one-line hello naming the file, then the concrete things it must end up containing (from the guidelines — the actual sections or fields, not "the required details"), then ask the FIRST question you need answered to start filling it. ONE question — you will ask the rest one at a time as they answer. Under 110 words, plain text, no headers, no bullets-for-the-sake-of-bullets.`;
 
 /* A tool call is a reply that IS a JSON object naming a tool. Anything else —
    prose, prose around JSON, JSON without a tool — is conversation. */
@@ -5145,7 +5159,29 @@ function WorkChat({ t, p, step, onEvidence }) {
   const fileRef = useRef(null);
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({ top: 1e6 }); }, [msgs, busy]);
-  const persist = (list) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, workChat: list.slice(-60) } : x)));
+  /* Day-wise history: 240 messages is weeks of real conversation, and every
+     message carries its date so the thread renders day by day and the admin
+     log can slice it by day. */
+  const persist = (list) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, workChat: list.slice(-240) } : x)));
+
+  /* The copilot opens the conversation — once per task, persisted, so
+     reopening the window never greets twice. */
+  const kicked = useRef(false);
+  useEffect(() => {
+    if (kicked.current || msgs.length || !step) return;
+    kicked.current = true;
+    (async () => {
+      setBusy(true);
+      let text = "";
+      try { text = String(await claude(kickoffPrompt(p, t, step, fileCtx), { json: false, maxTokens: 500, model: POWER_MODEL }) || "").trim(); } catch (e) { text = ""; }
+      if (!text) {
+        text = `Hi — this task fills ${fileCtx?.name || step.template} (${step.template}). ${String(step.whatToDo || "").trim()} To close it: ${step.exitQuestion} Tell me what you have so far and I'll help you fill it in.`;
+      }
+      const opening = [{ role: "assistant", text, at: new Date().toISOString() }];
+      setMsgs(opening); persist(opening);
+      setBusy(false);
+    })();
+  }, []);
 
   const attach = async (f) => {
     try {
@@ -5244,12 +5280,24 @@ function WorkChat({ t, p, step, onEvidence }) {
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, paddingRight: 4 }}>
         {msgs.length === 0 && !busy && (
           <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.7, padding: "14px 6px" }}>
-            This chat does the task with you. Ask how to start, paste what you have, drop in a photo of the board or the PDF the client sent —
-            it answers with this step's own guidance, gates and file in mind. When the work is done, say so and press <b>Complete Now</b>:
-            the closing gate reads this conversation as your evidence.
+            Ask, paste what you have, or drop in a photo or PDF — the copilot answers with this step's guidance, gates and file in mind.
+            When the work is done, press <b>Complete Now</b>: the closing gate reads this conversation as your evidence.
           </div>
         )}
-        {msgs.map((m, i) => m.role === "tool" ? (
+        {msgs.map((m, i) => (<div key={i} style={{ display: "contents" }}>
+        {/* A new day gets its own quiet marker, so a thread that ran across
+            the week reads as days, not as one endless scroll. */}
+        {(() => {
+          const day = String(m.at || "").slice(0, 10);
+          const prev = String(msgs[i - 1]?.at || "").slice(0, 10);
+          return day && day !== prev ? (
+            <div style={{ alignSelf: "center", fontSize: 10, fontWeight: 700, color: "var(--txt3)", letterSpacing: ".05em",
+                          padding: "2px 10px", borderRadius: 999, background: "var(--s2)", border: "1px solid var(--bdr)", margin: "3px 0" }}>
+              {fmtDate(day)}
+            </div>
+          ) : null;
+        })()}
+        {m.role === "tool" ? (
           <div key={i} style={{ alignSelf: "center", maxWidth: "94%", fontSize: 10.5, fontFamily: MONO, color: "var(--txt3)",
             border: "1px dashed var(--bdr)", borderRadius: 8, padding: "4px 10px", whiteSpace: "pre-wrap",
             overflow: "hidden", maxHeight: 72, textOverflow: "ellipsis" }}>
@@ -5268,7 +5316,7 @@ function WorkChat({ t, p, step, onEvidence }) {
               </div>
             )}
           </div>
-        ))}
+        )}</div>))}
         {busy && <div style={{ alignSelf: "flex-start", display: "flex", gap: 7, alignItems: "center", color: "var(--txt3)", fontSize: 12 }}><Loader2 className="spin" size={13} /> thinking…</div>}
       </div>
       {pending.length > 0 && (
@@ -5287,8 +5335,8 @@ function WorkChat({ t, p, step, onEvidence }) {
         <button title="Attach files or pictures" onClick={() => fileRef.current?.click()}
                 style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 8, cursor: "pointer", color: "var(--txt2)", padding: 8, display: "flex" }}><Paperclip size={15} /></button>
         <textarea className="inp" rows={draft.split("\n").length > 2 ? 3 : 1}
-          style={{ flex: 1, resize: "none", lineHeight: 1.5 }}
-          placeholder="Ask, paste, or drop a file — this chat does the task with you"
+          style={{ flex: 1, resize: "none", lineHeight: 1.5, minHeight: 38 }}
+          placeholder="Answer here, or drop a file…"
           value={draft} onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <Btn small kind="primary" icon={busy ? Loader2 : Send} disabled={busy || (!draft.trim() && !pending.length)} onClick={send}>Send</Btn>
@@ -8588,6 +8636,111 @@ function MomModule() {
 /* The menu is grouped by what you came here to do — the work of a project,
    the people, your own week, and the AI — rather than by one flat list where
    everything looked equally important. */
+/* ═══ WORK CHAT LOGS (admin) ══════════════════════════════════════════════
+   The work chats already ARE the record of the work — this page is the index
+   to them: who is talking to the copilot, on which project, about which
+   task, day by day. Filter by project, person or day; open a row to read the
+   conversation itself, grouped by day exactly as it happened. */
+function ChatLogsModule() {
+  const { tasks, users, projects } = useCtx();
+  const [proj, setProj] = useState("");
+  const [who, setWho] = useState("");
+  const [day, setDay] = useState("");
+  const [openId, setOpenId] = useState("");
+  const nameOf = (id) => users.find((u) => String(u.id) === String(id))?.name || "unassigned";
+
+  const rows = useMemo(() => tasks
+    .filter((t) => (t.workChat || []).length)
+    .map((t) => {
+      const days = [...new Set(t.workChat.map((m) => String(m.at || "").slice(0, 10)).filter(Boolean))].sort();
+      return { t, days, last: t.workChat.at(-1), saidByThem: t.workChat.filter((m) => m.role === "user").length };
+    })
+    .filter((r) => (!proj || r.t.projectId === proj) && (!who || String(r.t.assigneeId) === who) && (!day || r.days.includes(day)))
+    .sort((a, b) => String(b.last?.at || "").localeCompare(String(a.last?.at || ""))), [tasks, proj, who, day]);
+
+  const withChat = tasks.filter((t) => (t.workChat || []).length);
+  const projIds = [...new Set(withChat.map((t) => t.projectId).filter(Boolean))].sort();
+  const people = [...new Set(withChat.map((t) => String(t.assigneeId || "")).filter(Boolean))];
+
+  return (
+    <Section>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <select className="inp" style={{ width: 190 }} value={proj} onChange={(e) => setProj(e.target.value)}>
+          <option value="">All projects</option>
+          {projIds.map((id) => <option key={id} value={id}>{id}</option>)}
+        </select>
+        <select className="inp" style={{ width: 160 }} value={who} onChange={(e) => setWho(e.target.value)}>
+          <option value="">Everyone</option>
+          {people.map((id) => <option key={id} value={id}>{nameOf(id)}</option>)}
+        </select>
+        <input className="inp" type="date" style={{ width: 150 }} value={day} onChange={(e) => setDay(e.target.value)} />
+        {(proj || who || day) && <Btn small kind="ghost" onClick={() => { setProj(""); setWho(""); setDay(""); }}>Clear</Btn>}
+        <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--txt3)" }}>
+          {rows.length} conversation{rows.length === 1 ? "" : "s"} · {[...new Set(rows.map((r) => String(r.t.assigneeId || "")))].filter(Boolean).length} people · {[...new Set(rows.map((r) => r.t.projectId).filter(Boolean))].length} projects
+        </span>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="card"><Empty icon={MessagesSquare} title="No work chats yet" sub="Conversations start in a task's work window — they show up here the moment somebody talks to the copilot." /></div>
+      ) : rows.map(({ t, days, last, saidByThem }) => {
+        const step = matchStep(t);
+        const open = openId === t.id;
+        const shown = day ? t.workChat.filter((m) => String(m.at || "").slice(0, 10) === day) : t.workChat;
+        return (
+          <div key={t.id} className="card" style={{ padding: 0, marginBottom: 9, overflow: "hidden" }}>
+            <div onClick={() => setOpenId(open ? "" : t.id)}
+                 style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 15px", cursor: "pointer", flexWrap: "wrap" }}>
+              <MessagesSquare size={15} style={{ color: "var(--acc)", flexShrink: 0 }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+                <div style={{ fontSize: 11, color: "var(--txt2)", marginTop: 1 }}>
+                  <b>{nameOf(t.assigneeId)}</b> · {t.projectId || "unlinked"}{step ? ` · step ${step.no}` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <Pill color="var(--txt2)">{days.length} day{days.length === 1 ? "" : "s"}</Pill>
+                <Pill color="var(--acc)">{saidByThem} from them · {t.workChat.length - saidByThem} back</Pill>
+                <span style={{ fontSize: 10.5, fontFamily: MONO, color: "var(--txt3)" }}>{fmtDate(String(last?.at || "").slice(0, 10))}</span>
+                <ChevronDown size={14} style={{ color: "var(--txt3)", transform: open ? "rotate(180deg)" : "none", transition: "transform .2s" }} />
+              </div>
+            </div>
+            {open && (
+              <div className="fade" style={{ borderTop: "1px solid var(--bdr)", padding: "12px 15px", maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: 7, background: "var(--s2)" }}>
+                {shown.map((m, i) => {
+                  const d = String(m.at || "").slice(0, 10);
+                  const pd = String(shown[i - 1]?.at || "").slice(0, 10);
+                  return (
+                    <div key={i} style={{ display: "contents" }}>
+                      {d && d !== pd && (
+                        <div style={{ alignSelf: "center", fontSize: 10, fontWeight: 700, color: "var(--txt3)", letterSpacing: ".05em",
+                                      padding: "2px 10px", borderRadius: 999, background: "var(--s1)", border: "1px solid var(--bdr)" }}>{fmtDate(d)}</div>
+                      )}
+                      {m.role === "tool" ? (
+                        <div style={{ alignSelf: "center", maxWidth: "94%", fontSize: 10, fontFamily: MONO, color: "var(--txt3)",
+                                      border: "1px dashed var(--bdr)", borderRadius: 7, padding: "3px 9px", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                          {String(m.text || "").split("\n")[0]}
+                        </div>
+                      ) : (
+                        <div style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "86%",
+                                      background: m.role === "user" ? "var(--acc)" : "var(--s1)",
+                                      color: m.role === "user" ? "#fff" : "var(--txt)",
+                                      border: m.role === "user" ? "none" : "1px solid var(--bdr)",
+                                      borderRadius: 10, padding: "6px 10px", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+                          {m.text}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </Section>
+  );
+}
+
 const NAV_GROUPS = [
   ["Projects", [
     { id: "projects", label: "Projects", icon: FolderPlus, admin: true },
@@ -8606,6 +8759,7 @@ const NAV_GROUPS = [
   ]],
   ["AI", [
     { id: "assistant", label: "Assistant", icon: Bot },
+    { id: "chats", label: "Work Chat Logs", icon: MessagesSquare, admin: true },
     { id: "memory", label: "System Memory", icon: Database, admin: true },
   ]],
 ];
@@ -8620,6 +8774,7 @@ const TITLES = {
   resources: ["Resources", "Team roster, availability, deployment & efficiency"],
   perf: ["Performance & Training", "PM KPIs with red alerts · daily work updates scored against the KPI · trainings"],
   memory: ["System Memory", "Templates, instructions, conversations, Drive sitemaps — injected into every AI call"],
+  chats: ["Work Chat Logs", "Every work-window conversation — who is working with the copilot, on which project and step, day by day"],
 };
 
 /* Pre-app shell (loading / login) — carries the theme + CSS before the app mounts */
@@ -9240,6 +9395,7 @@ export default function App() {
             {view === "resources" && <ResourcesModule />}
             {view === "perf" && <PerfModule />}
             {view === "memory" && <MemoryModule />}
+            {view === "chats" && <ChatLogsModule />}
           </div>
         </main>
         {view !== "assistant" && <WorkspaceChat />}
