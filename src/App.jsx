@@ -5153,10 +5153,12 @@ function ToolLine({ text }) {
     : /^FILE CONTENT/.test(t) ? [FileText, "var(--txt3)"]
     : [ArrowRight, "var(--txt3)"];
   return (
-    <div style={{ alignSelf: "center", maxWidth: "92%", display: "flex", alignItems: "center", gap: 6,
-                  fontSize: 10.5, fontFamily: MONO, color, minWidth: 0, padding: "1px 0" }}>
+    <div style={{ alignSelf: "center", width: "100%", maxWidth: "92%", display: "flex", alignItems: "center",
+                  justifyContent: "center", gap: 6, fontSize: 10.5, fontFamily: MONO, color, minWidth: 0, padding: "1px 0" }}>
       <Ic size={11} style={{ flexShrink: 0 }} />
-      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.split("\n")[0]}</span>
+      {/* one line, clamped INSIDE the column — a long line must ellipsize,
+          never widen the chat and push the guidance panel off-screen */}
+      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{t.split("\n")[0]}</span>
     </div>
   );
 }
@@ -5337,12 +5339,12 @@ function WorkChat({ t, p, step, onEvidence }) {
   }, [msgs]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: 420, maxHeight: 560 }}
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 420, maxHeight: "min(64vh, 640px)", minWidth: 0 }}
          /* dropping a file anywhere on the chat attaches it — the placeholder
             has promised this all along */
          onDragOver={(e) => e.preventDefault()}
          onDrop={(e) => { e.preventDefault(); [...(e.dataTransfer?.files || [])].forEach(attach); }}>
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, paddingRight: 4 }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", display: "flex", flexDirection: "column", gap: 9, paddingRight: 4, minWidth: 0 }}>
         {msgs.length === 0 && !busy && (
           <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.7, padding: "14px 6px" }}>
             Ask, paste what you have, or drop in a photo or PDF — the copilot answers with this step's guidance, gates and file in mind.
@@ -5365,11 +5367,12 @@ function WorkChat({ t, p, step, onEvidence }) {
         {m.role === "tool" ? (
           isStaleProgress(m, msgs[i + 1]) ? null : <ToolLine text={m.text} />
         ) : (
-          <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%",
+          <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", minWidth: 0,
             background: m.role === "user" ? "var(--acc)" : "var(--s2)",
             color: m.role === "user" ? "#fff" : "var(--txt)",
             border: m.role === "user" ? "none" : "1px solid var(--bdr)",
-            borderRadius: 12, padding: "8px 12px", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+            borderRadius: m.role === "user" ? "13px 13px 4px 13px" : "13px 13px 13px 4px",
+            padding: "8px 12px", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
             {m.text}
             {(m.files || []).length > 0 && (
               <div style={{ marginTop: 4, display: "flex", gap: 5, flexWrap: "wrap" }}>
@@ -5442,10 +5445,14 @@ function WorkWindow({ t, onClose, onComplete }) {
         <Btn kind="ghost" onClick={() => save(false)}>Save progress</Btn>
         <Btn kind="green" icon={CheckCircle2} onClick={() => { save(true); onComplete(w); }}>Complete Now</Btn>
       </>}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.15fr", gap: 16, alignItems: "stretch" }}>
+      {/* minWidth 0 on BOTH tracks: a grid child defaults to min-width auto,
+          so one long unwrappable line in the chat would push its column past
+          the track, scroll the whole modal sideways and shove the guidance
+          panel off-screen. */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.15fr)", gap: 16, alignItems: "stretch" }}>
         {/* The left column fills its full height — the guidance grows into
             whatever the chat's length gives it, instead of dead space. */}
-        <div style={{ background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 11, padding: 14, fontSize: 12.5, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 11, padding: 14, fontSize: 12.5, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 9 }}>Scope & guidance</div>
           {t.steps?.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
@@ -5472,7 +5479,7 @@ function WorkWindow({ t, onClose, onComplete }) {
           {bar && <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--soft)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)" }}><b style={{ color: "var(--acc)" }}>{bar.title}:</b> {bar.content}</div>}
           {p && <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--txt2)" }}>Deadline {fmtDate(p.deadline)} · <Countdown task={t} now={now} /></div>}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
           <WorkChat t={t} p={p} step={step} onEvidence={(ev) => setW((v) => ({ ...v, ...ev, fileName: v.fileName && !ev.fileName ? v.fileName : ev.fileName || v.fileName }))} />
           <div style={{ fontSize: 11, color: "var(--txt3)", lineHeight: 1.6 }}>
             Complete Now runs the AI gate — it reads this conversation as your evidence, checks the file and path against the method, and fails vague closures.
@@ -8798,11 +8805,11 @@ function ChatLogsModule() {
                       {m.role === "tool" ? (
                         isStaleProgress(m, shown[i + 1]) ? null : <ToolLine text={m.text} />
                       ) : (
-                        <div style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "86%",
+                        <div style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "86%", minWidth: 0,
                                       background: m.role === "user" ? "var(--acc)" : "var(--s1)",
                                       color: m.role === "user" ? "#fff" : "var(--txt)",
                                       border: m.role === "user" ? "none" : "1px solid var(--bdr)",
-                                      borderRadius: 10, padding: "6px 10px", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+                                      borderRadius: 10, padding: "6px 10px", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
                           {m.text}
                         </div>
                       )}
