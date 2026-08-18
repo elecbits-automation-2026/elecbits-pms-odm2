@@ -1094,13 +1094,14 @@ ${memCtx(memory)}
 TASK: "${t.title}" on project ${t.projectId || "(unlinked)"} | steps: ${(t.steps || []).join("; ") || "—"} | window ${t.startTime || "?"}–${t.endTime || "?"} | contingencies: ${(t.conditions || []).map((c) => `if ${c.if} then ${c.then}`).join("; ") || "none"}
 WORK LOG → done: "${work.whatDone || ""}" | file: "${work.fileName || ""}" | stored at: "${work.fileLocation || ""}"
 Ask exactly 3 short, pointed verification questions that expose whether this was truly completed to quality — reference the specific deliverable, file name, storage path and how it was verified. Respond ONLY with JSON: {"questions":["","",""]}`;
-const verdictPrompt = (t, work, qa, memory) => `You are the closure verifier for Elecbits ODM tasks. Be strict but fair.
+const verdictPrompt = (t, work, qa, memory, evidence = []) => `You are the closure verifier for Elecbits ODM tasks. Be strict but fair.
 ${memCtx(memory)}
 TASK: "${t.title}" on ${t.projectId || "(unlinked)"} | steps: ${(t.steps || []).join("; ") || "—"}
 WORK LOG → done: "${work.whatDone || ""}" | file: "${work.fileName || ""}" | stored at: "${work.fileLocation || ""}"
 VERIFICATION Q&A:
 ${qa.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}
-Rules: FAIL if a deliverable task has no concrete file name or storage path, if the path ignores the Drive sitemap conventions, or if answers are vague/unverified. If FAIL, propose 1–3 concrete sub-tasks that would finish the job.
+${evidence.length ? `EVIDENCE ATTACHED (${evidence.length} — screenshots/files are included in this message; READ them, they can prove an answer the words alone cannot): ${evidence.map((a) => a.name).join(", ")}` : ""}
+Rules: FAIL if a deliverable task has no concrete file name or storage path, if the path ignores the Drive sitemap conventions, or if answers are vague/unverified. Attached evidence that clearly shows an approval, a result or a saved file COUNTS as verification. If FAIL, propose 1–3 concrete sub-tasks that would finish the job.
 Respond ONLY with JSON: {"verdict":"pass" or "fail","score":0-10,"feedback":"max 2 sentences","subtasks":[{"title":"","timeboxMinutes":60}]}`;
 const branchPrompt = (t, blocker, memory) => `An Elecbits ODM task is stuck and must be branched into sub-tasks.
 ${memCtx(memory)}
@@ -5641,6 +5642,11 @@ function CompleteFlow({ t, onClose }) {
   const [blocker, setBlocker] = useState("");
   const [rows, setRows] = useState([{ title: "", assigneeId: t.assigneeId || "", timebox: 60 }]);
   const [branchBusy, setBranchBusy] = useState(false);
+  /* Evidence for the gate: an approval is usually a SCREENSHOT — a WhatsApp
+     yes, a signed page, a test readout. Pasted or dropped anywhere on the
+     questions, shown to the verifier as real images, filed to Drive on pass. */
+  const [evidence, setEvidence] = useState([]);
+  const evRef = useRef(null);
   const finalize = (patch) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, ...patch } : x)));
   const applyEsc = () => { if (!esc) return; finalize({ escalated: { to: SHREYA_ID, note: escNote, at: new Date().toISOString() } }); toast("Escalated to Shreya", "amber"); };
 
@@ -5652,7 +5658,7 @@ function CompleteFlow({ t, onClose }) {
   };
   const verify = async () => {
     setVBusy(true);
-    try { const r = await claude(verdictPrompt(t, work, qs, memory)); setVerdict(r); }
+    try { const r = await claude(verdictPrompt(t, work, qs, memory, evidence), { images: imageBlocks(evidence) }); setVerdict(r); }
     catch {
       const solid = qs.every((x) => x.a.trim().length > 10) && work.fileName && work.fileLocation;
       setVerdict({ verdict: solid ? "pass" : "fail", score: solid ? 6 : 3, feedback: solid ? "Offline heuristic: file + path + substantive answers present. Verify manually when AI is back." : "Offline heuristic: missing file name / storage path, or answers too thin to trust.", subtasks: [], offline: true });
@@ -5680,12 +5686,15 @@ function CompleteFlow({ t, onClose }) {
     onClose();
   };
   const closePass = () => {
-    finalize({ status: "done", completedAt: new Date().toISOString(), work, aiVerification: { questions: qs, verdict: verdict.verdict, score: verdict.score, feedback: verdict.feedback, offline: !!verdict.offline } });
+    finalize({ status: "done", completedAt: new Date().toISOString(), work, aiVerification: { questions: qs, verdict: verdict.verdict, score: verdict.score, feedback: verdict.feedback, offline: !!verdict.offline, evidence: evidence.map((a) => a.name) } });
     if (t.projectId && t.linked !== false) {
       sheetSync(`${pmPath(t.projectId)}Checklist.xlsx`, `"${t.title}" done · score ${verdict.score}/10`);
-      // Write the closure record into the project's Drive folder as evidence.
+      // Write the closure record into the project's Drive folder as evidence —
+      // and the evidence screenshots themselves land beside it, so the record
+      // POINTS at proof that actually exists.
+      evidence.forEach((a) => { saveAttachmentToDrive(a, t.projectId, "pm"); });
       driveWriteFile(t.projectId, `${todayStr()}_closure_${String(t.title).slice(0, 40).replace(/[^\w\- ]/g, "").trim().replace(/\s+/g, "-")}.txt`,
-        `Elecbits ODM — task closure record\nProject: ${t.projectId}\nTask: ${t.title}\nClosed: ${new Date().toISOString()}\nAI verdict: ${verdict.verdict} (${verdict.score}/10)\nFeedback: ${verdict.feedback}\n\nWork log\n  What was done: ${work.whatDone || "—"}\n  File produced: ${work.fileName || "—"}\n  Stored at: ${work.fileLocation || "—"}\n\nVerification Q&A\n${qs.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}\n`
+        `Elecbits ODM — task closure record\nProject: ${t.projectId}\nTask: ${t.title}\nClosed: ${new Date().toISOString()}\nAI verdict: ${verdict.verdict} (${verdict.score}/10)\nFeedback: ${verdict.feedback}\n\nWork log\n  What was done: ${work.whatDone || "—"}\n  File produced: ${work.fileName || "—"}\n  Stored at: ${work.fileLocation || "—"}\n${evidence.length ? `\nEvidence filed with this record\n${evidence.map((a) => `  ${a.name}`).join("\n")}\n` : ""}\nVerification Q&A\n${qs.map((x, i) => `Q${i + 1}: ${x.q}\nA${i + 1}: ${x.a || "(no answer)"}`).join("\n")}\n`
       ).then((r) => { if (r === true) sheetSync(`${pmPath(t.projectId)}`, `Closure record written to Drive`); });
     }
     applyEsc();
@@ -5717,7 +5726,10 @@ function CompleteFlow({ t, onClose }) {
         </div>
       )}
       {phase === "questions" && (
-        <div className="fade">
+        <div className="fade"
+             onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setEvidence, toast); } }}
+             onDragOver={(e) => e.preventDefault()}
+             onDrop={(e) => { e.preventDefault(); pickAttachments(e.dataTransfer?.files, setEvidence, toast); }}>
           {qBusy ? <div style={{ display: "flex", gap: 9, alignItems: "center", color: "var(--txt2)", padding: "20px 0" }}><Loader2 className="spin" size={16} /> Reading the task scope and your work log, preparing verification questions…</div> : (<>
             <div style={{ fontSize: 12.5, color: "var(--txt2)", marginBottom: 12 }}>Answer specifically — file names, paths, how you verified. Vague answers fail the gate.</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -5727,6 +5739,30 @@ function CompleteFlow({ t, onClose }) {
                   <textarea className="inp" rows={2} value={x.a} onChange={(e) => setQs((q) => q.map((y, j) => (j === i ? { ...y, a: e.target.value } : y)))} />
                 </div>
               ))}
+            </div>
+            {/* THE EVIDENCE STRIP. The strongest answer to "prove it" is a
+                screenshot — paste it anywhere on this window and the verifier
+                SEES it, not a description of it. */}
+            <div style={{ marginTop: 12, border: "1px dashed var(--bdr2)", borderRadius: 10, padding: "9px 12px", background: "var(--s2)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontWeight: 700, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)" }}>Evidence</span>
+                <span style={{ fontSize: 11.5, color: "var(--txt3)" }}>paste a screenshot here (Cmd/Ctrl+V) or attach — the approval message, the test readout, the saved file</span>
+                <input ref={evRef} type="file" multiple accept="image/*,.pdf,.png,.jpg,.jpeg" style={{ display: "none" }}
+                       onChange={(e) => { pickAttachments(e.target.files, setEvidence, toast); e.target.value = ""; }} />
+                <button title="Attach evidence" onClick={() => evRef.current?.click()}
+                        style={{ marginLeft: "auto", background: "none", border: "1px solid var(--bdr)", borderRadius: 7, cursor: "pointer", color: "var(--txt2)", padding: 6, display: "flex" }}><Paperclip size={13} /></button>
+              </div>
+              {evidence.length > 0 && (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 8 }}>
+                  {evidence.map((a, i) => (
+                    <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10.5, fontFamily: MONO, padding: "3px 8px", borderRadius: 7, border: "1px solid var(--bdr)", background: "var(--s1)" }}>
+                      {a.preview ? <img src={a.preview} alt="" style={{ width: 26, height: 26, objectFit: "cover", borderRadius: 4 }} /> : <Paperclip size={11} />}
+                      {a.name}
+                      <button onClick={() => setEvidence((x) => x.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt3)", display: "flex" }}><X size={11} /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div style={{ marginTop: 14 }}><Btn icon={vBusy ? Loader2 : Bot} disabled={vBusy || qs.some((x) => !x.a.trim())} onClick={verify}>{vBusy ? "Verifying…" : "Verify with AI"}</Btn></div>
           </>)}
