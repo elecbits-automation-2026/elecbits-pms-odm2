@@ -231,15 +231,30 @@ function fromCache() {
   } catch { return null; }
 }
 
+/* The uploaded workbook keeps its OWN slot. CACHE_KEY is one slot and a Drive
+   sync overwrites it — which is exactly how a link-less sync once erased the
+   uploaded copy from the browser entirely. The upload slot is written only by
+   an upload and read whenever the synced copy would be a downgrade. */
+const UPLOAD_KEY = "eb-process-upload-v1";
+function fromUploadSlot() {
+  try {
+    const raw = localStorage.getItem(UPLOAD_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    return c?.map?.steps?.length ? c : null;
+  } catch { return null; }
+}
+const linkedCount = (ss) => (ss || []).filter((s) => s?.openLink || Object.keys(s?.openLinks || {}).length).length;
+
 /* An uploaded workbook is the method EVERYWHERE, not only on the page that
    happens to call loadProcessMap. Rehydrate it the moment this module loads,
    so a work window opened straight from My Projects & Tasks after a reload
    carries the upload's per-step links instead of the bundled fallback. */
 try {
-  const boot = fromCache();
-  if (boot?.source?.from === "upload") {
+  const boot = fromUploadSlot() || (fromCache()?.source?.from === "upload" ? fromCache() : null);
+  if (boot?.map) {
     adopt(boot.map);
-    Object.assign(SOURCE, boot.source);
+    Object.assign(SOURCE, boot.source, { from: "upload" });
   }
 } catch { /* no cache, no browser — the bundled method stands */ }
 
@@ -271,10 +286,20 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
        back without any (an old reader that only saw values) must never
        replace an uploaded copy that has them — that trade would quietly
        disconnect every task and plan row from its file. */
-    const linked = (ss) => (ss || []).filter((s) => s?.openLink || Object.keys(s?.openLinks || {}).length).length;
-    if (wasFrom === "upload" && linked(STEPS) > 0 && linked(r.steps) === 0) {
-      SOURCE.error = "Drive's copy came back without the per-step links — keeping the uploaded workbook (re-deploy the Drive reader, then sync again).";
-      return MAP;
+    if (linkedCount(r.steps) === 0) {
+      if (wasFrom === "upload" && linkedCount(STEPS) > 0) {
+        SOURCE.error = "Drive's copy came back without the per-step links — keeping the uploaded workbook (re-deploy the Drive reader, then sync again).";
+        return MAP;
+      }
+      // Whatever is in memory, a saved upload with links beats a link-less
+      // sync — restore it rather than adopting the downgrade.
+      const slot = fromUploadSlot();
+      if (slot && linkedCount(slot.map.steps) > 0) {
+        adopt(slot.map);
+        Object.assign(SOURCE, slot.source, { from: "upload",
+          error: "Drive's copy has no per-step links — using the uploaded workbook instead (re-deploy the Drive reader, then sync again)." });
+        return MAP;
+      }
     }
 
     adopt({ steps: r.steps, templates: r.templates || {},
@@ -553,10 +578,13 @@ export async function loadProcessMapFromUpload(file) {
     modifiedTime: "", fetchedAt: new Date().toISOString(),
   });
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({
+    const payload = JSON.stringify({
       map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy },
       source: { ...SOURCE },
-    }));
+    });
+    localStorage.setItem(CACHE_KEY, payload);
+    // The upload's own slot — the one a Drive sync can never overwrite.
+    localStorage.setItem(UPLOAD_KEY, payload);
   } catch { /* quota */ }
   const linked = steps.filter((x) => x.openLink).length;
   return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked,
