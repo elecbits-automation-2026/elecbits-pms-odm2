@@ -2507,6 +2507,8 @@ const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, lab
 function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
   const { Ic, label, color } = todoMeta(t, nowMs);
   const u = users.find((x) => x.id === t.assigneeId);
+  const { projects } = useCtx() || {};
+  const link = useMemo(() => taskOpenLink(t, projects), [t.id, t.title, t.stepNo, t.projectId, projects]);
   const [armDel, setArmDel] = useState(false);
   useEffect(() => { if (!armDel) return; const t2 = setTimeout(() => setArmDel(false), 4000); return () => clearTimeout(t2); }, [armDel]);
   return (
@@ -2515,6 +2517,9 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
         <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
+          {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ fontWeight: 800, fontSize: 11, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>}
           {u ? <span style={{ display: "flex", alignItems: "center", gap: 5 }}><AvatarDot user={u} size={18} /><span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>}
           {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
           <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}</span>
@@ -5027,8 +5032,22 @@ function TasksModule() {
   );
 }
 
+/* The step's own file link, on the task itself — the same clickable link the
+   plan row carries, resolved from the task's step and its board. A task is a
+   step of the method; the file it writes to should be one click from the
+   list, not three screens away. */
+function taskOpenLink(t, projects) {
+  const st = matchStep(t);
+  if (!st) return null;
+  const p = (projects || []).find((x) => x.projectId === t.projectId);
+  const board = boardsOf(p).find((b) => String(t.title || "").includes(b)) || boardsOf(p)[0] || "";
+  const href = openLinkFor(st, board);
+  return href ? { href, name: fileTargetFor(st, t.projectId, board).name } : null;
+}
+
 function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplete, onDelete }) {
-  const { users, me } = useCtx();
+  const { users, me, projects } = useCtx();
+  const link = useMemo(() => taskOpenLink(t, projects), [t.id, t.title, t.stepNo, t.projectId, projects]);
   const [open, setOpen] = useState(false);
   /* Deleting is deliberate: the first press arms, the second deletes, and
      looking away disarms. A single-click delete next to Start is how a task
@@ -5043,6 +5062,9 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
       <div className="rowHover" style={{ padding: "11px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: STATUS_DOT[t.status], flexShrink: 0 }} />
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1, minWidth: 180, textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt2)" : "var(--txt)" }}>{t.title}</span>
+        {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ fontWeight: 800, fontSize: 11.5, color: "var(--acc)", textDecoration: "none", flexShrink: 0 }}>Open ↗</a>}
         {showProject && t.projectId && <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill>}
         {showAssignee && (u ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}><AvatarDot user={u} size={21} /><span style={{ fontSize: 12, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>)}
         {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
@@ -5355,7 +5377,15 @@ function WorkWindow({ t, onClose, onComplete }) {
      hand, so this matches on the words and returns nothing when it is not
      sure — showing the wrong step's file and Drive path would be worse than
      showing the generic sitemap. */
-  const step = useMemo(() => matchStep(t), [t.id, t.title, t.stepNo]);
+  /* If the method changes while the window is open (a workbook upload or a
+     Drive sync lands), the step re-resolves — its links live on the step. */
+  const [mapTick, setMapTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setMapTick((n) => n + 1);
+    window.addEventListener("eb-process-map", bump);
+    return () => window.removeEventListener("eb-process-map", bump);
+  }, []);
+  const step = useMemo(() => matchStep(t), [t.id, t.title, t.stepNo, mapTick]);
   /* Most tasks are typed in somebody's own words — "Complete EVSO testing" is
      not the name of any step — so the words alone will never reach the method
      for all of them. Choosing the step once sticks to the task, and from then
@@ -5369,8 +5399,10 @@ function WorkWindow({ t, onClose, onComplete }) {
         <Btn kind="ghost" onClick={() => save(false)}>Save progress</Btn>
         <Btn kind="green" icon={CheckCircle2} onClick={() => { save(true); onComplete(w); }}>Complete Now</Btn>
       </>}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.15fr", gap: 16 }}>
-        <div style={{ background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 11, padding: 14, fontSize: 12.5 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.15fr", gap: 16, alignItems: "stretch" }}>
+        {/* The left column fills its full height — the guidance grows into
+            whatever the chat's length gives it, instead of dead space. */}
+        <div style={{ background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 11, padding: 14, fontSize: 12.5, display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--txt2)", marginBottom: 9 }}>Scope & guidance</div>
           {t.steps?.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
@@ -5468,6 +5500,7 @@ function StepPicker({ task, onPick }) {
    recorded is that typing a 90-character Drive path by hand is miserable. */
 function StepGuidance({ step, task, onPick, board = "" }) {
   const wave = waveOf(step.no);
+  const fill = { flex: 1, display: "flex", flexDirection: "column", minHeight: 0 };
   /* One resolver for the file's identity — the workbook's own Location column
      (folder AND saved-as name) when the sheet speaks, the template register
      when it is silent. The chat on the right uses the same resolver, so what
@@ -5479,7 +5512,7 @@ function StepGuidance({ step, task, onPick, board = "" }) {
   const own = openLinkFor(step, board);
 
   return (
-    <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10 }}>
+    <div style={{ marginTop: 12, borderTop: "1px dashed var(--bdr2)", paddingTop: 10, ...fill }}>
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 8 }}>
         <Pill color="var(--purple)">Step {step.no}</Pill>
         {wave && <Pill color="var(--txt2)">{wave.id}</Pill>}
@@ -5534,7 +5567,11 @@ function StepGuidance({ step, task, onPick, board = "" }) {
         <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 6 }}>{step.template} · {step.templateId}{inPcb ? ` · in ${board}'s folder` : ""}</div>
       </div>
 
-      <div style={{ padding: "8px 10px", borderRadius: 8, background: "var(--s1)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.55 }}>
+      {/* The guidance takes whatever height the chat's side leaves — a long
+          conversation means a taller window means MORE of the method visible,
+          never a blank stretch under the deadline. */}
+      <div style={{ padding: "9px 11px", borderRadius: 8, background: "var(--s1)", border: "1px solid var(--bdr)", fontSize: 11.5, color: "var(--txt2)", lineHeight: 1.6, flex: 1, minHeight: 90, overflowY: "auto" }}>
+        <div style={{ fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt3)", marginBottom: 4 }}>How to do it</div>
         {step.guidelines}
       </div>
     </div>

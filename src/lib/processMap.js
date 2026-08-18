@@ -231,6 +231,18 @@ function fromCache() {
   } catch { return null; }
 }
 
+/* An uploaded workbook is the method EVERYWHERE, not only on the page that
+   happens to call loadProcessMap. Rehydrate it the moment this module loads,
+   so a work window opened straight from My Projects & Tasks after a reload
+   carries the upload's per-step links instead of the bundled fallback. */
+try {
+  const boot = fromCache();
+  if (boot?.source?.from === "upload") {
+    adopt(boot.map);
+    Object.assign(SOURCE, boot.source);
+  }
+} catch { /* no cache, no browser — the bundled method stands */ }
+
 export async function loadProcessMap(readDrive, { force = false } = {}) {
   /* An uploaded workbook was handed over deliberately — including a project
      copy whose per-step links a by-name Drive search could never reproduce.
@@ -249,16 +261,30 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
   }
 
   if (typeof readDrive !== "function") return MAP;
+  const wasFrom = SOURCE.from;
   try {
     const r = await readDrive({ action: "process_map", ...(PIN.fileId ? { fileId: PIN.fileId } : {}) });
     if (r?.error) throw new Error(r.error);
     if (!r?.steps?.length) throw new Error("Drive returned a workbook with no steps in it.");
 
+    /* The per-step links ARE the workbook's payload. A Drive read that comes
+       back without any (an old reader that only saw values) must never
+       replace an uploaded copy that has them — that trade would quietly
+       disconnect every task and plan row from its file. */
+    const linked = (ss) => (ss || []).filter((s) => s?.openLink || Object.keys(s?.openLinks || {}).length).length;
+    if (wasFrom === "upload" && linked(STEPS) > 0 && linked(r.steps) === 0) {
+      SOURCE.error = "Drive's copy came back without the per-step links — keeping the uploaded workbook (re-deploy the Drive reader, then sync again).";
+      return MAP;
+    }
+
     adopt({ steps: r.steps, templates: r.templates || {},
              // A workbook without a Flow Map (or a server that read none) must
              // not dissolve the block structure the whole plan is read by.
              blocks: r.blocks?.length ? r.blocks : BUNDLED.blocks || [],
-             convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [] });
+             convergence: r.convergence?.length ? r.convergence : BUNDLED.convergence || [],
+             // The server does not read the Project tab; the boards and folder
+             // links the upload established describe the same workbook.
+             projectCopy: MAP.projectCopy || null });
     Object.assign(SOURCE, {
       from: "drive", error: "",
       fileName: r.file?.name || "", path: r.file?.path || "",
@@ -279,7 +305,11 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
     // back silently, because a stale plan is indistinguishable from a current
     // one until somebody works to the wrong method.
     SOURCE.error = String(e?.message || e);
-    if (SOURCE.from !== "cache") SOURCE.from = "bundled";
+    // A failed refresh does not change WHICH copy is in memory: an uploaded
+    // workbook stays "upload" (with the error beside it), it does not get
+    // relabelled as the bundled fallback it never was.
+    if (wasFrom === "upload") SOURCE.from = "upload";
+    else if (SOURCE.from !== "cache") SOURCE.from = "bundled";
   }
   return MAP;
 }

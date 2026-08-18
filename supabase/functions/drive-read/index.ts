@@ -517,25 +517,46 @@ async function convertAndExtract(token: string, f: GFile, limit: number): Promis
    Editor rather than Viewer.                                                 */
 const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
 
-async function readSheets(token: string, id: string, ranges: string[]): Promise<Record<string, string[][]>> {
+/* values:batchGet returns display VALUES only — and the workbook's whole point
+   is its hyperlinks: every row's "Open" cell links this project's own file.
+   spreadsheets.get with a fields mask returns both, so the map read from
+   Drive carries the same per-step links the uploaded copy does. `links` is
+   indexed [row][col] exactly like the values. */
+async function readSheets(token: string, id: string, ranges: string[]): Promise<{ tabs: Record<string, string[][]>; links: Record<string, string[][]> }> {
   const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join("&");
+  const fields = encodeURIComponent("sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,hyperlink))))");
   const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchGet?${qs}&majorDimension=ROWS`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${id}?${qs}&fields=${fields}`,
     { headers: { authorization: `Bearer ${token}` } },
   );
   if (!res.ok) throw new Error(`Sheets API answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
-  const out: Record<string, string[][]> = {};
-  for (const vr of data.valueRanges ?? []) {
-    // "'Process Flow'!A1:P400" → "Process Flow"
-    const name = String(vr.range || "").replace(/^'?(.*?)'?!.*$/, "$1");
-    out[name] = (vr.values ?? []) as string[][];
+  const tabs: Record<string, string[][]> = {};
+  const links: Record<string, string[][]> = {};
+  for (const sh of data.sheets ?? []) {
+    const name = String(sh.properties?.title || "");
+    const vals: string[][] = tabs[name] || [];
+    const lnks: string[][] = links[name] || [];
+    for (const grid of sh.data ?? []) {
+      const r0 = grid.startRow || 0;
+      const c0 = grid.startColumn || 0;
+      (grid.rowData ?? []).forEach((row: { values?: { formattedValue?: string; hyperlink?: string }[] }, ri: number) => {
+        const vr = (vals[r0 + ri] ||= []);
+        const lr = (lnks[r0 + ri] ||= []);
+        (row.values ?? []).forEach((c, ci) => {
+          vr[c0 + ci] = c?.formattedValue ?? "";
+          lr[c0 + ci] = c?.hyperlink ?? "";
+        });
+      });
+    }
+    tabs[name] = vals;
+    links[name] = lnks;
   }
-  return out;
+  return { tabs, links };
 }
 
 /* Read the three tabs, converting first when the file is an .xlsx. */
-async function readProcessWorkbook(token: string, f: GFile, ranges: string[]) {
+async function readProcessWorkbook(token: string, f: GFile, ranges: string[]): Promise<{ tabs: Record<string, string[][]>; links: Record<string, string[][]> }> {
   if (f.mimeType === SHEET_MIME) return await readSheets(token, f.id, ranges);
 
   let copyId = "";
@@ -654,10 +675,26 @@ async function writeFile(token: string, folderId: string, name: string, content:
   // Replace an existing file of the same name so re-writes don't duplicate.
   const q = encodeURIComponent(`name = '${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
   const existing = await drive(token, `files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-  const prevId = existing.files?.[0]?.id;
+  let prevId = existing.files?.[0]?.id;
+
+  /* The exact-name query misses the commonest real case: the folder holds a
+     Google Doc named "EB-T-133_Internal-MoM" and the caller says
+     "EB-T-133_Internal-MoM.docx". Creating a sibling there is how a project
+     folder grows two truths of the same document — so before creating
+     anything, match the way the READER matches: same base name, extension
+     and punctuation ignored. Only an unambiguous base-name match is reused;
+     anything looser must not be silently overwritten. */
+  if (!prevId) {
+    const base = (n: string) => norm(String(n).replace(/\.[a-z0-9]{2,5}$/i, ""));
+    const kids = (await listChildren(token, folderId)).filter((f) => f.mimeType !== "application/vnd.google-apps.folder");
+    const same = kids.filter((f) => base(f.name) === base(name));
+    if (same.length === 1) prevId = same[0].id;
+  }
 
   const boundary = "ebodm" + Math.random().toString(36).slice(2);
-  const metadata: Record<string, unknown> = prevId ? { name } : { name, parents: [folderId] };
+  /* An update keeps the file's OWN name — renaming the Doc to the caller's
+     spelling would churn every link that names it. */
+  const metadata: Record<string, unknown> = prevId ? {} : { name, parents: [folderId] };
   const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`
     + `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
   const post = `\r\n--${boundary}--`;
@@ -970,15 +1007,16 @@ Deno.serve(async (req) => {
       const pick = pinnedPick || ranked[0];
 
       let tabs: Record<string, string[][]>;
+      let linkGrids: Record<string, string[][]> = {};
       try {
-        tabs = await readProcessWorkbook(token, pick.f, [
+        ({ tabs, links: linkGrids } = await readProcessWorkbook(token, pick.f, [
           // The Flow Map grew a second section below the block table — the
           // cross-track convergence points — and a range that stopped at row
           // 40 would have cut it off without anything saying so.
           // Wide enough for the 2-PCB project copy: 20 columns, one row per
           // board per step — 543 rows for two boards, more for three.
           "'Process Flow'!A1:V900", "'Template Actions'!A1:G300", "'Flow Map'!A1:F80",
-        ]);
+        ]));
       } catch (e) {
         return json({ error: `Found ${pick.f.name} but could not read it: ${e}` }, 502);
       }
@@ -1008,6 +1046,13 @@ Deno.serve(async (req) => {
             templateFile: 7, templateId: 8, template: 9, location: -1, action: 11, whatToDo: 12,
             owner: 13, responsibility: 14, guidelines: 15, pcb: -1, scope: -1 };
       const firstDataRow = headerRow >= 0 ? headerRow + 1 : 5;
+      /* Every "Open…" column, with the board its header names ("Open — GW-123")
+         or "" for the single "Open — this project" column of the 2-PCB layout,
+         where the row's own PCB cell says whose link it is. */
+      const openCols = H.map((h, ci) => ({ h, ci }))
+        .filter((x) => /^open\b/.test(x.h) && !/template/.test(x.h))
+        .map((x) => ({ ci: x.ci, label: x.h.replace(/^open\s*[—–-]?\s*/, "").replace(/this project/i, "").trim() }));
+      const flowLinks = linkGrids["Process Flow"] ?? [];
 
       const steps: Record<string, unknown>[] = [];
       const stepByNo = new Map<number, Record<string, unknown>>();
@@ -1029,6 +1074,7 @@ Deno.serve(async (req) => {
             owner: at("owner"), responsibility: at("responsibility"), guidelines: at("guidelines"),
             scope: at("scope").toLowerCase() || "",
             location: "", locations: {} as Record<string, string>,
+            openLink: "", openLinks: {} as Record<string, string>,
           };
           stepByNo.set(no, st);
           steps.push(st);
@@ -1039,6 +1085,18 @@ Deno.serve(async (req) => {
         if (loc) {
           if (boardKey) (st.locations as Record<string, string>)[boardKey] = (st.locations as Record<string, string>)[boardKey] || loc;
           st.location = st.location || loc;
+        }
+        /* The row's own hyperlinks — the project copy's whole point. In the
+           2-PCB layout the one "Open — this project" column belongs to the
+           row's board; in the labelled layout each column names its own. */
+        for (const oc of openCols) {
+          const url = String(flowLinks[i]?.[oc.ci] || "");
+          if (!url) continue;
+          const key = CC.pcb >= 0 ? boardKey : oc.label;
+          const linksMap = st.openLinks as Record<string, string>;
+          if (key) linksMap[key] = linksMap[key] || url;
+          else linksMap[""] = linksMap[""] || url;
+          st.openLink = st.openLink || url;
         }
       }
       if (!steps.length) {
@@ -1153,7 +1211,7 @@ Deno.serve(async (req) => {
           .sort((a, b) => String(b.f.modifiedTime || "").localeCompare(String(a.f.modifiedTime || "")));
         if (idxRanked.length) {
           const ip = idxRanked[0];
-          const itabs = await readProcessWorkbook(token, ip.f, ["'Index'!A1:R400"]);
+          const itabs = (await readProcessWorkbook(token, ip.f, ["'Index'!A1:R400"])).tabs;
           let n = 0;
           for (const r of itabs["Index"] ?? []) {
             const id = cell(r, 0);
