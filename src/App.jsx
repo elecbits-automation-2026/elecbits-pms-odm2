@@ -5123,10 +5123,10 @@ GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}` : "No method step is
 YOU CAN OPERATE THE FILE ITSELF — really read it and really write it in Drive. To use a tool, reply with ONLY a JSON object, nothing else:
 {"tool":"read_file"} — fetch the current content of this step's file from Drive.
 {"tool":"write_file","content":"the ENTIRE new file content","note":"one line on what changed"} — save it back to Drive.
-Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When FILE CONTENT arrived as HTML the file is a formatted document: your write_file content is the COMPLETE updated HTML — every table, row, heading and image kept exactly, only the text inside changed — because that HTML becomes the document's layout. When no tool is needed, reply in plain text.
+Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When FILE CONTENT arrived as HTML the file is a formatted document: your write_file content is the COMPLETE updated HTML — every table, row and heading kept exactly, only the text inside changed — because that HTML becomes the document's layout. <img src="eb-img-N"> tags are placeholders for the document's real images: keep each one exactly where it stands, never invent or drop one — the real image goes back in automatically. If the FILE CONTENT was marked TRUNCATED, do NOT write; say so. When no tool is needed, reply in plain text.
 DRIVE THE WORK: you know what the file must end up containing — when information is missing, ask for it ONE question at a time, in the order the file needs it; when you have enough, offer to read the file and fill it in.
 CONVERSATION SO FAR:
-${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(-80000) || "(none yet)"}
+${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(-160000) || "(none yet)"}
 ${attachTexts ? `THEY ATTACHED (extracted content):\n"""${attachTexts.slice(0, 8000)}"""` : ""}
 THEM: ${msg}
 Reply as YOU — plain text, or exactly one tool JSON.`;
@@ -5201,6 +5201,10 @@ function WorkChat({ t, p, step, onEvidence }) {
   const [msgs, setMsgs] = useState(t.workChat || []);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState([]);   // attachments waiting on the next send
+  /* The document's real images, keyed by the placeholder the model sees
+     (eb-img-N → the original <img> tag, base64 and all). Session-only: a
+     later session's write is forced through a fresh read anyway. */
+  const imgMapRef = useRef({});
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
   const scrollRef = useRef(null);
@@ -5290,12 +5294,15 @@ function WorkChat({ t, p, step, onEvidence }) {
         if (act.tool === "read_file" && step) {
           add({ role: "tool", text: `Reading ${fileName} from Drive…` });
           const r = await driveReadFile({ projectId: inPcb ? board : t.projectId, folderPath, fileName, scope: inPcb ? "pcb" : "pm", rootFolderId, fileId });
-          /* A formatted document arrives as slimmed HTML — the model edits
-             the words INSIDE the structure and writes the whole structure
-             back, so the template survives the edit. */
+          /* A formatted document arrives as slimmed HTML with its images
+             swapped for eb-img-N placeholders — the model edits the words
+             INSIDE the structure, keeps the placeholders, and the real image
+             tags go back in before the write. */
+          if (r?.ok && r.htmlImages) imgMapRef.current = { ...imgMapRef.current, ...r.htmlImages };
+          const htmlCut = r?.ok && r.html && (r.htmlTruncated || String(r.html).length > 100000);
           add({ role: "tool", text: r?.ok
             ? (r.html
-              ? `FILE CONTENT of ${r.fileName} (formatted document — HTML. Your write_file content must be the COMPLETE updated HTML: keep every table, row, heading and image exactly as given, change only the text that needs changing):\n${String(r.html).slice(0, 60000)}`
+              ? `FILE CONTENT of ${r.fileName} (formatted document — HTML. Your write_file content must be the COMPLETE updated HTML: keep every table, row and heading exactly as given, keep every <img src="eb-img-N"> placeholder exactly where it stands — never invent or drop one — and change only the text that needs changing)${htmlCut ? " [TRUNCATED — the document is too large to rewrite safely: do NOT call write_file; say which section to change and ask them to edit it in the open file]" : ""}:\n${String(r.html).slice(0, 100000)}`
               : `FILE CONTENT of ${r.fileName} (${(r.text || "").length} chars${r.editable ? "" : " · this format cannot be written back, only read"}):\n${String(r.text || "").slice(0, 30000)}`)
             : `Could not read it: ${r?.error || r}` });
           continue;
@@ -5304,12 +5311,20 @@ function WorkChat({ t, p, step, onEvidence }) {
           /* The one hard guard the model cannot talk its way past: no write
              without a read in this conversation. Overwriting a file nobody
              looked at is the only unrecoverable mistake this chat can make. */
-          const hasRead = convo.some((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text) && !/truncated — read again/.test(m.text));
-          if (!hasRead) { add({ role: "tool", text: "Write refused: the file has not been read in this conversation yet." }); continue; }
+          const reads = convo.filter((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text) && !/truncated — read again/.test(m.text));
+          if (!reads.length) { add({ role: "tool", text: "Write refused: the file has not been read in this conversation yet." }); continue; }
+          /* A truncated read is not a read — writing from it would delete
+             every section the truncation hid. Hard stop, not a suggestion. */
+          if (/\[TRUNCATED —/.test(reads.at(-1).text)) {
+            add({ role: "tool", text: "Write refused: the document's content came back truncated — writing now would delete the sections the truncation hid. Edit that section by hand in the open file, or split the document." });
+            continue;
+          }
           /* The read said which shape the file is: HTML goes back as HTML so
-             Docs rebuilds the same tables and layout, text goes back as text. */
+             Docs rebuilds the same tables and layout, text goes back as text.
+             The real image tags replace their placeholders on the way out. */
           const htmlMode = convo.some((m) => m.role === "tool" && /^FILE CONTENT .*formatted document — HTML/.test(m.text));
-          const content = String(act.content || "").replace(/^```(?:html)?\s*/i, "").replace(/\s*```$/, "");
+          let content = String(act.content || "").replace(/^```(?:html)?\s*/i, "").replace(/\s*```$/, "");
+          if (htmlMode) content = content.replace(/<img\b[^>]*src="(eb-img-\d+)"[^>]*>/gi, (m0, key) => imgMapRef.current[key] || m0);
           add({ role: "tool", text: `Writing ${fileName} back to Drive…` });
           const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, content, { folderPath, rootFolderId, fileId, scope: inPcb ? "pcb" : "pm", wantFile: true, mimeType: htmlMode ? "text/html" : "text/plain" });
           add({ role: "tool", text: (w === true || w?.ok)

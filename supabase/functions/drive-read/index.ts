@@ -488,8 +488,29 @@ function slimHtml(html: string): string {
     .replace(/>\s*\n\s*</g, ">\n<")
     .trim();
 }
-async function docHtml(token: string, id: string): Promise<string> {
-  return slimHtml(await exportAs(token, id, "text/html", 400_000)).slice(0, 90_000);
+/* The images come OUT before the model sees anything: a letterhead PNG is
+   ~40KB of base64 that eats the whole budget and can never be re-typed
+   byte-for-byte. Each <img> becomes a small placeholder; the original tag —
+   bytes, size and all — is returned beside the HTML for the caller to put
+   back on write. */
+function extractImages(html: string): { html: string; images: Record<string, string> } {
+  const images: Record<string, string> = {};
+  let n = 0;
+  const out = String(html || "").replace(/<img\b[^>]*>/gi, (tag) => {
+    const key = `eb-img-${++n}`;
+    images[key] = tag;
+    return `<img src="${key}">`;
+  });
+  return { html: out, images };
+}
+async function docHtml(token: string, id: string): Promise<{ html: string; images: Record<string, string>; truncated: boolean }> {
+  const raw = String(await exportAs(token, id, "text/html", 4_000_000))
+    .replace(/^[\s\S]*?<body[^>]*>/i, "").replace(/<\/body>[\s\S]*$/i, "");
+  const { html, images } = extractImages(raw);
+  const slim = slimHtml(html);
+  // With the images out this cap is pure text and tables — a document that
+  // still exceeds it is one an automated rewrite must refuse, not maim.
+  return { html: slim.slice(0, 120_000), images, truncated: slim.length > 120_000 };
 }
 
 /* Office files (.xlsx/.docx/.pptx) and PDFs can't be exported directly, but
@@ -1566,10 +1587,11 @@ Deno.serve(async (req) => {
         const text = await extractText(token, hit, 100_000);
         const editable = /^text\/|json|csv/.test(hit.mimeType || "")
           || hit.mimeType === "application/vnd.google-apps.document";
-        const html = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : "";
+        const doc = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : null;
         return json({
           ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: "via the step's own link",
-          text, editable, ...(html ? { html, editFormat: "html" } : {}),
+          text, editable,
+          ...(doc?.html ? { html: doc.html, htmlImages: doc.images, htmlTruncated: doc.truncated, editFormat: "html" } : {}),
           note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
         });
       }
@@ -1590,10 +1612,11 @@ Deno.serve(async (req) => {
       // from whether they can be read, and the caller needs to know which.
       const editable = /^text\/|json|csv/.test(hit.mimeType || "")
         || hit.mimeType === "application/vnd.google-apps.document";
-      const html = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : "";
+      const doc = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : null;
       return json({
         ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: f.where,
-        text, editable, ...(html ? { html, editFormat: "html" } : {}),
+        text, editable,
+        ...(doc?.html ? { html: doc.html, htmlImages: doc.images, htmlTruncated: doc.truncated, editFormat: "html" } : {}),
         note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
       });
     }
