@@ -5337,7 +5337,11 @@ function WorkChat({ t, p, step, onEvidence }) {
   }, [msgs]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: 420, maxHeight: 560 }}>
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 420, maxHeight: 560 }}
+         /* dropping a file anywhere on the chat attaches it — the placeholder
+            has promised this all along */
+         onDragOver={(e) => e.preventDefault()}
+         onDrop={(e) => { e.preventDefault(); [...(e.dataTransfer?.files || [])].forEach(attach); }}>
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, paddingRight: 4 }}>
         {msgs.length === 0 && !busy && (
           <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.7, padding: "14px 6px" }}>
@@ -5393,8 +5397,12 @@ function WorkChat({ t, p, step, onEvidence }) {
                 style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 8, cursor: "pointer", color: "var(--txt2)", padding: 8, display: "flex" }}><Paperclip size={15} /></button>
         <textarea className="inp" rows={draft.split("\n").length > 2 ? 3 : 1}
           style={{ flex: 1, resize: "none", lineHeight: 1.5, minHeight: 38 }}
-          placeholder="Answer here, or drop a file…"
+          placeholder="Answer here — paste a screenshot, or drop a file…"
           value={draft} onChange={(e) => setDraft(e.target.value)}
+          /* Cmd/Ctrl+V with a screenshot on the clipboard attaches it — the
+             same road every other chat here already has. Pasted text stays
+             text. */
+          onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); fs.forEach(attach); } }}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <Btn small kind="primary" icon={busy ? Loader2 : Send} disabled={busy || (!draft.trim() && !pending.length)} onClick={send}>Send</Btn>
       </div>
