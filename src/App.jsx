@@ -5122,10 +5122,10 @@ GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}` : "No method step is
 YOU CAN OPERATE THE FILE ITSELF — really read it and really write it in Drive. To use a tool, reply with ONLY a JSON object, nothing else:
 {"tool":"read_file"} — fetch the current content of this step's file from Drive.
 {"tool":"write_file","content":"the ENTIRE new file content","note":"one line on what changed"} — save it back to Drive.
-Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When no tool is needed, reply in plain text.
+Rules that are not negotiable: write ONLY when they asked for the edit in this conversation; ALWAYS read the file first in this conversation before any write, so you never overwrite work you have not seen; write_file carries the complete content, never a fragment. When FILE CONTENT arrived as HTML the file is a formatted document: your write_file content is the COMPLETE updated HTML — every table, row, heading and image kept exactly, only the text inside changed — because that HTML becomes the document's layout. When no tool is needed, reply in plain text.
 DRIVE THE WORK: you know what the file must end up containing — when information is missing, ask for it ONE question at a time, in the order the file needs it; when you have enough, offer to read the file and fill it in.
 CONVERSATION SO FAR:
-${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(0, 12000) || "(none yet)"}
+${history.slice(-16).map((m) => `${m.role === "user" ? "THEM" : m.role === "tool" ? "TOOL RESULT" : "YOU"}: ${m.text}`).join("\n").slice(-80000) || "(none yet)"}
 ${attachTexts ? `THEY ATTACHED (extracted content):\n"""${attachTexts.slice(0, 8000)}"""` : ""}
 THEM: ${msg}
 Reply as YOU — plain text, or exactly one tool JSON.`;
@@ -5142,6 +5142,27 @@ THE FILE: ${fileCtx?.name || step.template} (${step.template})
 GATE TO CLOSE: ${step.exitQuestion}
 GUIDELINES: ${String(step.guidelines || "").slice(0, 900)}
 Write it like: a one-line hello naming the file, then the concrete things it must end up containing (from the guidelines — the actual sections or fields, not "the required details"), then ask the FIRST question you need answered to start filling it. ONE question — you will ask the rest one at a time as they answer. Under 110 words, plain text, no headers, no bullets-for-the-sake-of-bullets.`;
+
+/* Tool activity renders as a LOG LINE, not a box: one line, an icon that says
+   how it went, no borders — a read-edit-save cycle must read as a quiet
+   trace between the bubbles, not a wall of dashed rectangles. */
+function ToolLine({ text }) {
+  const t = String(text || "");
+  const [Ic, color] = /^Saved /.test(t) ? [CheckCircle2, "var(--green)"]
+    : /refused|could not|would not|couldn't|can't|error/i.test(t) ? [AlertTriangle, "var(--amber)"]
+    : /^FILE CONTENT/.test(t) ? [FileText, "var(--txt3)"]
+    : [ArrowRight, "var(--txt3)"];
+  return (
+    <div style={{ alignSelf: "center", maxWidth: "92%", display: "flex", alignItems: "center", gap: 6,
+                  fontSize: 10.5, fontFamily: MONO, color, minWidth: 0, padding: "1px 0" }}>
+      <Ic size={11} style={{ flexShrink: 0 }} />
+      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.split("\n")[0]}</span>
+    </div>
+  );
+}
+/* "Reading…"/"Writing…" are progress, not history — once the result landed
+   right behind them, showing both is saying everything twice. */
+const isStaleProgress = (m, next) => /^(Reading|Writing) .*…$/.test(String(m?.text || "")) && next?.role === "tool";
 
 /* A tool call is a reply that IS a JSON object naming a tool. Anything else —
    prose, prose around JSON, JSON without a tool — is conversation. */
@@ -5183,8 +5204,15 @@ function WorkChat({ t, p, step, onEvidence }) {
   useEffect(() => { scrollRef.current?.scrollTo({ top: 1e6 }); }, [msgs, busy]);
   /* Day-wise history: 240 messages is weeks of real conversation, and every
      message carries its date so the thread renders day by day and the admin
-     log can slice it by day. */
-  const persist = (list) => setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, workChat: list.slice(-240) } : x)));
+     log can slice it by day. A full document's HTML rides in the live
+     conversation but is trimmed before storage — the file itself is the
+     durable copy, and the marker tells the next session to read it again. */
+  const persist = (list) => setTasks((ts) => ts.map((x) => (x.id === t.id ? {
+    ...x,
+    workChat: list.slice(-240).map((m) => (m.role === "tool" && String(m.text || "").length > 4000
+      ? { ...m, text: `${String(m.text).slice(0, 1500)}\n… (truncated — read again for the full content)` }
+      : m)),
+  } : x)));
 
   /* The copilot opens the conversation — once per task, persisted, so
      reopening the window never greets twice. */
@@ -5249,16 +5277,23 @@ function WorkChat({ t, p, step, onEvidence }) {
       let convo = base;
       const add = (m) => { convo = [...convo, { ...m, at: new Date().toISOString() }]; setMsgs(convo); persist(convo); };
       for (let round = 0; round < 5; round++) {
+        /* 16k output tokens: a full-document HTML rewrite has to come back
+           whole — a truncated reply here would write a truncated file. */
         const reply = await claude(workChatPrompt(p, t, step, convo.slice(0, -1), convo.at(-1).role === "user" ? convo.at(-1).text : mine.text, round === 0 ? attachTexts : "", fileCtx),
-                                   { json: false, maxTokens: 4000, images: round === 0 ? images : [], model: POWER_MODEL });
+                                   { json: false, maxTokens: 16000, images: round === 0 ? images : [], model: POWER_MODEL });
         const act = parseTool(reply);
         if (!act) { add({ role: "assistant", text: String(reply || "").trim() || "…" }); break; }
 
         if (act.tool === "read_file" && step) {
           add({ role: "tool", text: `Reading ${fileName} from Drive…` });
           const r = await driveReadFile({ projectId: inPcb ? board : t.projectId, folderPath, fileName, scope: inPcb ? "pcb" : "pm", rootFolderId, fileId });
+          /* A formatted document arrives as slimmed HTML — the model edits
+             the words INSIDE the structure and writes the whole structure
+             back, so the template survives the edit. */
           add({ role: "tool", text: r?.ok
-            ? `FILE CONTENT of ${r.fileName} (${(r.text || "").length} chars${r.editable ? "" : " · this format cannot be written back, only read"}):\n${String(r.text || "").slice(0, 20000)}`
+            ? (r.html
+              ? `FILE CONTENT of ${r.fileName} (formatted document — HTML. Your write_file content must be the COMPLETE updated HTML: keep every table, row, heading and image exactly as given, change only the text that needs changing):\n${String(r.html).slice(0, 60000)}`
+              : `FILE CONTENT of ${r.fileName} (${(r.text || "").length} chars${r.editable ? "" : " · this format cannot be written back, only read"}):\n${String(r.text || "").slice(0, 30000)}`)
             : `Could not read it: ${r?.error || r}` });
           continue;
         }
@@ -5266,10 +5301,14 @@ function WorkChat({ t, p, step, onEvidence }) {
           /* The one hard guard the model cannot talk its way past: no write
              without a read in this conversation. Overwriting a file nobody
              looked at is the only unrecoverable mistake this chat can make. */
-          const hasRead = convo.some((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text));
+          const hasRead = convo.some((m) => m.role === "tool" && /^FILE CONTENT/.test(m.text) && !/truncated — read again/.test(m.text));
           if (!hasRead) { add({ role: "tool", text: "Write refused: the file has not been read in this conversation yet." }); continue; }
+          /* The read said which shape the file is: HTML goes back as HTML so
+             Docs rebuilds the same tables and layout, text goes back as text. */
+          const htmlMode = convo.some((m) => m.role === "tool" && /^FILE CONTENT .*formatted document — HTML/.test(m.text));
+          const content = String(act.content || "").replace(/^```(?:html)?\s*/i, "").replace(/\s*```$/, "");
           add({ role: "tool", text: `Writing ${fileName} back to Drive…` });
-          const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, String(act.content || ""), { folderPath, rootFolderId, fileId, scope: inPcb ? "pcb" : "pm", wantFile: true });
+          const w = await driveWriteFile(inPcb ? board : t.projectId, fileName, content, { folderPath, rootFolderId, fileId, scope: inPcb ? "pcb" : "pm", wantFile: true, mimeType: htmlMode ? "text/html" : "text/plain" });
           add({ role: "tool", text: (w === true || w?.ok)
             ? `Saved ${fileName} ✓${act.note ? ` — ${act.note}` : ""}`
             : `Drive would not take it: ${typeof w === "string" ? w : "unknown error"}` });
@@ -5320,11 +5359,7 @@ function WorkChat({ t, p, step, onEvidence }) {
           ) : null;
         })()}
         {m.role === "tool" ? (
-          <div key={i} style={{ alignSelf: "center", maxWidth: "94%", fontSize: 10.5, fontFamily: MONO, color: "var(--txt3)",
-            border: "1px dashed var(--bdr)", borderRadius: 8, padding: "4px 10px", whiteSpace: "pre-wrap",
-            overflow: "hidden", maxHeight: 72, textOverflow: "ellipsis" }}>
-            {/^FILE CONTENT/.test(m.text) ? m.text.split("\n")[0] : m.text}
-          </div>
+          isStaleProgress(m, msgs[i + 1]) ? null : <ToolLine text={m.text} />
         ) : (
           <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%",
             background: m.role === "user" ? "var(--acc)" : "var(--s2)",
@@ -8753,10 +8788,7 @@ function ChatLogsModule() {
                                       padding: "2px 10px", borderRadius: 999, background: "var(--s1)", border: "1px solid var(--bdr)" }}>{fmtDate(d)}</div>
                       )}
                       {m.role === "tool" ? (
-                        <div style={{ alignSelf: "center", maxWidth: "94%", fontSize: 10, fontFamily: MONO, color: "var(--txt3)",
-                                      border: "1px dashed var(--bdr)", borderRadius: 7, padding: "3px 9px", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                          {String(m.text || "").split("\n")[0]}
-                        </div>
+                        isStaleProgress(m, shown[i + 1]) ? null : <ToolLine text={m.text} />
                       ) : (
                         <div style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "86%",
                                       background: m.role === "user" ? "var(--acc)" : "var(--s1)",

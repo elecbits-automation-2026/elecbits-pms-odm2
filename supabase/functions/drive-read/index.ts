@@ -470,6 +470,28 @@ async function exportAs(token: string, id: string, mimeType: string, limit: numb
   return res.ok ? (await res.text()).slice(0, limit) : "";
 }
 
+/* A Google Doc written back as plain text loses its template — the tables
+   flatten into stacked lines. So a Doc is ALSO read as HTML, slimmed of the
+   export's styling bloat down to its structure (tables, rows, headings,
+   images, bold), for the editor to change the words INSIDE and write the
+   whole thing back as text/html — which Docs converts into the same layout. */
+function slimHtml(html: string): string {
+  return String(html || "")
+    .replace(/^[\s\S]*?<body[^>]*>/i, "").replace(/<\/body>[\s\S]*$/i, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    // bold/italic live in style attributes on spans — keep them as real tags
+    .replace(/<span([^>]*font-weight:\s*(?:700|bold)[^>]*)>([^<]*)<\/span>/gi, "<b>$2</b>")
+    .replace(/<span([^>]*font-style:\s*italic[^>]*)>([^<]*)<\/span>/gi, "<i>$2</i>")
+    .replace(/\s(?:style|class|id)="[^"]*"/gi, "")
+    .replace(/<span[^>]*>/gi, "").replace(/<\/span>/gi, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/>\s*\n\s*</g, ">\n<")
+    .trim();
+}
+async function docHtml(token: string, id: string): Promise<string> {
+  return slimHtml(await exportAs(token, id, "text/html", 400_000)).slice(0, 90_000);
+}
+
 /* Office files (.xlsx/.docx/.pptx) and PDFs can't be exported directly, but
    Drive will convert them: copy the file into the matching Google format, read
    the text out, then delete the temporary copy. PDF→Doc conversion also OCRs.
@@ -1544,9 +1566,10 @@ Deno.serve(async (req) => {
         const text = await extractText(token, hit, 100_000);
         const editable = /^text\/|json|csv/.test(hit.mimeType || "")
           || hit.mimeType === "application/vnd.google-apps.document";
+        const html = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : "";
         return json({
           ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: "via the step's own link",
-          text, editable,
+          text, editable, ...(html ? { html, editFormat: "html" } : {}),
           note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
         });
       }
@@ -1567,9 +1590,10 @@ Deno.serve(async (req) => {
       // from whether they can be read, and the caller needs to know which.
       const editable = /^text\/|json|csv/.test(hit.mimeType || "")
         || hit.mimeType === "application/vnd.google-apps.document";
+      const html = hit.mimeType === "application/vnd.google-apps.document" ? await docHtml(token, hit.id) : "";
       return json({
         ok: true, fileName: hit.name, mimeType: hit.mimeType, folder: f.where,
-        text, editable,
+        text, editable, ...(html ? { html, editFormat: "html" } : {}),
         note: editable ? "" : `${hit.name} is a ${hit.mimeType?.split(".").pop() || "binary"} file — its text can be read but not written back in the same format.`,
       });
     }
