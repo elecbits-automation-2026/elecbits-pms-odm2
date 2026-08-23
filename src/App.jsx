@@ -22,7 +22,7 @@
    are simulated here as a visible Sync Log — swap sheetSync() for the edge
    functions in the elecbits-pms codebase.
    ═══════════════════════════════════════════════════════════════════════════ */
-import { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext, Fragment } from "react";
 import {
   Plus, X, Play, CheckCircle2, AlertTriangle, GitBranch, Clock, Upload,
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
@@ -2304,12 +2304,16 @@ const ChoiceCard = ({ title, sub, icon: Ic, onClick, on }) => (
 );
 
 /* ═══ MODULE 1 BODY — PROJECTS LIST ══════════════════════════════════════ */
+/* Another module (Key Accounts) can ask the Projects page to open straight
+   onto one project — set this, switch the view, and the mount picks it up. */
+let PENDING_PROJECT_OPEN = null;
+
 function ProjectsModule() {
   const { projects, setProjects, users, me, sheetSync, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
   const [addExisting, setAddExisting] = useState(false);
-  const [openId, setOpenId] = useState(null);
+  const [openId, setOpenId] = useState(() => { const v = PENDING_PROJECT_OPEN; PENDING_PROJECT_OPEN = null; return v; });
   const setStatus = (id, status) => { setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p))); sheetSync("Project Data and IDs (Google Sheet)", `Status → ${status}`); };
   const openProject = projects.find((p) => p.id === openId);
   if (openProject) return <ProjectDetail project={openProject} onBack={() => setOpenId(null)} setStatus={setStatus} isAdmin={isAdmin} />;
@@ -8809,7 +8813,7 @@ async function parseAccountTracker(file) {
     const C = { division: col(/^division name/), divisionPoc: col(/^division poc/), ebPoc: col(/^eb poc/),
       product: col(/^product name/), task: col(/^task$/), service: col(/^type of service/),
       status: col(/^status/), link: col(/tracker link|lld|qc link/), next: col(/^next steps/),
-      who: col(/^who will/), roadblocks: col(/^roadblock/), revenue: col(/^revenue/), closure: col(/expected date/) };
+      who: col(/^who will/), roadblocks: col(/^roadblock/), revenue: col(/^revenue/), closure: col(/expected date|date of conversion/) };
     const at = (r, k) => (C[k] >= 0 ? (k === "next" || k === "roadblocks" ? cleanML(r[C[k]]) : clean(r[C[k]])) : "");
     const isOthers = C.task >= 0 && C.product < 0;
     const list = [];
@@ -8821,7 +8825,7 @@ async function parseAccountTracker(file) {
             status: at(r, "status"), next: at(r, "next"), roadblocks: at(r, "roadblocks"), closure: at(r, "closure") }
         : { division: at(r, "division"), divisionPoc: at(r, "divisionPoc"), ebPoc: at(r, "ebPoc"), product: title,
             service: at(r, "service"), status: at(r, "status"), link: at(r, "link"), next: at(r, "next"),
-            who: at(r, "who"), roadblocks: at(r, "roadblocks"), revenue: at(r, "revenue") });
+            who: at(r, "who"), roadblocks: at(r, "roadblocks"), revenue: at(r, "revenue"), closure: at(r, "closure") });
     }
     if (isOthers) out.others = list; else out.stages.push({ name, rows: list });
   }
@@ -8844,7 +8848,7 @@ const fmtRevenue = (v) => {
 };
 
 function KeyAccountsModule() {
-  const { accounts, setAccounts, projects, toast } = useCtx();
+  const { accounts, setAccounts, projects, toast, setView } = useCtx();
   const [openId, setOpenId] = useState("");
   const upRef = useRef(null);
   const open = accounts.find((a) => a.id === openId) || null;
@@ -8913,46 +8917,77 @@ function KeyAccountsModule() {
       {!open.tracker ? (
         <div className="card"><Empty icon={Building2} title={`No ${open.short} tracker yet`}
           sub={`Upload ${open.short}'s tracker workbook — one tab per pipeline stage with an "S. No" header — and every engagement shows here.`} /></div>
-      ) : (
-        (open.tracker.stages || []).map((st) => (
-          <div key={st.name} style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <span style={{ fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt2)" }}>{st.name}</span>
-              <Pill color="var(--txt3)">{st.rows.length}</Pill>
-            </div>
-            {st.rows.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--txt3)", padding: "2px 2px 6px" }}>Nothing at this stage yet.</div>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 10 }}>
-                {st.rows.map((r, i) => (
-                  <div key={i} className="card" style={{ padding: 13, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                      <div style={{ fontWeight: 700, fontSize: 13.5, flex: 1, minWidth: 0 }}>{r.product}</div>
-                      {r.status && (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 700, color: accStatusColor(r.status), flexShrink: 0 }}>
-                          <span style={{ width: 7, height: 7, borderRadius: "50%", background: accStatusColor(r.status) }} />{r.status}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 3 }}>
-                      {r.division}{r.divisionPoc ? ` · ${r.divisionPoc}` : ""}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
-                      {r.ebPoc && <Pill color="var(--acc)">{r.ebPoc}</Pill>}
-                      {r.service && <Pill color="var(--txt2)">{r.service}</Pill>}
-                      {r.revenue && <Pill color="var(--green)">{fmtRevenue(r.revenue)}</Pill>}
-                    </div>
-                    {r.next && <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 8, whiteSpace: "pre-wrap", lineHeight: 1.5, maxHeight: 76, overflow: "hidden" }}>
-                      <b style={{ color: "var(--txt3)", fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>Next</b> · {r.next}</div>}
-                    {r.roadblocks && <div style={{ fontSize: 11.5, color: "var(--red)", marginTop: 6, lineHeight: 1.5 }}>
-                      <b style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>Roadblock</b> · {r.roadblocks}</div>}
-                  </div>
+      ) : (() => {
+        /* ONE table, every engagement, the columns that run an account review:
+           what it is, whether it lives in this tool, who owns it on each side,
+           where it sits and what it is worth. A row whose product matches a
+           project here opens THAT project's tracking on click. */
+        const normA = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const projFor = (r) => projects.find((p) => {
+          const np = normA(p.name), pid = normA(p.projectId), pr = normA(r.product);
+          return (np && pr && np.length > 2 && pr.length > 2 && (np.includes(pr) || pr.includes(np)))
+            || (pid && r.link && normA(r.link).includes(pid));
+        });
+        const dateOf = (r) => r.closure || (String(r.next || "").match(/\b\d{2}-\d{2}-\d{4}\b/) || [])[0] || "";
+        const TH = { textAlign: "left", padding: "9px 12px", fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", whiteSpace: "nowrap", borderBottom: "1px solid var(--bdr)" };
+        const TD = { padding: "10px 12px", fontSize: 12, verticalAlign: "top", borderBottom: "1px solid var(--bdr2)", lineHeight: 1.45 };
+        return (
+          <div className="card" style={{ padding: 0, overflowX: "auto", marginBottom: 16 }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 980 }}>
+              <thead><tr>
+                <th style={TH}>Project name</th>
+                <th style={TH}>Project ID</th>
+                <th style={TH}>SPOC — {open.short}</th>
+                <th style={TH}>SPOC — Elecbits</th>
+                <th style={TH}>Division</th>
+                <th style={TH}>Type of services</th>
+                <th style={TH}>Revenue impact</th>
+                <th style={TH}>Expected conversion</th>
+                <th style={TH}>Status</th>
+              </tr></thead>
+              <tbody>
+                {(open.tracker.stages || []).map((st) => (
+                  <Fragment key={st.name}>
+                    <tr><td colSpan={9} style={{ padding: "8px 12px", fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--acc)", background: "var(--s2)", borderBottom: "1px solid var(--bdr)" }}>
+                      {st.name} · {st.rows.length}
+                    </td></tr>
+                    {st.rows.map((r, i) => {
+                      const p = projFor(r);
+                      return (
+                        <tr key={i} className={p ? "rowHover" : undefined}
+                            title={[r.next ? `Next: ${r.next}` : "", r.roadblocks ? `Roadblock: ${r.roadblocks}` : "", p ? "Click to open this project's tracking" : ""].filter(Boolean).join("\n\n")}
+                            onClick={() => { if (p) { PENDING_PROJECT_OPEN = p.id; setView("projects"); } }}
+                            style={{ cursor: p ? "pointer" : "default" }}>
+                          <td style={{ ...TD, fontWeight: 700, color: "var(--txt)" }}>
+                            {r.product}
+                            {r.roadblocks && <span title={r.roadblocks} style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--red)", marginLeft: 7 }} />}
+                          </td>
+                          <td style={{ ...TD, fontFamily: MONO, fontSize: 11 }}>
+                            {p ? <span style={{ color: "var(--acc)", fontWeight: 700 }}>{p.projectId} ↗</span> : <span style={{ color: "var(--txt3)" }}>—</span>}
+                          </td>
+                          <td style={{ ...TD, color: "var(--txt2)" }}>{r.divisionPoc || "—"}</td>
+                          <td style={{ ...TD, color: "var(--txt2)" }}>{r.ebPoc || "—"}</td>
+                          <td style={{ ...TD, color: "var(--txt2)" }}>{r.division || "—"}</td>
+                          <td style={{ ...TD, color: "var(--txt2)" }}>{r.service || "—"}</td>
+                          <td style={{ ...TD, fontWeight: 700, color: r.revenue ? "var(--green)" : "var(--txt3)" }}>{fmtRevenue(r.revenue) || "—"}</td>
+                          <td style={{ ...TD, fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{dateOf(r) || "—"}</td>
+                          <td style={TD}>
+                            {r.status ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700, color: accStatusColor(r.status) }}>
+                                <span style={{ width: 7, height: 7, borderRadius: "50%", background: accStatusColor(r.status), flexShrink: 0 }} />{r.status}
+                              </span>
+                            ) : <span style={{ color: "var(--txt3)" }}>—</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
                 ))}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
-        ))
-      )}
+        );
+      })()}
 
       {(open.tracker?.others || []).length > 0 && (
         <div style={{ marginBottom: 16 }}>
