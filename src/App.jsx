@@ -28,9 +28,10 @@ import {
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
-  Video, Mic, MessagesSquare
+  Video, Mic, MessagesSquare, Building2
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
+import schneiderTracker from "./data/schneider-tracker.json";
 /* The official logo is a JPG on white — in dark mode it sits on a white chip. */
 const logoChip = (dark, h) => ({ height: h, width: "auto", display: "block", background: dark ? "#fff" : "transparent", padding: dark ? "5px 9px" : 0, borderRadius: 8, boxSizing: "content-box" });
 import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereItGoes,
@@ -248,6 +249,18 @@ const SEED_USERS = _TEAM.map(([id, name, email, role, rr, titleOverride], i) => 
 const SHREYA_ID = "3d6cfb19-1c1c-4d81-b25c-a0631458d955";
 const seedDeadline = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 const SEED_CLIENTS = [{ id: "c-seed", clientId: "PL20-001", name: "Acme Devices" }];
+/* ── KEY ACCOUNTS ────────────────────────────────────────────────────────────
+   The strategic clients whose relationship spans MANY engagements at once.
+   Each account carries its tracker — the pipeline from first reach-out to
+   manufacturing — parsed from the account's own tracker workbook. Schneider
+   ships with its tracker bundled; any account's can be re-uploaded in place.
+   Stable ids, so two browsers seeding at once converge instead of doubling. */
+const SEED_ACCOUNTS = [
+  { id: "acc-schneider", name: "Schneider Electric", short: "Schneider",
+    aliases: ["schneider", "ebschneider", "eb-schneider"], tracker: schneiderTracker },
+  { id: "acc-jio", name: "Reliance Jio", short: "Jio",
+    aliases: ["jio", "reliance"], tracker: null },
+];
 const SEED_PROJECTS = [{
   id: "p-seed1", projectId: "ESP32-123", idMode: "manual", name: "ESP32 Sensor Node",
   clientName: "Acme Devices", clientId: "PL20-001", industry: "Consumer Electronics", orgSize: "Proto Level",
@@ -8774,6 +8787,213 @@ function MomModule() {
 /* The menu is grouped by what you came here to do — the work of a project,
    the people, your own week, and the AI — rather than by one flat list where
    everything looked equally important. */
+/* ═══ KEY ACCOUNTS ════════════════════════════════════════════════════════
+   A strategic account is not one project — it is a PIPELINE: reach-outs
+   becoming RFQs, RFQs becoming POs, designs going to manufacturing, all at
+   once across divisions. One page per account shows that pipeline exactly as
+   the account's tracker workbook records it, beside the projects actually
+   running in this tool. The tracker re-uploads in place; the parse is
+   header-driven so a column moving does not move the meaning. */
+async function parseAccountTracker(file) {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const clean = (x) => String(x ?? "").replace(/\s+/g, " ").trim();
+  const cleanML = (x) => String(x ?? "").replace(/[ \t]+/g, " ").trim();
+  const out = { fileName: file.name, uploadedAt: todayStr(), stages: [], others: [] };
+  for (const name of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, blankrows: false });
+    const hi = rows.findIndex((r) => /^s\.?\s?no/i.test(clean(r?.[0])));
+    if (hi < 0) continue;
+    const H = (rows[hi] || []).map((h) => clean(h).toLowerCase());
+    const col = (...res) => H.findIndex((h) => res.some((re) => re.test(h)));
+    const C = { division: col(/^division name/), divisionPoc: col(/^division poc/), ebPoc: col(/^eb poc/),
+      product: col(/^product name/), task: col(/^task$/), service: col(/^type of service/),
+      status: col(/^status/), link: col(/tracker link|lld|qc link/), next: col(/^next steps/),
+      who: col(/^who will/), roadblocks: col(/^roadblock/), revenue: col(/^revenue/), closure: col(/expected date/) };
+    const at = (r, k) => (C[k] >= 0 ? (k === "next" || k === "roadblocks" ? cleanML(r[C[k]]) : clean(r[C[k]])) : "");
+    const isOthers = C.task >= 0 && C.product < 0;
+    const list = [];
+    for (const r of rows.slice(hi + 1)) {
+      const title = isOthers ? at(r, "task") : at(r, "product");
+      if (!title) continue;
+      list.push(isOthers
+        ? { division: at(r, "division"), poc: at(r, "divisionPoc"), task: title, ebPoc: at(r, "ebPoc"),
+            status: at(r, "status"), next: at(r, "next"), roadblocks: at(r, "roadblocks"), closure: at(r, "closure") }
+        : { division: at(r, "division"), divisionPoc: at(r, "divisionPoc"), ebPoc: at(r, "ebPoc"), product: title,
+            service: at(r, "service"), status: at(r, "status"), link: at(r, "link"), next: at(r, "next"),
+            who: at(r, "who"), roadblocks: at(r, "roadblocks"), revenue: at(r, "revenue") });
+    }
+    if (isOthers) out.others = list; else out.stages.push({ name, rows: list });
+  }
+  if (!out.stages.length && !out.others.length) throw new Error("No tab in that workbook has an 'S. No' header row — is it the account tracker?");
+  return out;
+}
+
+/* Status → light, read the way the tracker writes it. */
+const accStatusColor = (s) => /hold|await|blocked/i.test(s) ? "var(--amber)"
+  : /going for mp|manufactur|done|closed|po received|won/i.test(s) ? "var(--green)"
+  : /ongoing|rfq|start/i.test(s) ? "var(--blue)"
+  : "var(--txt3)";
+const fmtRevenue = (v) => {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  if (/[a-z₹]/i.test(s)) return s.startsWith("₹") ? s : `₹${s}`;
+  const n = Number(s.replace(/[,\s]/g, ""));
+  if (!Number.isFinite(n) || !n) return s;
+  return n >= 1e7 ? `₹${(n / 1e7).toFixed(n % 1e7 ? 1 : 0)} cr` : n >= 1e5 ? `₹${(n / 1e5).toFixed(1)} L` : `₹${n.toLocaleString("en-IN")}`;
+};
+
+function KeyAccountsModule() {
+  const { accounts, setAccounts, projects, toast } = useCtx();
+  const [openId, setOpenId] = useState("");
+  const upRef = useRef(null);
+  const open = accounts.find((a) => a.id === openId) || null;
+  const engagementsOf = (a) => (a.tracker?.stages || []).reduce((n, s) => n + s.rows.length, 0);
+  const projectsOf = (a) => projects.filter((p) =>
+    (a.aliases || []).some((al) => `${p.clientName || ""} ${p.name || ""} ${p.projectId || ""}`.toLowerCase().includes(al)));
+  const revenueOf = (a) => (a.tracker?.stages || []).flatMap((s) => s.rows)
+    .map((r) => { const s = String(r.revenue || ""); const cr = s.match(/([\d.]+)\s*cr/i); if (cr) return +cr[1] * 1e7;
+                  const n = Number(s.replace(/[,\s]/g, "")); return Number.isFinite(n) ? n : 0; })
+    .reduce((x, y) => x + y, 0);
+  const upload = async (file) => {
+    try {
+      const tr = await parseAccountTracker(file);
+      setAccounts((as) => as.map((a) => (a.id === open.id ? { ...a, tracker: tr } : a)));
+      toast(`${file.name}: ${tr.stages.reduce((n, s) => n + s.rows.length, 0)} engagements adopted for ${open.short}`, "green");
+    } catch (e) { toast(`Couldn't read ${file.name}: ${e?.message || e}`, "amber"); }
+  };
+
+  if (!open) return (
+    <Section>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
+        {accounts.map((a) => {
+          const n = engagementsOf(a); const linked = projectsOf(a); const rev = revenueOf(a);
+          return (
+            <div key={a.id} className="card" style={{ cursor: "pointer", padding: 16 }} onClick={() => setOpenId(a.id)}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 38, height: 38, borderRadius: 10, background: "color-mix(in srgb, var(--acc) 13%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Building2 size={18} style={{ color: "var(--acc)" }} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 800, fontSize: 14.5 }}>{a.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--txt3)", marginTop: 1 }}>
+                    {a.tracker ? `${a.tracker.fileName} · ${fmtDate(a.tracker.uploadedAt)}` : "no tracker uploaded yet"}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 11 }}>
+                <Pill color="var(--acc)">{n} engagement{n === 1 ? "" : "s"}</Pill>
+                {rev > 0 && <Pill color="var(--green)">{fmtRevenue(String(rev))} expected</Pill>}
+                <Pill color="var(--txt2)">{linked.length} project{linked.length === 1 ? "" : "s"} in the tool</Pill>
+                {(a.tracker?.others || []).length > 0 && <Pill color="var(--purple)">{a.tracker.others.length} open items</Pill>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+
+  const linked = projectsOf(open);
+  return (
+    <Section>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <button onClick={() => setOpenId("")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--txt2)", display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, padding: 0 }}>
+          ← All accounts
+        </button>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>{open.name}</div>
+        {open.tracker && <span style={{ fontSize: 11, color: "var(--txt3)" }}>{open.tracker.fileName} · {fmtDate(open.tracker.uploadedAt)}</span>}
+        <input ref={upRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+               onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
+        <Btn small kind="ghost" icon={Upload} style={{ marginLeft: "auto" }} onClick={() => upRef.current?.click()}>
+          {open.tracker ? "Re-upload the tracker" : "Upload the tracker"}
+        </Btn>
+      </div>
+
+      {!open.tracker ? (
+        <div className="card"><Empty icon={Building2} title={`No ${open.short} tracker yet`}
+          sub={`Upload ${open.short}'s tracker workbook — one tab per pipeline stage with an "S. No" header — and every engagement shows here.`} /></div>
+      ) : (
+        (open.tracker.stages || []).map((st) => (
+          <div key={st.name} style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt2)" }}>{st.name}</span>
+              <Pill color="var(--txt3)">{st.rows.length}</Pill>
+            </div>
+            {st.rows.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--txt3)", padding: "2px 2px 6px" }}>Nothing at this stage yet.</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 10 }}>
+                {st.rows.map((r, i) => (
+                  <div key={i} className="card" style={{ padding: 13, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5, flex: 1, minWidth: 0 }}>{r.product}</div>
+                      {r.status && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 700, color: accStatusColor(r.status), flexShrink: 0 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", background: accStatusColor(r.status) }} />{r.status}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 3 }}>
+                      {r.division}{r.divisionPoc ? ` · ${r.divisionPoc}` : ""}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+                      {r.ebPoc && <Pill color="var(--acc)">{r.ebPoc}</Pill>}
+                      {r.service && <Pill color="var(--txt2)">{r.service}</Pill>}
+                      {r.revenue && <Pill color="var(--green)">{fmtRevenue(r.revenue)}</Pill>}
+                    </div>
+                    {r.next && <div style={{ fontSize: 11.5, color: "var(--txt2)", marginTop: 8, whiteSpace: "pre-wrap", lineHeight: 1.5, maxHeight: 76, overflow: "hidden" }}>
+                      <b style={{ color: "var(--txt3)", fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>Next</b> · {r.next}</div>}
+                    {r.roadblocks && <div style={{ fontSize: 11.5, color: "var(--red)", marginTop: 6, lineHeight: 1.5 }}>
+                      <b style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>Roadblock</b> · {r.roadblocks}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+
+      {(open.tracker?.others || []).length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt2)", marginBottom: 8 }}>Other open items</div>
+          <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+            {open.tracker.others.map((r, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", padding: "9px 14px", borderBottom: i < open.tracker.others.length - 1 ? "1px solid var(--bdr)" : "none", fontSize: 12 }}>
+                <span style={{ fontWeight: 600, flex: 1, minWidth: 160 }}>{r.task}</span>
+                <span style={{ color: "var(--txt2)" }}>{r.division}{r.poc ? ` · ${r.poc}` : ""}</span>
+                {r.ebPoc && <Pill color="var(--acc)">{r.ebPoc}</Pill>}
+                {r.status && <span style={{ fontSize: 11, color: accStatusColor(r.status), fontWeight: 700 }}>{r.status}</span>}
+                {r.closure && <span style={{ fontSize: 11, fontFamily: MONO, color: "var(--txt3)" }}>{r.closure}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div style={{ fontWeight: 800, fontSize: 12, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt2)", marginBottom: 8 }}>
+          Projects running in this tool
+        </div>
+        {linked.length === 0 ? (
+          <div style={{ fontSize: 12, color: "var(--txt3)" }}>No project here names {open.short} yet — projects whose client or name mentions {(open.aliases || []).join(", ")} appear automatically.</div>
+        ) : (
+          <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+            {linked.map((p, i) => (
+              <div key={p.id} style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", padding: "10px 14px", borderBottom: i < linked.length - 1 ? "1px solid var(--bdr)" : "none", fontSize: 12.5 }}>
+                <span style={{ fontFamily: MONO, color: "var(--acc)", fontWeight: 700 }}>{p.projectId}</span>
+                <span style={{ fontWeight: 600, flex: 1, minWidth: 140 }}>{p.name}</span>
+                {p.status && <Pill color={/progress/i.test(p.status) ? "var(--blue)" : /complete/i.test(p.status) ? "var(--green)" : "var(--txt2)"}>{p.status}</Pill>}
+                {p.deadline && <span style={{ fontSize: 11, fontFamily: MONO, color: "var(--txt3)" }}>due {fmtDate(p.deadline)}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+}
+
 /* ═══ WORK CHAT LOGS (admin) ══════════════════════════════════════════════
    The work chats already ARE the record of the work — this page is the index
    to them: who is talking to the copilot, on which project, about which
@@ -8883,6 +9103,7 @@ const NAV_GROUPS = [
     { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
   ]],
   ["Clients", [
+    { id: "keyacc", label: "Key Accounts", icon: Building2 },
     { id: "client", label: "Client Communication", icon: Video },
   ]],
   ["Resources", [
@@ -8910,6 +9131,7 @@ const TITLES = {
   perf: ["Performance & Training", "PM KPIs with red alerts · daily work updates scored against the KPI · trainings"],
   memory: ["System Memory", "Templates, instructions, conversations, Drive sitemaps — injected into every AI call"],
   chats: ["Work Chat Logs", "Every work-window conversation — who is working with the copilot, on which project and step, day by day"],
+  keyacc: ["Key Accounts", "One page per strategic account — every engagement from first reach-out to manufacturing, plus the projects running in this tool"],
 };
 
 /* Pre-app shell (loading / login) — carries the theme + CSS before the app mounts */
@@ -9150,6 +9372,7 @@ export default function App() {
   const [view, setView] = useState("assistant");
   const [projects, setProjects] = useState(SEED_PROJECTS);
   const [clients, setClients] = useState(SEED_CLIENTS);
+  const [accounts, setAccounts] = useState(SEED_ACCOUNTS);
   const [notes, setNotes] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [kpiLog, setKpiLog] = useState([]);
@@ -9206,7 +9429,7 @@ export default function App() {
     try { localStorage.setItem(key, value); } catch (e) { }   // offline mirror
   }, []);
   const applyMerged = useCallback((st, names) => {
-    const S = { projects: setProjects, clients: setClients, notes: setNotes, tasks: setTasks,
+    const S = { projects: setProjects, clients: setClients, accounts: setAccounts, notes: setNotes, tasks: setTasks,
       kpiLog: setKpiLog, workUpdates: setWorkUpdates, trainings: setTrainings, memory: setMemory,
       syncLog: setSyncLog, assistantLog: setAssistantLog, roster: setCustomRoster };
     for (const n of names) if (S[n]) S[n](st[n]);
@@ -9225,6 +9448,9 @@ export default function App() {
       if (ok) {
         if (sa?.projects) setProjects(sa.projects); else setProjects([]);   // a real workspace never
         if (sa?.clients) setClients(sa.clients); else setClients([]);       // starts on demo seeds
+        // Key accounts are DELIBERATE seeds: a server copy wins, an empty
+        // server means the seeds stand and ride up on the first save.
+        if (sa?.accounts?.length) setAccounts(sa.accounts);
         if (sa?.notes) setNotes(sa.notes); if (sa?.tasks) setTasks(sa.tasks);
         if (sb?.kpiLog) setKpiLog(sb.kpiLog); if (sb?.workUpdates) setWorkUpdates(sb.workUpdates);
         if (sb?.trainings) setTrainings(sb.trainings); if (sb?.memory) setMemory(sb.memory);
@@ -9235,12 +9461,12 @@ export default function App() {
       } else {
         // Server unreadable: show the offline mirror, but write NOTHING until
         // a later read succeeds — the poll below keeps trying.
-        try { const a = localStorage.getItem("pms-v1-a"); if (a) { const d = JSON.parse(a); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
+        try { const a = localStorage.getItem("pms-v1-a"); if (a) { const d = JSON.parse(a); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.accounts?.length) setAccounts(d.accounts); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
         try { const b = localStorage.getItem("pms-v1-b"); if (b) { const d = JSON.parse(b); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
         toast("Couldn't reach the database — showing your last local copy, saving is paused", "amber");
       }
     } else {
-      try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
+      try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.accounts?.length) setAccounts(d.accounts); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
       try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
     }
     setBooted(true);
@@ -9248,7 +9474,7 @@ export default function App() {
 
   /* debounced save — merge first, then write, then mirror to real tables */
   useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
-    const local = { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
+    const local = { projects, clients, accounts, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
     if (supabaseEnabled) {
       if (!cloudOkRef.current || savingRef.current) return;   // never write blind
       savingRef.current = true;
@@ -9265,14 +9491,14 @@ export default function App() {
       } catch (e) { /* unreadable/unwritable this cycle — state is intact, the next save retries */ }
       finally { savingRef.current = false; }
     } else {
-      try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, notes, tasks })); } catch (e) { }
+      try { await window.storage.set("pms-v1-a", JSON.stringify({ projects, clients, accounts, notes, tasks })); } catch (e) { }
       try { await window.storage.set("pms-v1-b", JSON.stringify({ kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog: assistantLog.slice(-200).filter((m) => !m.confirm) })); } catch (e) { }
     }
-  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster, assistantLog, cloudGet, cloudSet, applyMerged]);
+  }, 700); return () => clearTimeout(t); }, [booted, projects, clients, accounts, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, customRoster, assistantLog, cloudGet, cloudSet, applyMerged]);
 
   /* the poll — other people's saves arrive without a reload */
   const pollState = useRef(null);
-  pollState.current = { projects, clients, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
+  pollState.current = { projects, clients, accounts, notes, tasks, kpiLog, workUpdates, trainings, memory, syncLog, roster: customRoster, assistantLog };
   useEffect(() => {
     if (!supabaseEnabled || !booted || !session) return;
     const pull = async () => {
@@ -9425,7 +9651,7 @@ export default function App() {
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
-  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
+  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
   const visGroups = NAV_GROUPS
     .map(([title, items]) => [title, items.filter((n) => !n.admin || isAdmin)])
     .filter(([, items]) => items.length);
@@ -9531,6 +9757,7 @@ export default function App() {
             {view === "perf" && <PerfModule />}
             {view === "memory" && <MemoryModule />}
             {view === "chats" && <ChatLogsModule />}
+            {view === "keyacc" && <KeyAccountsModule />}
           </div>
         </main>
         {view !== "assistant" && <WorkspaceChat />}

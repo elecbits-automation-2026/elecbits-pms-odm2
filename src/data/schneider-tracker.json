@@ -1,0 +1,278 @@
+{
+ "fileName": "EbSchneider_All_Tracker.xlsx",
+ "uploadedAt": "2026-08-18",
+ "stages": [
+  {
+   "name": "Reach out to RFQ",
+   "rows": [
+    {
+     "division": "Secure power",
+     "divisionPoc": "Mahima / Prasad",
+     "ebPoc": "Shreya",
+     "product": "UPS",
+     "service": "Design + Manufacturing",
+     "status": "RFQ received",
+     "link": "",
+     "next": "RFQ awaited",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Power Products",
+     "divisionPoc": "Gopinath",
+     "ebPoc": "Shreya",
+     "product": "Digital Power Backbone",
+     "service": "Design + Manufacturing",
+     "status": "RFQ received",
+     "link": "",
+     "next": "06-08-2026\n\nRFQ received, LLD needs to be shared by today",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Singapore - SSD",
+     "divisionPoc": "Anshuman",
+     "ebPoc": "Saurav sir",
+     "product": "SSD",
+     "service": "Design + Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "03-07-2026\n1. Follow-up",
+     "who": "Saurav sir",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Drives",
+     "divisionPoc": "Sumesh",
+     "ebPoc": "Nikhil sir",
+     "product": "L2/L3 Ethernet switches and servo drives",
+     "service": "Design + Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "03-07-2026\n1. Next week R&D call\n\n07-07-2026\n1. Need to create technical PPT for Power Electronics products - before 10/07\n\nMet with him in SE event",
+     "who": "Nikhil sir",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Switches/Drives",
+     "divisionPoc": "Soumya",
+     "ebPoc": "Vinay sir/Nikhil sir",
+     "product": "Switches/Drives",
+     "service": "Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "03-07-2026\n1. Follow-up",
+     "who": "Vinay sir",
+     "roadblocks": "",
+     "revenue": ""
+    }
+   ]
+  },
+  {
+   "name": "RFQ to PO",
+   "rows": [
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar",
+     "ebPoc": "Vinay sir",
+     "product": "Smart Switch",
+     "service": "Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "PO awaited",
+     "who": "Vinay sir",
+     "roadblocks": "",
+     "revenue": "42000000"
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Chetan",
+     "ebPoc": "Shreya",
+     "product": "Video doorbell",
+     "service": "White-Label",
+     "status": "on hold",
+     "link": "Eb-21-EL-287-01-1756_SpecSheet_VideoDoorbell.docx",
+     "next": "03-07-2026\n1. Read the LLD and share\n\n05-07-2026\n1. shared",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Chetan",
+     "ebPoc": "Shreya",
+     "product": "Rotary knob",
+     "service": "White-Label",
+     "status": "on hold",
+     "link": "Elecbits__Eb-21-EL-287-01-1757-Rotary_Knob_SpecSheet.docx",
+     "next": "03-07-2026\n1. Read the LLD and share\n\n05-07-2026\n1. shared",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "HMI",
+     "divisionPoc": "Deepu / Lakshmi / Viru",
+     "ebPoc": "Nikhil sir",
+     "product": "HMI",
+     "service": "Design + Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "03-07-2026\n1. Follow-up\n\n15-07\n1. meeting tomorrow - Nikhil\n2. 22-07: Global leader",
+     "who": "Nikhil sir",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar",
+     "ebPoc": "Vinay sir",
+     "product": "AIOS 1",
+     "service": "Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "Quote to be shared",
+     "who": "Vinay sir",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Power Products",
+     "divisionPoc": "Gopinath",
+     "ebPoc": "Shreya",
+     "product": "Digital Power Backbone",
+     "service": "Design + Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "06-08-2026\n\nRFQ received, LLD needs to be shared by today",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Secure power",
+     "divisionPoc": "Mahima / Prasad",
+     "ebPoc": "Shreya",
+     "product": "UPS",
+     "service": "Design + Manufacturing",
+     "status": "Ongoing",
+     "link": "",
+     "next": "23rd August \n\nLLD shared. They will share their feedback by 25th august.",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    }
+   ]
+  },
+  {
+   "name": "Design to Manufacturing",
+   "rows": [
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar + Saravanan",
+     "ebPoc": "Shreya/Vinay Sir",
+     "product": "EVSO",
+     "service": "Design + Manufacturing",
+     "status": "Going for MP",
+     "link": "",
+     "next": "",
+     "who": "",
+     "roadblocks": "",
+     "revenue": "2.5 cr"
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar + Saravanan",
+     "ebPoc": "Shreya/Vinay Sir",
+     "product": "Smart Adapter",
+     "service": "White-Label",
+     "status": "Going for MP",
+     "link": "",
+     "next": "",
+     "who": "",
+     "roadblocks": "",
+     "revenue": "1 cr"
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar + Saravanan",
+     "ebPoc": "Shreya",
+     "product": "Voice Controller",
+     "service": "Design + Manufacturing",
+     "status": "On hold as per client",
+     "link": "",
+     "next": "",
+     "who": "",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar + Saravanan",
+     "ebPoc": "Shreya",
+     "product": "AIOS 2",
+     "service": "Design + Manufacturing",
+     "status": "Will start in august",
+     "link": "",
+     "next": "Follow up",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    },
+    {
+     "division": "Home Solutions",
+     "divisionPoc": "Damodar + Saravanan",
+     "ebPoc": "Shreya",
+     "product": "3phase EMD",
+     "service": "Design + Manufacturing",
+     "status": "On hold as per client",
+     "link": "",
+     "next": "Follow up",
+     "who": "Shreya",
+     "roadblocks": "",
+     "revenue": ""
+    }
+   ]
+  },
+  {
+   "name": "Manufacturing",
+   "rows": []
+  }
+ ],
+ "others": [
+  {
+   "division": "All",
+   "poc": "",
+   "task": "SAM audit - SCM",
+   "ebPoc": "Shreya",
+   "status": "",
+   "next": "",
+   "roadblocks": "",
+   "closure": ""
+  },
+  {
+   "division": "All",
+   "poc": "",
+   "task": "SAM audit - Quality",
+   "ebPoc": "Arun",
+   "status": "",
+   "next": "",
+   "roadblocks": "",
+   "closure": ""
+  },
+  {
+   "division": "Costing",
+   "poc": "Narsimha/Claire",
+   "task": "Costing Module - XOR",
+   "ebPoc": "Harsh",
+   "status": "Others - Specify",
+   "next": "",
+   "roadblocks": "",
+   "closure": ""
+  }
+ ]
+}

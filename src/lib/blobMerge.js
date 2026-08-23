@@ -77,7 +77,7 @@ export function mergeCollection(local, server, known, base) {
 }
 
 /* The two blobs, collection by collection. */
-const A_KEYS = ["projects", "clients", "notes", "tasks"];
+const A_KEYS = ["projects", "clients", "notes", "tasks", "accounts"];
 const B_KEYS = ["kpiLog", "workUpdates", "trainings", "memory", "syncLog", "assistantLog"];
 
 /* One person, one day, one work update — if two browsers minted separate ids
@@ -159,7 +159,7 @@ export function idsOf(serverA, serverB) {
   return ids;
 }
 
-export const blobA = (s) => ({ projects: s.projects, clients: s.clients, notes: s.notes, tasks: s.tasks });
+export const blobA = (s) => ({ projects: s.projects, clients: s.clients, notes: s.notes, tasks: s.tasks, accounts: s.accounts || [] });
 export const blobB = (s) => ({
   kpiLog: s.kpiLog, workUpdates: s.workUpdates, trainings: s.trainings, memory: s.memory,
   syncLog: s.syncLog, roster: s.roster ?? null,
