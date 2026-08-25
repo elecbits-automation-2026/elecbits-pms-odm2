@@ -2309,13 +2309,22 @@ const ChoiceCard = ({ title, sub, icon: Ic, onClick, on }) => (
 let PENDING_PROJECT_OPEN = null;
 
 function ProjectsModule() {
-  const { projects, setProjects, users, me, sheetSync, toast } = useCtx();
+  const { projects, setProjects, users, me, tasks, sheetSync, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
   const [addExisting, setAddExisting] = useState(false);
   const [openId, setOpenId] = useState(() => { const v = PENDING_PROJECT_OPEN; PENDING_PROJECT_OPEN = null; return v; });
+  /* Everybody sees the Projects page; what a non-admin sees ON it is THEIR
+     projects — the ones they are staffed on, created, or carry tasks for.
+     Being assigned work on a project and unable to open its plan was how
+     people ended up working blind. */
+  const seesAll = ["superadmin", "dept_head"].includes(my?.role);
+  const myProjIds = useMemo(() => new Set(tasks.filter((t) => t.assigneeId === me && t.projectId).map((t) => t.projectId)), [tasks, me]);
+  const visibleProjects = seesAll ? projects
+    : projects.filter((p) => (p.team || []).some((x) => x.userId === me) || p.createdBy === me || myProjIds.has(p.projectId));
   const setStatus = (id, status) => { setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p))); sheetSync("Project Data and IDs (Google Sheet)", `Status → ${status}`); };
-  const openProject = projects.find((p) => p.id === openId);
+  // A deep link (Key Accounts row) opens only what this person may see.
+  const openProject = visibleProjects.find((p) => p.id === openId);
   if (openProject) return <ProjectDetail project={openProject} onBack={() => setOpenId(null)} setStatus={setStatus} isAdmin={isAdmin} />;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -2326,9 +2335,11 @@ function ProjectsModule() {
         </div>
         {isAdmin ? <Btn icon={Plus} onClick={() => setAddExisting(true)}>Add existing project</Btn> : <Pill color="var(--txt2)"><Shield size={11} /> Adding is admin-only</Pill>}
       </div>
-      {projects.length === 0 ? (
-        <div className="card"><Empty icon={FolderPlus} title="No projects yet" sub="Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it." /></div>
-      ) : projects.map((p) => {
+      {visibleProjects.length === 0 ? (
+        <div className="card"><Empty icon={FolderPlus} title={seesAll ? "No projects yet" : "No projects assigned to you yet"}
+          sub={seesAll ? "Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it."
+                       : "Projects appear here once you are on a project's team or carry a task on one — ask your admin to staff you."} /></div>
+      ) : visibleProjects.map((p) => {
         const dl = daysLeft(p.deadline);
         const pm = p.team?.find((t) => t.slot.startsWith("PM"));
         return (
@@ -9133,7 +9144,7 @@ function ChatLogsModule() {
 
 const NAV_GROUPS = [
   ["Projects", [
-    { id: "projects", label: "Projects", icon: FolderPlus, admin: true },
+    { id: "projects", label: "Projects", icon: FolderPlus },
     { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
     { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
   ]],
