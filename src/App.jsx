@@ -4926,13 +4926,19 @@ function inDayBucket(t, bucket, pickedDate) {
 const iso10 = (d) => new Date(d).toISOString().slice(0, 10);
 
 function TasksModule() {
-  const { tasks, setTasks, projects, users, me, now } = useCtx();
+  const { tasks, setTasks, projects, users, me, now, setView } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   const isPM = my?.role === "pm";
   const myProjectIds = projects.filter((p) => (p.team || []).some((t) => t.userId === me)).map((p) => p.projectId);
   const visible = tasks.filter((t) => isAdmin ? true : isPM ? (t.assigneeId === me || t.createdBy === me || myProjectIds.includes(t.projectId)) : t.assigneeId === me);
-  const [group, setGroup] = useState(isAdmin || isPM ? "project" : "person");
+  /* Every project this person belongs to — team membership first, then any
+     project their tasks name. Shown even with ZERO tasks: being staffed on a
+     project you cannot see was the complaint this fixes. */
+  const myProjects = useMemo(() => projects.filter((p) =>
+    (p.team || []).some((x) => x.userId === me) || tasks.some((t) => t.assigneeId === me && t.projectId === p.projectId)),
+    [projects, tasks, me]);
+  const [group, setGroup] = useState("project");
   const [personF, setPersonF] = useState("all");
   const [projF, setProjF] = useState("all");
   const [workT, setWorkT] = useState(null);
@@ -4952,7 +4958,22 @@ function TasksModule() {
 
   const projGroups = useMemo(() => {
     const map = new Map();
+    // Non-admins: THEIR projects lead, nearest deadline first, empty or not.
+    if (!isAdmin) {
+      for (const p of [...myProjects].sort((a, b) => String(a.deadline || "9999").localeCompare(String(b.deadline || "9999"))))
+        map.set(p.projectId, []);
+    }
     for (const t of filtered) { const k = t.projectId || "__unlinked__"; if (!map.has(k)) map.set(k, []); map.get(k).push(t); }
+    return [...map.entries()];
+  }, [filtered, isAdmin, myProjects]);
+  /* "By tasks": everything this person owes, in TIMELINE order — one section
+     per day, the day's tasks inside it by start time. */
+  const timelineGroups = useMemo(() => {
+    const sorted = [...filtered].sort((a, b) =>
+      String(a.date || "9999-12-31").localeCompare(String(b.date || "9999-12-31"))
+      || String(a.startTime || "99:99").localeCompare(String(b.startTime || "99:99")));
+    const map = new Map();
+    for (const t of sorted) { const k = t.date || "__undated__"; if (!map.has(k)) map.set(k, []); map.get(k).push(t); }
     return [...map.entries()];
   }, [filtered]);
   const personGroups = useMemo(() => {
@@ -4978,7 +4999,9 @@ function TasksModule() {
         </div>
       )}
       <div className="card" style={{ padding: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <Seg value={group} onChange={setGroup} options={[{ k: "project", label: "By project", icon: FolderPlus }, { k: "person", label: "By person", icon: Users }]} />
+        <Seg value={group} onChange={setGroup} options={isAdmin
+          ? [{ k: "project", label: "By project", icon: FolderPlus }, { k: "timeline", label: "By tasks", icon: Calendar }, { k: "person", label: "By person", icon: Users }]
+          : [{ k: "project", label: "By projects", icon: FolderPlus }, { k: "timeline", label: "By tasks", icon: Calendar }]} />
         <select className="inp" style={{ width: 170 }} value={personF} onChange={(e) => setPersonF(e.target.value)}>
           <option value="all">All people</option>
           {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
@@ -5015,7 +5038,7 @@ function TasksModule() {
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {filtered.length === 0 && (group !== "project" || projGroups.length === 0) ? (
         <div className="card"><Empty icon={ListChecks} title="No tasks here yet" sub="Tasks arrive from Daily Scrum — write a note, organise it with AI, and push. Branch sub-tasks land here too." /></div>
       ) : group === "project" ? (
         projGroups.map(([pid, ts]) => {
@@ -5028,16 +5051,38 @@ function TasksModule() {
                   <span style={{ fontFamily: MONO, fontWeight: 600, fontSize: 13, color: "var(--acc)" }}>{p.projectId}</span>
                   <span style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</span>
                   <Pill color={statColor(p.status)}>{p.status}</Pill>
+                  {p.deadline && <Pill color="var(--txt2)"><Calendar size={10} /> {fmtDate(p.deadline)}</Pill>}
+                  <Btn small kind="ghost" style={{ padding: "3px 9px", fontSize: 11 }}
+                       onClick={() => { PENDING_PROJECT_OPEN = p.id; setView("projects"); }}>Open ↗</Btn>
                 </>) : <Pill color="var(--amber)"><AlertTriangle size={11} /> Unlinked tasks</Pill>}
                 <div style={{ display: "flex", alignItems: "center", gap: 9, marginLeft: "auto", minWidth: 200, flex: 1, maxWidth: 320 }}>
-                  <Progress pct={(done / ts.length) * 100} color="var(--green)" />
-                  <span style={{ fontSize: 11.5, fontFamily: MONO, color: "var(--txt2)", whiteSpace: "nowrap" }}>{done}/{ts.length} done</span>
+                  <Progress pct={ts.length ? (done / ts.length) * 100 : 0} color="var(--green)" />
+                  <span style={{ fontSize: 11.5, fontFamily: MONO, color: "var(--txt2)", whiteSpace: "nowrap" }}>{ts.length ? `${done}/${ts.length} done` : "no tasks yet"}</span>
                 </div>
               </div>
-              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+              {ts.length ? (
+                <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+              ) : (
+                <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--txt3)" }}>
+                  You are on this project's team — no tasks raised for you yet. Open the project's plan to see where it stands.
+                </div>
+              )}
             </div>
           );
         })
+      ) : group === "timeline" ? (
+        timelineGroups.map(([dt, ts]) => (
+          <div key={dt} className="card" style={{ overflow: "hidden" }}>
+            <div style={{ padding: "11px 16px", borderBottom: "1px solid var(--bdr)", display: "flex", alignItems: "center", gap: 10, background: "var(--s2)" }}>
+              <Calendar size={14} style={{ color: "var(--acc)" }} />
+              <span style={{ fontWeight: 700, fontSize: 13 }}>
+                {dt === "__undated__" ? "No date set" : `${fmtDate(dt)}${dt === todayStr() ? " · today" : ""}`}
+              </span>
+              <Pill color="var(--txt2)" style={{ marginLeft: "auto" }}>{ts.length} task{ts.length === 1 ? "" : "s"}</Pill>
+            </div>
+            <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showProject showAssignee={isAdmin} onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+          </div>
+        ))
       ) : (
         personGroups.map(([uidK, ts]) => {
           const u = users.find((x) => x.id === uidK);
@@ -5917,7 +5962,12 @@ function ResourcesModule() {
 
   const statusOf = (u) => { const a = activeProjs(u.id).length, cap = capOf(u); return a >= cap ? ["At Capacity", "var(--red)"] : a ? ["Deployed", "var(--amber)"] : ["Available", "var(--green)"]; };
 
-  const TABS = [["team", "Team View", Users], ["planning", "Resource Planning", Calendar], ["efficiency", "Efficiency", Gauge]];
+  /* Planning and efficiency are management instruments — allocation
+     percentages and per-person scores are not for the whole floor. PMs and
+     developers get the team view; the rest is admin's. */
+  const TABS = [["team", "Team View", Users],
+    ...(isAdmin ? [["planning", "Resource Planning", Calendar], ["efficiency", "Efficiency", Gauge]] : [])];
+  useEffect(() => { if (!isAdmin && tab !== "team") setTab("team"); }, [isAdmin, tab]);
   const th = { textAlign: "left", padding: "11px 14px", fontSize: 10.5, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".05em", whiteSpace: "nowrap" };
   const td = { padding: "12px 14px", fontSize: 12.5, verticalAlign: "middle" };
   const NameCell = ({ u }) => (
@@ -9149,7 +9199,7 @@ const NAV_GROUPS = [
     { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
   ]],
   ["Clients", [
-    { id: "keyacc", label: "Key Accounts", icon: Building2 },
+    { id: "keyacc", label: "Key Accounts", icon: Building2, admin: true },
     { id: "client", label: "Client Communication", icon: Video },
   ]],
   ["Resources", [
