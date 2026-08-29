@@ -5932,6 +5932,125 @@ const LOGIN_TYPES = [["superadmin", "Super Admin"], ["pm", "Project Manager"], [
 const PROJECT_TYPES = [["engineering", "Engineering Services"], ["elecbits_product", "Elecbits Product"], ["modifier", "Modifier"]];
 const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });
 
+/* ═══ BULK ADD + LOGINS ═══════════════════════════════════════════════════
+   Thirty logins through a one-person form is an afternoon; the roster
+   already exists as a table somewhere. Paste it — "S.No Name Department
+   Email" straight from the sheet — set one starting password, press once.
+   People already on the roster keep their role (only the password is reset);
+   new people join with the role their department implies. */
+/* The three who run the tool. Whatever department a paste puts beside these
+   addresses, they are superadmins — new or already on the roster. */
+const BULK_SUPERADMINS = ["saurav@elecbits.in", "shreya@elecbits.in", "nikhil@elecbits.in"];
+const BULK_DEPT_MAP = [
+  [/firmware/i, { role: "engineer", rr: "jr_fw", dept: "Firmware" }],
+  [/hardware/i, { role: "engineer", rr: "jr_hw", dept: "Hardware" }],
+  [/\bpm\b|project management/i, { role: "pm", rr: "jr_pm", dept: "Project Management" }],
+  [/soldering|testing/i, { role: "engineer", rr: "soldering", dept: "Soldering & Testing" }],
+  [/supply/i, { role: "engineer", rr: "sc", dept: "Supply Chain" }],
+  [/design/i, { role: "engineer", rr: "ind_design", dept: "Industrial Design" }],
+];
+function parseRosterPaste(text, users) {
+  const rows = [];
+  for (const line of String(text || "").split("\n")) {
+    const email = (line.match(/[\w.+-]+@[\w.-]+\.\w+/) || [])[0]?.toLowerCase();
+    if (!email) continue;
+    /* A sheet paste is tab-separated — the cells ARE the answer. The
+       heuristic below only serves pastes that lost their tabs. */
+    let name = "", hit = null;
+    if (line.includes("\t")) {
+      const cells = line.split("\t").map((c) => c.trim()).filter((c) => c && !c.includes("@") && !/^\d+[.)]?$/.test(c));
+      const deptCell = cells.find((c) => BULK_DEPT_MAP.some(([re]) => re.test(c)));
+      hit = deptCell ? BULK_DEPT_MAP.find(([re]) => re.test(deptCell)) : null;
+      name = cells.find((c) => c !== deptCell) || "";
+    } else {
+      let rest = line.replace(email, "").replace(/^\s*\d+[.)]?\s*/, "").trim();
+      hit = BULK_DEPT_MAP.find(([re]) => re.test(rest));
+      // strip the whole department phrase, not just the matched word
+      const phrase = hit ? (rest.match(/(soldering\s*(and|&)?\s*testing|project management|firmware|hardware|supply\s*chain|industrial\s*design|\bpm\b)/i) || [])[0] : "";
+      name = rest.replace(phrase, "").replace(/[\t|,;]+/g, " ").replace(/\s+/g, " ").trim();
+    }
+    const map = hit?.[1] || { role: "engineer", rr: "jr_hw", dept: "Hardware" };
+    const existing = users.find((u) => (u.email || "").toLowerCase() === email);
+    const superadmin = BULK_SUPERADMINS.includes(email);
+    rows.push({ email, name: name || email.split("@")[0],
+      ...map, ...(superadmin ? { role: "superadmin", rr: map.rr === "jr_pm" ? "sr_pm" : map.rr } : {}),
+      superadmin, existing });
+  }
+  return rows;
+}
+function BulkProvisionModal({ onClose }) {
+  const { users, addUser, updateUser, provisionLogin, toast } = useCtx();
+  const [text, setText] = useState("");
+  const [pwd, setPwd] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState(null);   // [{email, outcome}]
+  const rows = useMemo(() => parseRosterPaste(text, users), [text, users]);
+
+  const run = async () => {
+    if (busy || !rows.length || pwd.length < 8) return;
+    setBusy(true);
+    const out = [];
+    for (const r of rows) {
+      /* Roster first — a new person joins with their department's role; an
+         existing person's role is THEIRS, only the login is touched. The one
+         exception is the named superadmins, who are superadmin regardless. */
+      if (!r.existing) {
+        addUser({ id: uuid(), name: r.name, email: r.email, role: r.role,
+          title: ROLE_TITLE[r.rr] || rrInfo(r.rr)?.label || "Team", resourceRole: r.rr, dept: r.dept,
+          skills: rrInfo(r.rr)?.skills || [], projectTags: ["engineering"], maxProjects: rrInfo(r.rr)?.cap || 3,
+          color: _PALETTE[(users.length + out.length) % _PALETTE.length] });
+      } else if (r.superadmin && r.existing.role !== "superadmin") {
+        updateUser({ ...r.existing, role: "superadmin" });
+      }
+      const res = await provisionLogin(r.email, pwd, r.name);
+      out.push({ email: r.email, name: r.name,
+        outcome: res === "" ? "login created" : res === "reset" ? "password reset" : `failed: ${res}` });
+      setResults([...out]);
+    }
+    setBusy(false);
+    const ok = out.filter((x) => !x.outcome.startsWith("failed")).length;
+    toast(`${ok}/${out.length} logins ready`, ok === out.length ? "green" : "amber");
+  };
+
+  return (
+    <Modal title="Bulk add + logins" sub="Paste the roster table — S.No · Name · Department · Email — set one starting password, press once" onClose={onClose} width={640}
+      footer={<>
+        <Btn kind="ghost" onClick={onClose}>{results ? "Done" : "Cancel"}</Btn>
+        <Btn kind="green" icon={busy ? Loader2 : CheckCircle2} disabled={busy || !rows.length || pwd.length < 8} onClick={run}>
+          {busy ? `Creating ${results?.length || 0}/${rows.length}…` : `Create ${rows.length || ""} login${rows.length === 1 ? "" : "s"}`}
+        </Btn>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <textarea className="inp" rows={8} style={{ fontFamily: MONO, fontSize: 11.5, lineHeight: 1.6 }}
+          placeholder={"1\tSai\tFirmware\tsai.kiran@elecbits.in\n2\tRahul\tHardware\trahul.singh@elecbits.in\n…"}
+          value={text} onChange={(e) => { setText(e.target.value); setResults(null); }} />
+        <Field label="Starting password for everyone (min 8 — they can change it later)" req>
+          <input className="inp" value={pwd} onChange={(e) => setPwd(e.target.value)} placeholder="e.g. Elecbits@2026" />
+        </Field>
+        {rows.length > 0 && (
+          <div style={{ border: "1px solid var(--bdr)", borderRadius: 10, maxHeight: 260, overflowY: "auto" }}>
+            {rows.map((r, i) => {
+              const done = results?.find((x) => x.email === r.email);
+              return (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", padding: "7px 12px", borderBottom: i < rows.length - 1 ? "1px solid var(--bdr2)" : "none", fontSize: 12 }}>
+                  <span style={{ fontWeight: 600, minWidth: 120 }}>{r.name}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)", flex: 1 }}>{r.email}</span>
+                  <Pill color="var(--txt2)">{r.dept}</Pill>
+                  {r.superadmin ? <Pill color="var(--purple)"><Shield size={10} /> superadmin</Pill>
+                    : r.existing ? <Pill color="var(--amber)">on roster — {r.existing.role} kept, password resets</Pill>
+                    : <Pill color="var(--acc)">new · {r.role}</Pill>}
+                  {done && <span style={{ fontSize: 11, fontWeight: 700, color: done.outcome.startsWith("failed") ? "var(--red)" : "var(--green)" }}>{done.outcome}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {text.trim() && !rows.length && <div style={{ fontSize: 12, color: "var(--amber)" }}>No rows with an email address found in that paste.</div>}
+      </div>
+    </Modal>
+  );
+}
+
 function ResourcesModule() {
   const { users, projects, tasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
@@ -6038,6 +6157,7 @@ function ResourcesModule() {
         </div>
         <span style={{ fontSize: 12, color: "var(--txt2)", padding: "8px 0 8px 12px" }}><b style={{ color: "var(--txt)" }}>{filtered.length}</b> resource{filtered.length !== 1 ? "s" : ""}</span>
         {isAdmin && <Btn small icon={Plus} onClick={() => setResModal({ mode: "add" })} style={{ margin: "8px 0 8px 10px" }}>Add Resource</Btn>}
+        {isAdmin && <Btn small kind="ghost" icon={Users} onClick={() => setResModal({ mode: "bulk" })} style={{ margin: "8px 0" }}>Bulk add + logins</Btn>}
       </div>
 
       {(tab === "team" || tab === "planning") && (
@@ -6185,7 +6305,9 @@ function ResourcesModule() {
           ))}
         </Modal>
       )}
-      {resModal && <ResourceModal mode={resModal.mode} user={resModal.user} onClose={() => setResModal(null)} />}
+      {resModal && (resModal.mode === "bulk"
+        ? <BulkProvisionModal onClose={() => setResModal(null)} />
+        : <ResourceModal mode={resModal.mode} user={resModal.user} onClose={() => setResModal(null)} />)}
     </div>
   );
 }
