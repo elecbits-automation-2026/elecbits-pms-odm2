@@ -43,12 +43,20 @@ const WHERE = {
   meeting_challenges: ["pms", "meeting_challenges"],
   messages:           ["pms", "messages"],
   intel:              ["pms", "intel"],               // was public.project_intel
-  work_updates:       ["pms", "work_updates"],
-  kpi_log:            ["pms", "kpi_log"],
+  work_updates:       ["pms", "work_updates"],        // moves to core — see DAILY
+  kpi_log:            ["pms", "kpi_log"],             // moves to core — see DAILY
   // Meeting transcripts (Google Meet, captured by Fireflies). Added after the
   // schema split, so it carries the same name in both layouts.
   transcripts:        ["pms", "transcripts"],
 };
+
+/* Decision 2 of the HR build (30 Aug 2026): the daily work record is written
+   by everyone, not just this tool, so 09-hr-tool.sql moves these two tables
+   pms → core — where the HR tool can read them without breaking the rule
+   that no tool reads another tool's schema. Whether THIS database has run
+   that migration yet is probed, not assumed, same as `legacy`. */
+const DAILY = new Set(["work_updates", "kpi_log"]);
+let dailyInCore = false;
 
 /* The same tables before the reorganisation: all in `public`, and eleven of
    them under a different name. */
@@ -81,9 +89,14 @@ export async function ensureLayout(sb) {
     probe = (async () => {
       try {
         const { error } = await sb.schema("pms").from("workspace").select("key").limit(1);
-        if (!error) { legacy = false; return; }            // new layout answers
-        if (missingSchema(error)) { legacy = true; return; } // not moved yet
-        legacy = false;   // reachable but refused (RLS etc.) → layout exists
+        if (!error) legacy = false;                        // new layout answers
+        else if (missingSchema(error)) legacy = true;      // not moved yet
+        else legacy = false; // reachable but refused (RLS etc.) → layout exists
+
+        if (legacy) { dailyInCore = false; return; }       // pre-split → pre-move
+        // Split layout: has the daily record moved on to core yet?
+        const { error: e2 } = await sb.schema("core").from("work_updates").select("id").limit(1);
+        dailyInCore = !e2 || !missingSchema(e2);
       } catch {
         // Network failure: leave the current mode; callers retry anyway.
         probe = null;
@@ -95,18 +108,22 @@ export async function ensureLayout(sb) {
 
 /* Rarely needed by hand — flips the mode when a call itself discovers the
    layout changed under us (e.g. the move ran between probe and query). */
-export function setLegacyLayout(v) { legacy = !!v; probe = Promise.resolve(); }
+export function setLegacyLayout(v) { legacy = !!v; if (legacy) dailyInCore = false; probe = Promise.resolve(); }
 export const usingLegacyLayout = () => legacy;
 export const isMissingSchemaError = missingSchema;
 
 /* Run a query, and if it fails because the tables are not where this mode
-   expects — the move ran mid-session, or was rolled back mid-session — flip
-   the mode and run it once more. `run` gets a fresh builder each attempt. */
+   expects — a move ran mid-session, or was rolled back mid-session — probe
+   again and run it once more. A re-probe rather than a blind flip, because
+   there are two independent moves now (public → pms/core, and the daily
+   record pms → core) and only the database knows which of them happened.
+   `run` gets a fresh builder each attempt. */
 export async function withLayoutRetry(sb, run) {
   await ensureLayout(sb);
   let out = await run();
   if (out?.error && missingSchema(out.error)) {
-    setLegacyLayout(!legacy);
+    probe = null;
+    await ensureLayout(sb);
     out = await run();
   }
   return out;
@@ -119,6 +136,7 @@ export function tbl(sb, name) {
   const at = WHERE[name];
   if (!at) throw new Error(`Unknown table "${name}" — add it to src/lib/tables.js`);
   if (legacy) return sb.from(OLD_NAME[name] || at[1]);
+  if (dailyInCore && DAILY.has(name)) return sb.schema("core").from(at[1]);
   return sb.schema(at[0]).from(at[1]);
 }
 
@@ -126,7 +144,9 @@ export function tbl(sb, name) {
 export function tableName(name) {
   const at = WHERE[name];
   if (!at) return name;
-  return legacy ? `public.${OLD_NAME[name] || at[1]}` : `${at[0]}.${at[1]}`;
+  if (legacy) return `public.${OLD_NAME[name] || at[1]}`;
+  if (dailyInCore && DAILY.has(name)) return `core.${at[1]}`;
+  return `${at[0]}.${at[1]}`;
 }
 
 export const TABLES = WHERE;

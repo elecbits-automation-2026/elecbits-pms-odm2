@@ -53,9 +53,13 @@ one changes nothing.
 | 12 | `06-prod.sql` | Product → publishes `core.catalogue` |
 | 13 | `07-hr.sql` | HR (admin-only policies) |
 | 14 | `08-fin.sql` | Finance → publishes `core.financial_status` |
+| 15 | `09-hr-tool.sql` | the HR tool: **moves the daily record (`pms.kpi_log`, `pms.work_updates`) into `core`**, adds 15 `hr` tables, ships `hr.is_hr()` unused |
 
 Steps 10–14 are independent of each other. Only 3 → 6 → 7 → 8 → 9 is a real
-chain.
+chain. Step 15 needs 13 (`07-hr.sql`) first, and like step 3 it moves live
+tables: deploy an ODM build that carries the three-era `src/lib/tables.js`
+before running it, or the app addresses `kpi_log` and `work_updates` at their
+old home and cannot find the new one.
 
 ### Steps 3–5 are a cutover — do them back to back
 
@@ -119,6 +123,10 @@ Views: `staffing`, `intake`, `delivery_status`, `production_status`,
 
 Views: `projects` (sanctioned ODM only), `team`.
 
+`work_updates` and `kpi_log` move on to `core` at step 15 — the daily record
+was never this tool's alone, and the HR tool reads it there without breaking
+the one rule.
+
 ### The five tools still to be built
 
 | Schema | Tables |
@@ -127,7 +135,7 @@ Views: `projects` (sanctioned ODM only), `team`.
 | `ulm` (6) | `sanction_events`, `allocations`, `work_packages`, `reviews`, `risks`, `resource_plan` |
 | `bb` (7) | `orders`, `boms`, `bom_lines`, `procurement`, `runs`, `qc_checks`, `dispatches` |
 | `prod` (8) | `skus`, `variants`, `kit_lines`, `builds`, `units`, `stock`, `stock_moves`, `shipments` |
-| `hr` (13) | `employees`, `compensation`, `attendance`, `leave_types`, `leave_requests`, `leave_balances`, `review_cycles`, `appraisals`, `goals`, `payroll_runs`, `payslips`, `openings`, `candidates` |
+| `hr` (13) | `employees`, `compensation`, `attendance`, `leave_types`, `leave_requests`, `leave_balances`, `review_cycles`, `appraisals`, `goals`, `payroll_runs`, `payslips`, `openings`, `candidates` — **built**: `09-hr-tool.sql` takes it to 28 tables + a view; the app lives in the `elecbits-hr-tool` repo |
 | `fin` (9) | `budgets`, `milestones`, `purchase_orders`, `po_lines`, `expenses`, `invoices`, `invoice_lines`, `payments`, `cost_entries` |
 
 **72 tables, 15 views, 8 schemas.** `public` keeps only shared functions:
