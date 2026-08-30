@@ -9872,7 +9872,10 @@ export default function App() {
 
   const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
   const visGroups = NAV_GROUPS
-    .map(([title, items]) => [title, items.filter((n) => (!n.admin || isAdmin) && !(n.notRoles || []).includes(my?.role))])
+    // A role-gated item stays HIDDEN until the roster has answered who this
+    // is — showing it to an engineer for the first slow seconds is how
+    // "engineers can still see it" happens.
+    .map(([title, items]) => [title, items.filter((n) => (!n.admin || isAdmin) && (!n.notRoles || (my && !n.notRoles.includes(my.role))))])
     .filter(([, items]) => items.length);
   const [t1, t2] = TITLES[view] || ["", ""];
 
