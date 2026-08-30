@@ -9325,7 +9325,8 @@ const NAV_GROUPS = [
     { id: "client", label: "Client Communication", icon: Video },
   ]],
   ["Resources", [
-    { id: "resources", label: "Resources", icon: Users },
+    // Engineers don't manage the roster — the whole section is noise to them.
+    { id: "resources", label: "Resources", icon: Users, notRoles: ["engineer"] },
   ]],
   ["Personal", [
     { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
@@ -9788,7 +9789,7 @@ export default function App() {
   /* ticking clock only where countdowns live */
   useEffect(() => { if (view !== "scrum" && view !== "tasks") return; const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, [view]);
   /* role gating */
-  useEffect(() => { const item = NAV.find((n) => n.id === view); if (item?.admin && !isAdmin) setView("tasks"); }, [me]); // eslint-disable-line
+  useEffect(() => { const item = NAV.find((n) => n.id === view); if ((item?.admin && !isAdmin) || (item?.notRoles || []).includes(my?.role)) setView("tasks"); }, [me]); // eslint-disable-line
 
   const resetAll = useCallback(async () => {
     try { await window.storage.delete("pms-v1-a"); } catch (e) { }
@@ -9871,7 +9872,7 @@ export default function App() {
 
   const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
   const visGroups = NAV_GROUPS
-    .map(([title, items]) => [title, items.filter((n) => !n.admin || isAdmin)])
+    .map(([title, items]) => [title, items.filter((n) => (!n.admin || isAdmin) && !(n.notRoles || []).includes(my?.role))])
     .filter(([, items]) => items.length);
   const [t1, t2] = TITLES[view] || ["", ""];
 
