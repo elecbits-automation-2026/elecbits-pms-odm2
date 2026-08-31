@@ -434,7 +434,87 @@ comment on function hr.is_hr is
   'every HR page goes dark.';
 
 
--- ═══ 10. PERMISSIONS ═══════════════════════════════════════════════════════
+-- ═══ 10. ONE ROSTER, TWO TABLES ════════════════════════════════════════════
+-- core.people and hr.employees are not two copies of a person. But the line
+-- between them has to be drawn somewhere and then actually held, or they
+-- become two copies by drift:
+--
+--   core.people    WHO someone is and where they sit — login, name, work
+--                  email, role, title, department, colour, and the reporting
+--                  line. Every tool reads it. None of it is confidential.
+--
+--   hr.employees   the TERMS they are employed on — employee code, joining
+--                  and exit dates, band, employment type, status, location,
+--                  statutory ids, bank, emergency contact. Only HR reads it.
+--
+-- The reporting line belongs on core.people, not here: the org chart is shown
+-- to everybody, and a manager cannot be a fact only HR can see or nobody below
+-- department head could render the chart at all.
+
+alter table core.people
+  add column if not exists manager_id uuid references core.people(id) on delete set null;
+create index if not exists people_manager_idx on core.people (manager_id);
+
+-- If a database already carried the reporting line on hr.employees (which
+-- points at hr.employees ids, a different id space), bring it across rather
+-- than leaving two answers to the same question.
+update core.people p
+   set manager_id = m.person_id
+  from hr.employees e
+  join hr.employees m on m.id = e.manager_id
+ where e.person_id = p.id
+   and p.manager_id is null
+   and m.person_id is not null;
+
+comment on column hr.employees.manager_id is
+  'Superseded by core.people.manager_id, which every tool can read. Kept so an '
+  'existing row is not destroyed; hr.roster resolves the reporting line from '
+  'core.people. Do not write to both.';
+
+-- The one thing the app reads. Joining these two by hand in the client is how
+-- half the roster silently becomes NULL — the columns are simply not on the
+-- table you queried. LEFT JOIN, so a person who has no employment record yet
+-- (added to the roster, not onboarded) is still a name in the directory.
+--
+-- security_invoker: the caller's own RLS applies. Everyone therefore sees
+-- every NAME — the org chart and the nomination list would be nonsense
+-- otherwise — while the employment columns resolve only for their own row,
+-- or for all rows if they are an admin. The directory / record split from the
+-- build plan, enforced by the database rather than by the interface.
+create or replace view hr.roster
+with (security_invoker = true) as
+select p.id,
+       p.auth_id,
+       p.email,
+       p.name,
+       p.role,
+       p.title,
+       p.resource_role,
+       p.dept,
+       p.color,
+       p.manager_id,
+       e.id          as employee_id,
+       e.emp_code,
+       e.legal_name,
+       e.date_of_joining,
+       e.date_of_exit,
+       e.employment_type,
+       e.status,
+       e.location,
+       e.band,
+       e.hr_role
+from core.people p
+left join hr.employees e on e.person_id = p.id;
+
+comment on view hr.roster is
+  'The roster as the HR tool needs it: identity from core.people, employment '
+  'from hr.employees, one row per person, one query. Read this, never either '
+  'table directly, or the columns that live on the other one come back NULL.';
+
+grant select on hr.roster to authenticated;
+
+
+-- ═══ 11. PERMISSIONS ═══════════════════════════════════════════════════════
 -- Read for admins, per decision 1. Everyone may read the things that are
 -- theirs, and the two things that are nobody's secret: the policy library and
 -- the holiday calendar.
@@ -553,7 +633,7 @@ grant select, insert, update on core.work_updates, core.kpi_log to authenticated
 -- RLS above is what actually decides; these grants only open the door to it.
 
 
--- ═══ 11. SEED — the reference data the app expects to find ═════════════════
+-- ═══ 12. SEED — the reference data the app expects to find ═════════════════
 
 insert into hr.bands (code, name, level, next_code, expects) values
   ('L1','Associate',1,'L2','Executes defined tasks with supervision. Owns quality of their own output.'),
