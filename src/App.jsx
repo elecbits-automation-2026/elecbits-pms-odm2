@@ -113,7 +113,15 @@ const ORG_SIZES = [
   { label: "Individuals / Unknown", code: "UN" },
   { label: "Government Organisation", code: "GO" },
 ];
-const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Sr. Hardware Engineer", "Jr. Hardware Engineer", "Sr. Firmware Engineer", "Jr. Firmware Engineer", "Industrial Designer", "Tester / QA", "Supply Chain", "Solution Architect"];
+const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Mfg PM (Manufacturing)", "Sr. Hardware Engineer", "Jr. Hardware Engineer", "Sr. Firmware Engineer", "Jr. Firmware Engineer", "Industrial Designer", "Tester / QA", "Supply Chain", "Solution Architect"];
+
+/* ─── THE ID GRAMMAR (EbODM spec 04-09-26) ────────────────────────────────
+   Design + manufacturing project IDs: Eb-21-EL-287-01-1809 — Elecbits, year,
+   vertical, client account, sub-account, registrar serial. A derived project
+   appends exactly ONE suffix block (…-1279-D-2) and is never suffixed again.
+   Legacy projects predate the grammar, so the form warns; it does not block. */
+const EB_PID_RE = /^EB-\d{2}-[A-Z0-9]{2,6}-\d{1,5}-\d{1,4}-\d{1,6}(-[A-Z]{1,3}-\d{1,4})?$/;
+const matchesIdGrammar = (id) => EB_PID_RE.test(String(id || "").trim().toUpperCase());
 
 /* ─── WHO CAN BE PUT IN A SLOT ────────────────────────────────────────────
    Two rules, both learned the hard way.
@@ -139,6 +147,8 @@ export const isClient = (u) => u?.role === "client";
 export const clientPeople = (users) => (users || []).filter(isClient);
 
 const SLOT_ROLES = [
+  // before the generic PM rules — "Mfg PM" must never fall through to design PMs
+  [/mfg|manufacturing/i, ["sr_mfg_pm", "jr_mfg_pm"]],
   [/senior pm|technical manager/i, ["sr_pm"]],
   [/^pm|project manager/i, ["sr_pm", "jr_pm"]],
   [/sr\.? hardware/i, ["sr_hw"]],
@@ -2320,6 +2330,13 @@ function ProjectsModule() {
   const isAdmin = my?.role === "superadmin";
   const [addExisting, setAddExisting] = useState(false);
   const [openId, setOpenId] = useState(() => { const v = PENDING_PROJECT_OPEN; PENDING_PROJECT_OPEN = null; return v; });
+  /* Design ⇄ manufacturing cross-links jump between two rows of this very
+     list, so the jump arrives as an event rather than a prop drill. */
+  useEffect(() => {
+    const go = (e) => setOpenId(e.detail);
+    window.addEventListener("eb-open-project", go);
+    return () => window.removeEventListener("eb-open-project", go);
+  }, []);
   /* Everybody sees the Projects page; what a non-admin sees ON it is THEIR
      projects — the ones they are staffed on, created, or carry tasks for.
      Being assigned work on a project and unable to open its plan was how
@@ -2363,6 +2380,8 @@ function ProjectsModule() {
               <div style={{ minWidth: 240, flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: MONO, fontWeight: 600, fontSize: 13.5, color: "var(--acc)" }}>{p.projectId}</span>
+                  {p.kind === "mfg" && <Pill color="var(--purple)">Manufacturing · parent {p.parentId}</Pill>}
+                  {(p.boards || []).some((b) => b.main) && (p.boards || []).length > 1 && <Pill color="var(--txt2)">{(p.boards || []).length} boards</Pill>}
                   {p.idMode === "manual" && <Pill color="var(--txt3)">manual ID</Pill>}
                   {Date.now() - new Date(p.createdAt).getTime() < 7 * 86400000 && <Pill color="var(--green)"><Zap size={10} /> NEW</Pill>}
                 </div>
@@ -2416,8 +2435,19 @@ function AddExistingProject({ onClose }) {
   const [projectId, setProjectId] = useState("");
   const [name, setName] = useState("");
   const [pmId, setPmId] = useState("");
-  const [linked, setLinked] = useState([""]);
-  const [rows, setRows] = useState(TEAM_SLOTS.filter((s) => !s.startsWith("PM")).map((s) => ({ slot: s, userId: "" })));
+  /* Boards, per the ID spec: each carries its full SKU (the folder name) and
+     its short ref (runs, tables, conversation), and the hierarchy is declared
+     HERE, once — one MAIN board, the rest DAUGHTER. Product-level work
+     (enclosure, product assembly, system test, UAT, EOL, packaging) belongs
+     to MAIN only, and every downstream manufacturing run inherits this. */
+  const [boards, setBoards] = useState([{ sku: "", ref: "", main: true }]);
+  /* One design project ID for the PM; optionally ONE manufacturing project
+     ID beside it — its own registrar-issued ID with its own Manufacturing
+     PM, recording this design project as parent. Never a suffix. */
+  const [mfgId, setMfgId] = useState("");
+  const [mfgPmId, setMfgPmId] = useState("");
+  const [mfgRuns, setMfgRuns] = useState("");
+  const [rows, setRows] = useState(TEAM_SLOTS.filter((s) => !s.startsWith("PM") && !s.startsWith("Mfg")).map((s) => ({ slot: s, userId: "" })));
   const [startDate, setStartDate] = useState(todayStr());
   const [deadline, setDeadline] = useState("");
   const [status, setStatus] = useState("In Progress");
@@ -2425,11 +2455,19 @@ function AddExistingProject({ onClose }) {
   const clean = projectId.trim().toUpperCase();
   const dupe = clean && projects.some((p) => normId(p.projectId) === normId(clean));
   const badChars = clean && !/^[A-Z0-9][A-Z0-9-]*$/.test(clean);
-  const valid = clean && !dupe && !badChars && name.trim() && pmId && deadline;
-  const setLink = (i, v) => setLinked((l) => l.map((x, j) => (j === i ? v : x)));
+  const offGrammar = clean && !badChars && !dupe && !matchesIdGrammar(clean);
+  const mfgClean = mfgId.trim().toUpperCase();
+  const mfgDupe = mfgClean && (projects.some((p) => normId(p.projectId) === normId(mfgClean)) || normId(mfgClean) === normId(clean));
+  const mfgOffGrammar = mfgClean && !mfgDupe && !matchesIdGrammar(mfgClean);
+  const runList = mfgRuns.split(/[,\s]+/).map((x) => parseInt(x, 10)).filter((n) => n > 0);
+  const valid = clean && !dupe && !badChars && name.trim() && pmId && deadline
+    && (!mfgClean || (!mfgDupe && mfgPmId));
+  const setBoard = (i, patch) => setBoards((bs) => bs.map((b, j) => (j === i ? { ...b, ...patch } : b)));
+  const makeMain = (i) => setBoards((bs) => bs.map((b, j) => ({ ...b, main: j === i })));
+  const boardIds = () => boards.map((b) => (b.sku.trim() || b.ref.trim()).toUpperCase()).filter(Boolean);
   const setRow = (i, v) => setRows((r) => r.map((x, j) => (j === i ? { ...x, userId: v } : x)));
   const learnFromDrive = async () => {
-    const ids = linked.map((x) => x.trim().toUpperCase()).filter(Boolean);
+    const ids = boardIds();
     setLearnBusy(true);
     const { digest, error: driveErr } = await driveReadDigest(clean, ids, { scope: driveScope(me && users.find((u) => u.id === me)?.role) });
     if (driveErr) toast(driveErr, "amber");
@@ -2447,18 +2485,45 @@ function AddExistingProject({ onClose }) {
       org = { id: uid(), clientId: "", name: newOrg.trim() };
       setClients((cs) => [org, ...cs]);
     }
-    const p = {
-      id: uid(), projectId: clean, idMode: "manual", origin: "existing", name: name.trim(),
+    /* The declared board set: full SKU + short ref + hierarchy, kept both as
+       the rich record and as the flat linkedIds every existing view reads. */
+    const boardMeta = boards
+      .map((b) => ({ sku: b.sku.trim().toUpperCase(), ref: b.ref.trim().toUpperCase(), main: !!b.main }))
+      .filter((b) => b.sku || b.ref);
+    if (boardMeta.length && !boardMeta.some((b) => b.main)) boardMeta[0].main = true;
+    const clientBits = {
       clientName: org?.name || "", clientId: org?.clientId || "", orgId: org?.id || "",
       clientTeam: clientIds.filter((cid) => !org || (users.find((u) => u.id === cid)?.orgId || org.id) === org.id),
+    };
+    const p = {
+      id: uid(), projectId: clean, idMode: "manual", origin: "existing", kind: "design", name: name.trim(),
+      ...clientBits,
       industry: "", orgSize: "", contact: {},
-      linkedIds: linked.map((x) => x.trim().toUpperCase()).filter(Boolean),
+      linkedIds: boardMeta.map((b) => b.sku || b.ref),
+      boards: boardMeta,
+      mfgIds: mfgClean && mfgPmId ? [mfgClean] : [],
       team, startDate, deadline, status, knownStatus: knownStatus.trim(),
       lldCustomer: null, lldDesigner: null, intelligence: [], chat: [],
       driveLearning: learning.trim() || null,
       createdAt: new Date().toISOString(), createdBy: me,
     };
-    setProjects((x) => [p, ...x]);
+    /* The manufacturing project is its own row: its own ID, its own PM, the
+       design project recorded as parent. The boards carry over verbatim —
+       they are immutable across design → manufacturing → every run. */
+    const mfg = mfgClean && mfgPmId ? {
+      id: uid(), projectId: mfgClean, idMode: "manual", origin: "existing", kind: "mfg",
+      parentId: clean, name: `${name.trim()} — Manufacturing`,
+      ...clientBits,
+      industry: "", orgSize: "", contact: {},
+      linkedIds: boardMeta.map((b) => b.sku || b.ref),
+      boards: boardMeta, runQtys: runList,
+      team: [{ slot: "Mfg PM (Manufacturing)", userId: mfgPmId }],
+      startDate, deadline, status: "Planning", knownStatus: "",
+      lldCustomer: null, lldDesigner: null, intelligence: [], chat: [],
+      createdAt: new Date().toISOString(), createdBy: me,
+    } : null;
+    setProjects((x) => [p, ...(mfg ? [mfg] : []), ...x]);
+    if (mfg) sheetSync("Project Data and IDs (Google Sheet)", `${mfgClean} registered (manufacturing, parent ${clean})`);
     // The learning becomes a System Memory note — injected into every AI call,
     // so scrum parsing / task allocation / closure checks on this project use it.
     if (learning.trim()) {
@@ -2476,9 +2541,10 @@ function AddExistingProject({ onClose }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Field label="Project ID" req>
-            <input className="inp" style={{ fontFamily: MONO }} value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="e.g. ESP32-124" />
+            <input className="inp" style={{ fontFamily: MONO }} value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="e.g. Eb-21-EL-287-01-1809" />
             {dupe && <span style={{ color: "var(--red)", fontSize: 11, marginTop: 4 }}>Already exists — IDs must be unique.</span>}
             {badChars && <span style={{ color: "var(--red)", fontSize: 11, marginTop: 4 }}>Letters, numbers and dashes only.</span>}
+            {offGrammar && <span style={{ color: "var(--amber)", fontSize: 11, marginTop: 4 }}>Doesn't match the registrar grammar (Eb-YY-VV-CCC-SS-NNNN, one optional -D-n suffix) — fine for legacy IDs.</span>}
           </Field>
           <Field label="Project name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ESP32 Gateway v2" /></Field>
         </div>
@@ -2523,17 +2589,50 @@ function AddExistingProject({ onClose }) {
             )}
           </Field>
         </div>
-        <Field label="Linked IDs (GW / PCB — add multiple)">
+        <Field label="Boards / PCB IDs — declared once, one MAIN, the rest daughters">
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {linked.map((v, i) => (
-              <div key={i} style={{ display: "flex", gap: 6 }}>
-                <input className="inp" style={{ fontFamily: MONO, flex: 1 }} value={v} onChange={(e) => setLink(i, e.target.value)} placeholder={`e.g. ESP32-124-PCB-R1`} />
-                {linked.length > 1 && <button onClick={() => setLinked((l) => l.filter((_, j) => j !== i))} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--txt3)", cursor: "pointer", padding: "0 10px" }}><X size={13} /></button>}
+            {boards.map((b, i) => (
+              <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <input className="inp" style={{ fontFamily: MONO, flex: 2, minWidth: 190 }} value={b.sku} onChange={(e) => setBoard(i, { sku: e.target.value })} placeholder="full SKU · ES3C3-BL09-LK306-TC2030-GW-119" />
+                <input className="inp" style={{ fontFamily: MONO, width: 96 }} value={b.ref} onChange={(e) => setBoard(i, { ref: e.target.value })} placeholder="GW-119" />
+                <label title="Only the MAIN board carries enclosure, product assembly, system test, UAT, EOL and packaging. Daughters build and test themselves and feed the MAIN build."
+                  style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: b.main ? "var(--acc)" : "var(--txt3)" }}>
+                  <input type="radio" name="eb-main-board" checked={!!b.main} onChange={() => makeMain(i)} /> MAIN
+                </label>
+                {boards.length > 1 && <button onClick={() => setBoards((bs) => { const left = bs.filter((_, j) => j !== i); return left.some((x) => x.main) ? left : left.map((x, j) => ({ ...x, main: j === 0 })); })} style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: "var(--txt3)", cursor: "pointer", padding: "0 10px", height: 30 }}><X size={13} /></button>}
               </div>
             ))}
-            <button onClick={() => setLinked((l) => [...l, ""])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", fontSize: 12.5, cursor: "pointer", display: "flex", gap: 5, alignItems: "center" }}><Plus size={13} /> add linked ID</button>
+            <button onClick={() => setBoards((bs) => [...bs, { sku: "", ref: "", main: false }])} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", fontSize: 12.5, cursor: "pointer", display: "flex", gap: 5, alignItems: "center" }}><Plus size={13} /> add a board</button>
+            <div style={{ fontSize: 10.5, color: "var(--txt3)", lineHeight: 1.5 }}>Full SKU is the folder name; the short ref is what runs and tables use. Board IDs are immutable — they carry verbatim into manufacturing. A single board is MAIN by default.</div>
           </div>
         </Field>
+        {/* THE MANUFACTURING SIDE. Its own registrar-issued project ID, its
+            own Manufacturing PM, this design project recorded as parent. It
+            lands in the Projects list as a linked project of its own. */}
+        <div style={{ border: "1px dashed var(--bdr2)", borderRadius: 11, padding: 13, background: "var(--s2)", display: "flex", flexDirection: "column", gap: 11 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>Manufacturing project (optional — can be added later; repeat orders get a new ID)</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Mfg Project ID">
+              <input className="inp" style={{ fontFamily: MONO }} value={mfgId} onChange={(e) => setMfgId(e.target.value)} placeholder="e.g. Eb-21-EL-287-01-1844" />
+              {mfgDupe && <span style={{ color: "var(--red)", fontSize: 11, marginTop: 4 }}>Already exists — a new version or repeat order gets its own new ID.</span>}
+              {mfgOffGrammar && <span style={{ color: "var(--amber)", fontSize: 11, marginTop: 4 }}>Doesn't match the registrar grammar (Eb-YY-VV-CCC-SS-NNNN) — fine for legacy IDs.</span>}
+            </Field>
+            <Field label="Manufacturing PM" req={!!mfgClean}>
+              <select className="inp" value={mfgPmId} onChange={(e) => setMfgPmId(e.target.value)}>
+                <option value="">— choose Mfg PM —</option>
+                <SlotOptions slot="Mfg PM (Manufacturing)" users={users} />
+              </select>
+            </Field>
+          </div>
+          <Field label="Quantity runs (ordered qty, frozen at issue — comma-separated)">
+            <input className="inp" style={{ fontFamily: MONO }} value={mfgRuns} onChange={(e) => setMfgRuns(e.target.value)} placeholder="e.g. 50, 100, 1000" />
+            {runList.length > 0 && mfgClean && (
+              <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 4, fontFamily: MONO }}>
+                {runList.map((q) => `${mfgClean.split("-").pop()}-${q}`).join(" · ")} — a top-up later is a new run, never an edit.
+              </div>
+            )}
+          </Field>
+        </div>
         <Field label="Team allocated (optional — PM is set above)">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {rows.map((r, i) => (
@@ -2841,7 +2940,7 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
 }
 
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
-  const { tasks, setTasks, users, notes, me, now, setProjects, memory, setMemory, toast, sheetSync } = useCtx();
+  const { tasks, setTasks, users, notes, me, now, projects, setProjects, memory, setMemory, toast, sheetSync } = useCtx();
   const [confirmDel, setConfirmDel] = useState(false);
   const my = users.find((u) => u.id === me);
   const amClient = isClient(my);
@@ -3266,6 +3365,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           <span style={{ color: "var(--bdr2)" }}>/</span>
           <span style={{ fontFamily: MONO, fontWeight: 600, fontSize: 13, color: "var(--acc)" }}>{p.projectId}</span>
           <span style={{ fontWeight: 800, fontSize: 15 }}>{p.name}</span>
+          {p.kind === "mfg" && <Pill color="var(--purple)">Manufacturing</Pill>}
           {sanctioned ? <Pill color="var(--green)"><CheckCircle2 size={11} /> Sanctioned</Pill> : <Pill color="var(--amber)">Planning</Pill>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
             <Pill color={dl < 0 ? "var(--red)" : dl <= 7 ? "var(--amber)" : "var(--txt2)"}><Calendar size={11} /> {fmtDate(p.deadline)} · {dl < 0 ? `${-dl}d over` : `${dl}d left`}</Pill>
@@ -3294,6 +3394,40 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             <Btn small kind="ghost" onClick={() => setConfirmDel(false)}>Cancel</Btn>
           </div>
         )}
+        {/* THE ID CHAIN — the spec's spine, always in view: the boards this
+            project declared (one MAIN, the rest daughters), the manufacturing
+            project(s) it spawned, or — on a manufacturing project — the
+            parent design project and the frozen quantity runs. */}
+        {(() => {
+          const kids = projects.filter((x) => x.kind === "mfg" && x.parentId === p.projectId);
+          const parent = p.kind === "mfg" ? projects.find((x) => normId(x.projectId) === normId(p.parentId || "")) : null;
+          const jump = (id) => window.dispatchEvent(new CustomEvent("eb-open-project", { detail: id }));
+          const serial = String(p.projectId).split("-").pop();
+          if (!(p.boards || []).length && !kids.length && !parent && !(p.runQtys || []).length) return null;
+          return (
+            <div style={{ marginTop: 11, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", fontSize: 11.5 }}>
+              {parent && (
+                <button onClick={() => jump(parent.id)} title="The design project this manufacturing project was spawned from"
+                  style={{ display: "flex", gap: 5, alignItems: "center", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 99, padding: "3px 10px", cursor: "pointer", color: "var(--acc)", fontWeight: 700, fontFamily: MONO }}>
+                  parent: {parent.projectId} ↗
+                </button>
+              )}
+              {p.kind === "mfg" && p.parentId && !parent && <Pill color="var(--txt3)">parent: {p.parentId}</Pill>}
+              {(p.boards || []).map((b) => (
+                <Pill key={b.sku || b.ref} color={b.main ? "var(--acc)" : "var(--txt2)"} title={b.sku}>
+                  {b.ref || b.sku} · {b.main ? "MAIN" : "daughter"}
+                </Pill>
+              ))}
+              {(p.runQtys || []).map((q) => <Pill key={q} color="var(--purple)">{serial}-{q}</Pill>)}
+              {kids.map((k) => (
+                <button key={k.id} onClick={() => jump(k.id)} title="Registrar-issued manufacturing project — its own PM, this project as parent"
+                  style={{ display: "flex", gap: 5, alignItems: "center", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 99, padding: "3px 10px", cursor: "pointer", color: "var(--purple)", fontWeight: 700, fontFamily: MONO }}>
+                  mfg: {k.projectId} ↗
+                </button>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       {/* One page per job. Everything used to stack into one long scroll and
@@ -6323,6 +6457,8 @@ const RESOURCE_ROLES = [
   { key: "sr_hw", label: "Sr. Hardware", tier: "Senior", dept: "Hardware", cap: 6, skills: ["PCB Designing", "Schematic Design", "Altium Designer", "KiCad", "Hardware Debugging", "Signal Integrity", "EMI/EMC"] },
   { key: "sr_fw", label: "Sr. Firmware", tier: "Senior", dept: "Firmware", cap: 6, skills: ["Embedded C/C++", "RTOS", "ESP-IDF", "OTA / Bootloaders", "BLE/Wi-Fi Stacks", "Driver Development"] },
   { key: "sr_pm", label: "Senior PM", tier: "Senior", dept: "Project Management", cap: 6, skills: ["Project Planning", "Risk Management", "Client Communication", "Gantt & Milestones"] },
+  { key: "sr_mfg_pm", label: "Sr. Manufacturing PM", tier: "Senior", dept: "Manufacturing", cap: 6, skills: ["Production Planning", "Vendor & EMS Management", "MCMA / Costing", "Quality Gates (FAI/IPQC/OQC)", "Dispatch & Logistics"] },
+  { key: "jr_mfg_pm", label: "Jr. Manufacturing PM", tier: "Junior", dept: "Manufacturing", cap: 3, skills: ["Run Tracking", "Kitting & Line Clearance", "IQC Follow-up", "Dispatch Documentation"] },
   { key: "jr_hw", label: "Jr. Hardware", tier: "Junior", dept: "Hardware", cap: 3, skills: ["PCB Designing", "Schematic Design", "Altium Designer", "KiCad", "Hardware Debugging", "Component Selection"] },
   { key: "jr_fw", label: "Jr. Firmware", tier: "Junior", dept: "Firmware", cap: 3, skills: ["Embedded C", "Arduino/ESP32", "Peripheral Drivers", "Debugging", "Unit Testing"] },
   { key: "tester", label: "Tester", tier: "Junior", dept: "Testing", cap: 3, skills: ["Test Planning", "Functional Testing", "Test Reports", "Compliance Pre-checks"] },
@@ -6334,7 +6470,7 @@ const RESOURCE_ROLES = [
   { key: "sc", label: "Supply Chain", tier: "Shared", dept: "Supply Chain", cap: 3, skills: ["Sourcing", "BoM Costing", "Vendor Management", "Logistics"] },
 ];
 const rrInfo = (key) => RESOURCE_ROLES.find((r) => r.key === key);
-const DEPT_LIST = ["Hardware", "Firmware", "Industrial Design", "Testing", "Project Management", "Supply Chain", "DevOps", "Solution Architecture", "Soldering & Testing"];
+const DEPT_LIST = ["Hardware", "Firmware", "Industrial Design", "Testing", "Project Management", "Manufacturing", "Supply Chain", "DevOps", "Solution Architecture", "Soldering & Testing"];
 const LOGIN_TYPES = [["superadmin", "Super Admin"], ["pm", "Project Manager"], ["engineer", "Developer"], ["client", "Client (customer side)"]];
 const PROJECT_TYPES = [["engineering", "Engineering Services"], ["elecbits_product", "Elecbits Product"], ["modifier", "Modifier"]];
 const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });

@@ -83,6 +83,7 @@ export const ROLE_TITLES = {
 };
 const RESOURCE_TITLES = {
   jr_pm: "Jr. Project Manager", sr_pm: "Sr. Project Manager",
+  jr_mfg_pm: "Jr. Manufacturing PM", sr_mfg_pm: "Sr. Manufacturing PM",
   jr_fw: "Jr. Firmware Engineer", sr_fw: "Sr. Firmware Engineer",
   jr_hw: "Jr. Hardware Engineer", sr_hw: "Sr. Hardware Engineer",
   sc: "Supply Chain", ind_design: "Industrial Designer", sol_arch: "Solution Architect",
