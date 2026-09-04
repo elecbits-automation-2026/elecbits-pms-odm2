@@ -9259,8 +9259,16 @@ function GanttTab({ p, upd }) {
         <Empty icon={Calendar} title="No plan sheet yet" sub='Upload the project-plan workbook — its "Updated Gantt" tab becomes the chart. Click any bar to comment, pin links, or raise a task with the AI.' />
       ) : (
         <>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--txt3)", fontWeight: 700, marginBottom: 6 }}>
-            <span>{fmtDate(new Date(t0).toISOString().slice(0, 10))}</span><span>{fmtDate(new Date(t1).toISOString().slice(0, 10))}</span>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10.5, color: "var(--txt3)", fontWeight: 700, marginBottom: 6, gap: 10, flexWrap: "wrap" }}>
+            <span>{fmtDate(new Date(t0).toISOString().slice(0, 10))}</span>
+            <span style={{ display: "flex", gap: 12 }}>
+              {[["var(--green)", "Done"], ["var(--amber)", "Going on"], ["var(--red)", "Not started"]].map(([c, l]) => (
+                <span key={l} style={{ display: "inline-flex", gap: 5, alignItems: "center" }}>
+                  <span style={{ width: 14, height: 8, borderRadius: 4, background: c, opacity: 0.9 }} /> {l}
+                </span>
+              ))}
+            </span>
+            <span>{fmtDate(new Date(t1).toISOString().slice(0, 10))}</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {phases.map((ph) => (
@@ -9277,8 +9285,10 @@ function GanttTab({ p, upd }) {
                         {(n.c > 0 || n.l > 0) && <span style={{ fontSize: 9, color: "var(--txt3)", marginLeft: 5 }}>{n.c > 0 ? `💬${n.c}` : ""}{n.l > 0 ? ` 🔗${n.l}` : ""}</span>}
                       </span>
                       <span style={{ position: "relative", flex: 1, height: 15, background: "var(--s2)", borderRadius: 5, minWidth: 90, overflow: "hidden" }}>
-                        <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, bp - a)}%`, top: 0, bottom: 0, borderRadius: 5, background: colOf(ph), opacity: schedState(r) === "pending" ? 0.45 : 0.9 }} />
-                        {todayIn && <span title="today" style={{ position: "absolute", left: `${pct(new Date().toISOString().slice(0, 10))}%`, top: 0, bottom: 0, width: 2, background: "var(--red)", opacity: 0.7, pointerEvents: "none" }} />}
+                        {/* the bar wears its STATE: green done, orange going on, red not started */}
+                        <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, bp - a)}%`, top: 0, bottom: 0, borderRadius: 5,
+                          background: schedState(r) === "done" ? "var(--green)" : schedState(r) === "active" ? "var(--amber)" : "var(--red)", opacity: 0.9 }} />
+                        {todayIn && <span title="today" style={{ position: "absolute", left: `${pct(new Date().toISOString().slice(0, 10))}%`, top: 0, bottom: 0, width: 2, background: "var(--txt)", opacity: 0.55, pointerEvents: "none" }} />}
                       </span>
                       <span style={{ width: 118, flexShrink: 0, fontSize: 10, color: "var(--txt3)", fontFamily: MONO, textAlign: "right" }}>{fmtDate(r.start)} → {fmtDate(r.end)}</span>
                     </button>
