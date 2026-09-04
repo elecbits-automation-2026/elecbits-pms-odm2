@@ -38,7 +38,7 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
          sourceLine, servesOf, templateFor,
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
-         loadProcessMap, loadProcessMapFromUpload, PIN, pinWorkbook, clearPin, SOURCE,
+         loadProcessMap, loadProcessMapFromUpload, adoptSharedMap, PIN, pinWorkbook, clearPin, SOURCE,
          projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES,
          openLinkFor, locationFor, fileTargetFor, driveRootFor, driveFileIdOf } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
@@ -3028,19 +3028,29 @@ function MfgRunSections({ p }) {
   const mfgTasks = tasks.filter((t) => t.projectId === p.projectId);
   /* A step's state inside ONE run: the to-dos naming this run id whose words
      matched this step. No task raised = red, some open = amber, all done. */
+  /* The workbook's own record for THIS run's copy of the step — the FILLED
+     sheet keys its dates and completion by the run id itself. */
+  const wbOf = (s, runId) => {
+    if (!s.when) return null;
+    if (s.when[runId]) return s.when[runId];
+    const k = Object.keys(s.when).find((x) => x.toUpperCase() === runId.toUpperCase());
+    return k ? s.when[k] : null;
+  };
   const stepState = (s, runId) => {
     const mine = mfgTasks.filter((t) => (t.title || "").toUpperCase().includes(runId.toUpperCase()) && matchStep(t)?.no === s.no);
-    if (!mine.length) return "pending";
+    if (!mine.length) return wbOf(s, runId)?.status || "pending";
     return mine.every((t) => t.status === "done") ? "done" : "active";
   };
   const row = (s, runId, board = "") => {
     const st = stepState(s, runId);
-    const link = openLinkFor(s, board);
+    const link = openLinkFor(s, board || runId);
+    const wb = wbOf(s, runId);
     return (
       <div key={`${s.no}-${board}`} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "4px 0", fontSize: 11.5, flexWrap: "wrap" }}>
         <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st), flexShrink: 0, alignSelf: "center" }} />
         <span style={{ fontFamily: MONO, color: "var(--txt3)", width: 34, flexShrink: 0 }}>{s.no}</span>
         <span style={{ color: "var(--txt)", flex: 1, minWidth: 200 }}>{s.step}</span>
+        {wb?.start && <span style={{ fontFamily: MONO, fontSize: 9.5, color: "var(--txt3)" }}>{fmtDate(wb.start)} → {fmtDate(wb.end || wb.start)}</span>}
         {link && <a href={link} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", fontWeight: 700, textDecoration: "none", fontSize: 10.5 }}>Open ↗</a>}
         <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{s.responsibility || s.owner || ""}</span>
       </div>
@@ -3282,6 +3292,50 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const slotUser = (slot) => teamDraft.find((t) => t.slot === slot)?.userId || "";
   const setSlot = (slot, userId) => setTeamDraft((td) => { const rest = td.filter((t) => t.slot !== slot); return userId ? [...rest, { slot, userId }] : rest; });
   const saveTeam = () => { upd({ team: teamDraft.filter((t) => t.userId) }); setEditTeam(false); toast("Team updated", "green"); };
+  /* "Execute this": a pasted slot→person table (or a WhatsApp-style list)
+     fills the dropdowns in one go. Names match the roster loosely — first
+     name is enough — and every slot stays editable before Save. */
+  const pasteTeam = (text) => {
+    const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const people = users.filter(isRealPerson);
+    const findPerson = (frag) => {
+      const f = norm(frag);
+      if (!f || f === "person") return null;
+      return people.find((u) => norm(u.name) === f)
+        || people.find((u) => norm(u.name).startsWith(f) || norm(u.name.split(/\s+/)[0]) === f)
+        || people.find((u) => norm(u.name).includes(f));
+    };
+    const SLOT_ALIASES = [
+      [/enclosure|industrialdesign/, "Industrial Designer"],
+      [/(sr|senior)hardware|srhw/, "Sr. Hardware Engineer"],
+      [/(jr|junior)hardware|jrhw/, "Jr. Hardware Engineer"],
+      [/(sr|senior)firmware|srfw/, "Sr. Firmware Engineer"],
+      [/(jr|junior)firmware|jrfw/, "Jr. Firmware Engineer"],
+      [/supplychain|procurement|sourcing/, "Supply Chain"],
+      [/tester|qa\b|testqa/, "Tester / QA"],
+      [/mfg|manufacturing/, "Mfg PM (Manufacturing)"],
+      [/(senior|sr)pm|technicalmanager/, "Senior PM (Technical Manager)"],
+      [/solutionarchitect/, "Solution Architect"],
+      [/projectmanager|^pm\b/, "PM (Project Manager)"],
+    ];
+    const slotFor = (frag) => {
+      const f = norm(frag);
+      if (!f || f === "slot") return null;
+      const hit = SLOT_ALIASES.find(([re]) => re.test(f));
+      if (hit) return TEAM_SLOTS.find((s) => s.startsWith(hit[1])) || hit[1];
+      return TEAM_SLOTS.find((s) => norm(s).includes(f) || f.includes(norm(s)));
+    };
+    let filled = 0;
+    for (const line of String(text || "").split(/\n+/)) {
+      const parts = line.split(/\t| {2,}|\s+[—–:-]\s+/).map((x) => x.trim()).filter(Boolean);
+      if (parts.length < 2) continue;
+      const person = findPerson(parts[parts.length - 1]);
+      const slot = slotFor(parts.slice(0, -1).join(" "));
+      if (slot && person) { setSlot(slot, person.id); filled++; }
+    }
+    return filled;
+  };
+  const [teamPaste, setTeamPaste] = useState("");
   /* Put every to-do under the stage it belongs to. The keyword pass files the
      obvious ones on the spot; the AI does the rest, because most of the
      judgement is about what the work IS rather than what it is called — a
@@ -3955,6 +4009,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             <CardLabel right={isPM && <button onClick={() => { setTeamDraft(p.team || []); setEditTeam(!editTeam); }} style={{ background: "none", border: "none", color: editTeam ? "var(--txt2)" : "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editTeam ? "Cancel" : "Edit team"}</button>}>Team roster</CardLabel>
             {editTeam ? (
               <div>
+                {/* the WhatsApp path: paste "Slot<tab>Person" lines (or
+                    "Senior - Arun" style) and the dropdowns fill themselves */}
+                <div style={{ marginBottom: 10 }}>
+                  <textarea className="inp" rows={3} value={teamPaste} onChange={(e) => setTeamPaste(e.target.value)}
+                    placeholder={"Paste the team, one per line:\nSr. Hardware Engineer\tArun\nSupply Chain\tChhavi"} />
+                  <Btn small kind="ghost" icon={Sparkles} style={{ marginTop: 6 }} disabled={!teamPaste.trim()}
+                    onClick={() => { const n = pasteTeam(teamPaste); toast(n ? `${n} slot${n === 1 ? "" : "s"} filled — check and Save` : "Couldn't match any line — use Slot [tab] Name", n ? "green" : "amber"); }}>
+                    Fill from paste
+                  </Btn>
+                </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                   {TEAM_SLOTS.map((slot) => (
                     <div key={slot} style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -7994,10 +8058,14 @@ function tasksByStep(tasks = [], boards = []) {
   }
   return { open, done };
 }
-function stepStatus(stepNo, todosByStep, doneByStep, board = "") {
+function stepStatus(stepNo, todosByStep, doneByStep, board = "", base = "") {
   const mine = (list) => (list || []).filter((t) => !board || !t._board || t._board === board);
   const open = mine(todosByStep[stepNo]);
   const closed = mine(doneByStep[stepNo]);
+  /* No task has touched this step — the FILLED workbook's own completion
+     column is the record then: what the project already did before this
+     tool existed must not show red. */
+  if (!open.length && !closed.length && base) return base;
   /* A to-do RAISED is not work STARTED. Red means nobody has touched it —
      and a freshly raised, still-pending task is exactly that. Orange needs
      somebody to have actually begun (in-progress or blocked), or the step to
@@ -8077,7 +8145,7 @@ function stagesFromProcess(p, users, tasks = []) {
        shows this list, because "35 steps of the process" answers nothing. */
     const steps = mine.map((r) => ({
       no: r.no, title: r.title, who: nameOf(r.assigneeId), start: r.start, end: r.end,
-      status: stepStatus(r.no, open, done, r.board),
+      status: stepStatus(r.no, open, done, r.board, r.wbStatus || ""),
     }));
     const doneN = steps.filter((x) => x.status === "done").length;
     const activeN = steps.filter((x) => x.status === "active").length;
@@ -8352,6 +8420,15 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         onStage: (line) => setWbModal((m) => (m ? { ...m, lines: [...m.lines, line] } : m)),
       });
       if (r.error) { setWbModal((m) => (m ? { ...m, done: true, error: r.error } : m)); setSrcNote(r.error); return; }
+      /* Into the SHARED workspace — an upload that only this browser can see
+         is not the method, it is a private copy. */
+      let sharedOk = false;
+      if (r.share && appCtx.saveProcessWb) {
+        sharedOk = await appCtx.saveProcessWb(r.share);
+        setWbModal((m) => (m ? { ...m, lines: [...m.lines, sharedOk
+          ? "Shared to the workspace — every login (clients included) reads this plan now"
+          : "Could not reach the workspace store — this browser has it; others will after a re-upload"] } : m));
+      }
       setWbModal((m) => (m ? { ...m, done: true, summary: r } : m));
       setSrcNote(`${file.name}: ${r.steps} steps adopted as the method`);
     } catch (e) {
@@ -8586,7 +8663,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                   <span style={{ fontSize: 12.5, fontWeight: 700 }}>{b.name}</span>
                   <span style={{ fontSize: 11, color: "var(--txt3)" }}>{list.length} step{list.length === 1 ? "" : "s"}{mine && list.length !== b.steps ? ` of ${b.steps}` : ""}</span>
                   {(() => {
-                    const st = list.map((r) => stepStatus(r.no, todosByStep, doneByStep, r.board));
+                    const st = list.map((r) => stepStatus(r.no, todosByStep, doneByStep, r.board, r.wbStatus || ""));
                     const d = st.filter((x) => x === "done").length, a = st.filter((x) => x === "active").length;
                     return (
                       <span style={{ display: "inline-flex", gap: 7, fontSize: 10, fontWeight: 700 }}>
@@ -8736,7 +8813,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                             </td>
                             <td style={{ ...td, fontSize: 10.5 }}>
                               {(() => {
-                                const st = stepStatus(r.no, todosByStep, doneByStep, r.board);
+                                const st = stepStatus(r.no, todosByStep, doneByStep, r.board, r.wbStatus || "");
                                 return (
                                   <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: planColor(st), fontWeight: 700 }}>
                                     <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st), flexShrink: 0 }} />
@@ -10771,8 +10848,26 @@ export default function App() {
       try { const a = await window.storage.get("pms-v1-a"); if (a?.value) { const d = JSON.parse(a.value); if (d.projects) setProjects(d.projects); if (d.clients) setClients(d.clients); if (d.accounts?.length) setAccounts(d.accounts); if (d.notes) setNotes(d.notes); if (d.tasks) setTasks(d.tasks); } } catch (e) { }
       try { const b = await window.storage.get("pms-v1-b"); if (b?.value) { const d = JSON.parse(b.value); if (d.kpiLog) setKpiLog(d.kpiLog); if (d.workUpdates) setWorkUpdates(d.workUpdates); if (d.trainings) setTrainings(d.trainings); if (d.memory) setMemory(d.memory); if (d.syncLog) setSyncLog(d.syncLog); if (d.roster) setCustomRoster(d.roster); if (d.assistantLog) setAssistantLog(d.assistantLog); } } catch (e) { }
     }
+    /* The process workbook somebody uploaded — shared workspace state, so a
+       fresh browser, a teammate, a CLIENT login all read the same plan. */
+    try {
+      const wb = supabaseEnabled
+        ? await cloudGet("pms-v1-wb")
+        : JSON.parse((await window.storage.get("pms-v1-wb"))?.value || "null");
+      if (wb && adoptSharedMap(wb)) window.dispatchEvent(new Event("eb-process-map"));
+    } catch { /* no shared workbook yet */ }
     setBooted(true);
   })(); }, [session, cloudGet, toast]);
+  /* Saving the uploaded workbook INTO that shared state is what makes an
+     upload count for everyone rather than one browser's localStorage. */
+  const saveProcessWb = useCallback(async (share) => {
+    const payload = JSON.stringify({ ...share, savedAt: new Date().toISOString() });
+    try {
+      if (supabaseEnabled) await cloudSet("pms-v1-wb", payload);
+      else await window.storage.set("pms-v1-wb", payload);
+      return true;
+    } catch { return false; }
+  }, [cloudSet]);
 
   /* debounced save — merge first, then write, then mirror to real tables */
   useEffect(() => { if (!booted) return; const t = setTimeout(async () => {
@@ -10968,7 +11063,7 @@ export default function App() {
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
-  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin };
+  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin, saveProcessWb };
   const visGroups = NAV_GROUPS
     // A role-gated item stays HIDDEN until the roster has answered who this
     // is — showing it to an engineer for the first slow seconds is how

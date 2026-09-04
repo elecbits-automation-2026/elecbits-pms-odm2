@@ -432,6 +432,10 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
     // which, and the Split Rule column declaring how the step instances
     board: col(/^board$/),
     splitRule: col(/^split rule/),
+    // the FILLED layout: the project's own timeline and completion, per row
+    start: col(/^start date/),
+    end: col(/^end date/),
+    status: col(/^completion status|^status$/),
     // EVERY per-board link column, not just the first: one project workbook
     // carries one "Open — <board>" column per PCB, and each is a source.
     opens: H.map((h, i) => (/^open\b/.test(h) ? i : -1)).filter((i) => i >= 0),
@@ -455,6 +459,28 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
     "project": "project", "board": "board", "board-main": "board-main",
     "mfg-project": "mfg-project", "mfg-run": "mfg-run",
     "mfg-runxboard": "mfg-run-board", "mfg-run-build": "mfg-run-build",
+  };
+  /* Whatever shape a date arrives in — "15-Mar-2026", an ISO string, a
+     dd/mm/yyyy, or Excel's serial number — it leaves as YYYY-MM-DD. */
+  const MONTHS = "janfebmaraprmayjunjulaugsepoctnovdec";
+  const isoDate = (v) => {
+    if (v == null || v === "") return "";
+    if (typeof v === "string" && /^\d{5}$/.test(v.trim())) v = Number(v.trim());
+    if (typeof v === "number" && v > 20000) {
+      const d = new Date(Math.round((v - 25569) * 86400000));
+      return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+    }
+    const sv = String(v).trim();
+    let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(sv); if (m) return m[0];
+    m = /^(\d{1,2})[-/ ]([A-Za-z]{3,9})[-/ ](\d{4})$/.exec(sv);
+    if (m) { const mo = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()); if (mo >= 0) return `${m[3]}-${String(mo / 3 + 1).padStart(2, "0")}-${String(m[1]).padStart(2, "0")}`; }
+    m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(sv);
+    if (m) return `${m[3]}-${String(m[2]).padStart(2, "0")}-${String(m[1]).padStart(2, "0")}`;
+    const d = new Date(sv); return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+  };
+  const wbState = (v) => {
+    const sv = String(v || "").toLowerCase();
+    return /complete|done/.test(sv) ? "done" : /progress|ongoing|started/.test(sv) ? "active" : /block/.test(sv) ? "blocked" : "";
   };
   const steps = [];
   const byNo = new Map();
@@ -518,12 +544,27 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
     if (master) st.masterLink = st.masterLink || master;
     const loc = cell("location");
     if (loc) { if (boardKey) st.locations[boardKey] = st.locations[boardKey] || loc; st.location = st.location || loc; }
+    /* The FILLED copy's timeline: every row — board copy, run copy — keeps
+       its own dates and completion, keyed the same way its link is. */
+    if (C.start >= 0 || C.status >= 0) {
+      const tstart = C.start >= 0 ? isoDate(r[C.start]) : "";
+      const tend = C.end >= 0 ? isoDate(r[C.end]) : "";
+      const tstat = C.status >= 0 ? wbState(r[C.status]) : "";
+      if (tstart || tend || tstat) {
+        st.when = st.when || {};
+        if (!st.when[boardKey]) st.when[boardKey] = { start: tstart, end: tend, status: tstat };
+        if (!st.wbStart && tstart) { st.wbStart = tstart; st.wbEnd = tend; }
+        if (!st.wbStatus && tstat) st.wbStatus = tstat;
+      }
+    }
   }
   if (!steps.length) return { error: `${file.name} opened, but its Process Flow tab has no step rows.` };
   say(`Process Flow parsed — ${flow.length - headerRow - 1} rows folded to ${steps.length} steps · ${linkedCount(steps)} carry their own file links`);
   {
     const scoped = steps.filter((s) => s.scope).length;
     if (scoped) say(`Split Rules read — ${scoped} steps declare their scope (${steps.filter((s) => /^mfg-/.test(s.scope)).length} manufacturing)`);
+    const timed = steps.filter((s) => s.wbStart || s.when).length;
+    if (timed) say(`Timelines read — ${timed} steps carry the project's own dates · ${steps.filter((s) => s.wbStatus === "done").length} already marked complete`);
   }
 
   const templates = {};
@@ -693,7 +734,25 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
   say("Adopted as the method ✓");
   const linked = steps.filter((x) => x.openLink).length;
   return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked,
-           projectCopy: projectCopy?.projectId || "" };
+           projectCopy: projectCopy?.projectId || "",
+           /* the parsed map, ready to be saved into the SHARED workspace so
+              every login — clients included — reads this same plan */
+           share: { map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy }, source: { ...SOURCE } } };
+}
+
+/* A workbook somebody uploaded ANYWHERE, arriving through the shared
+   workspace state. Adopted unless this browser holds a newer upload of its
+   own; saved into the local slots so it survives reloads here too. */
+export function adoptSharedMap(payload) {
+  if (!payload?.map?.steps?.length) return false;
+  const newer = String(payload.source?.fetchedAt || "") > String(SOURCE.fetchedAt || "");
+  if (SOURCE.from === "upload" && !newer) return false;
+  adopt(payload.map);
+  Object.assign(SOURCE, payload.source, { from: "upload", error: "" });
+  const packed = JSON.stringify({ map: payload.map, source: { ...SOURCE } });
+  try { localStorage.setItem(UPLOAD_KEY, packed); } catch { /* quota — in-memory only */ }
+  try { localStorage.setItem(CACHE_KEY, packed); } catch { /* cache is optional */ }
+  return true;
 }
 
 /* Whose copy the loaded workbook is, if it is one. */
@@ -1272,6 +1331,9 @@ export function buildPlan(project, users = [], opts = {}) {
     return instances.map((board) => {
       const useBoard = board || pcbId;
       const roots = rootsFor(useBoard);
+      /* The workbook's own timeline for THIS board's copy of the step beats
+         any schedule computed here — the FILLED copy is the record. */
+      const wb = s.when ? (byBoard(s.when, board) || null) : null;
       return {
       key: board ? `${s.no}:${board}` : String(s.no),
       board,
@@ -1322,8 +1384,9 @@ export function buildPlan(project, users = [], opts = {}) {
       guidelines: s.guidelines,
       responsibility: s.responsibility,
       assigneeId: whoDoes(s, project, users),
-      start: w.start || start,
-      end: w.end || end,
+      start: (wb && wb.start) || s.wbStart || w.start || start,
+      end: (wb && wb.end) || s.wbEnd || wb?.start || s.wbStart || w.end || end,
+      wbStatus: (wb && wb.status) || s.wbStatus || "",
       parallel: !!w.parallel,
       wave: w.wave || "",
       };
