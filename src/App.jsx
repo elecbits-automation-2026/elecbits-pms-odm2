@@ -2711,6 +2711,8 @@ const projTabsFor = (role) => (role === "client" ? PROJ_TABS.filter(([k]) => k !
 const PROJ_TABS = [
   ["overview", "Overview", Gauge, ""],
   ["plan", "Plan", ListChecks, "plan"],
+  ["swim", "Swimlane", GitBranch, ""],
+  ["sop", "SOPs", FileText, "sop"],
   ["tasks", "To-dos", CheckCircle2, "tasks"],
   ["mom", "Brainstorming", Lightbulb, "mom"],
   ["files", "Report", FileText, ""],
@@ -2831,7 +2833,7 @@ function AskClientModal({ p, onClose }) {
    proposal and confirms; what lands on the board is the exact same task shape
    the Elecbits team's own to-dos have, so it files, groups and closes like
    any of them. */
-function PlanAddTaskModal({ p, onClose }) {
+function PlanAddTaskModal({ p, onClose, seed }) {
   const { users, tasks, setTasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const projTasks = useMemo(() => tasks.filter((t) => t.projectId === p.projectId), [tasks, p.projectId]);
@@ -2855,7 +2857,7 @@ function PlanAddTaskModal({ p, onClose }) {
     if (metas.length) return metas;
     return boardsOf(p).map((id, i) => ({ ref: id, main: i === 0 }));
   }, [p.boards, p.linkedIds]);
-  const [desc, setDesc] = useState("");
+  const [desc, setDesc] = useState(seed || "");
   const [due, setDue] = useState("");
   const [busy, setBusy] = useState(false);
   const [prop, setProp] = useState(null);   // {why, rows: [{title, assigneeId, date, hours, block, board}]}
@@ -3806,7 +3808,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           on screen when you are actually doing it. */}
       <div className="card" style={{ padding: "0 14px", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", overflowX: "auto" }}>
         {projTabsFor(my?.role).map(([k, label, Ic, badge]) => {
-          const n = badge === "tasks" ? openTasks.length : badge === "mom" ? (p.moms || []).length : badge === "plan" ? (p.plan?.stages || []).length : 0;
+          const n = badge === "tasks" ? openTasks.length : badge === "mom" ? (p.moms || []).length : badge === "plan" ? (p.plan?.stages || []).length : badge === "sop" ? (p.sops || []).length : 0;
           return (
             <button key={k} data-ptab={k} onClick={() => setTab(k)}
               style={{ display: "flex", alignItems: "center", gap: 7, padding: "12px 14px", background: "none", border: "none", borderBottom: `2px solid ${tab === k ? "var(--acc)" : "transparent"}`, color: tab === k ? "var(--acc)" : "var(--txt2)", fontWeight: tab === k ? 700 : 600, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", transition: "all .15s" }}>
@@ -3985,6 +3987,10 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           )}
 
           {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onAddTask={() => setAddTask(true)} myName={my?.name} meId={my?.id} />}
+
+          {tab === "swim" && <SwimlaneBoard p={p} upd={upd} />}
+
+          {tab === "sop" && <SopTab p={p} upd={upd} />}
 
           {tab === "mom" && (
           <Section>
@@ -9082,6 +9088,241 @@ function StageDetail({ stage, tasks, users, onClose }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* ─── SWIMLANE — the process as a diagram: one lane per discipline, one box
+   per block, in sequence. A box opens into conversation: comments, links to
+   the real documents, and the same AI "add a task" the plan carries — so the
+   diagram is a place work starts, not a picture of it. ─────────────────── */
+const SWIM_LANES = [
+  ["PM & Governance", /./],   // fallback lane — matched last
+  ["Hardware", /hardware/i],
+  ["Firmware", /firmware/i],
+  ["Enclosure", /enclosure/i],
+  ["Test & DFx", /test|dfx/i],
+  ["Commercial & SCS", /commercial/i],
+  ["Build & Manufacturing", /prototype|pilot|mass production|incoming|bb\b|bb —|packaging|dispatch/i],
+];
+const swimLaneOf = (block) => {
+  const name = `${block.category || ""} ${block.name || ""}`;
+  for (const [lane, re] of SWIM_LANES.slice(1)) if (re.test(name)) return lane;
+  return SWIM_LANES[0][0];
+};
+
+function SwimBoxModal({ p, upd, b, status, onClose, onAiTask }) {
+  const { users, me, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const notes = (p.swimNotes || {})[b.id] || { comments: [], links: [] };
+  const [text, setText] = useState("");
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const write = (patch) => upd((cur) => ({
+    swimNotes: { ...(cur.swimNotes || {}), [b.id]: { comments: notes.comments, links: notes.links, ...patch } },
+  }));
+  const addComment = () => {
+    if (!text.trim()) return;
+    write({ comments: [...notes.comments, { id: uid(), by: me, byName: my?.name || "someone", at: new Date().toISOString(), text: text.trim() }] });
+    setText("");
+  };
+  const addLink = () => {
+    const url = linkUrl.trim();
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) { toast("Links start with http(s)://", "amber"); return; }
+    write({ links: [...notes.links, { id: uid(), label: linkLabel.trim() || url.replace(/^https?:\/\//, "").slice(0, 40), url }] });
+    setLinkLabel(""); setLinkUrl("");
+  };
+  return (
+    <Modal title={b.label || `${b.id} · ${b.name}`} sub={`${b.steps || "—"} steps · ${p.projectId} · comments and links live on this box for everyone`} onClose={onClose} width={620}
+      footer={<>
+        <Btn kind="ghost" icon={Sparkles} onClick={onAiTask}>Add a task with AI</Btn>
+        <Btn kind="green" icon={CheckCircle2} onClick={onClose}>Done</Btn>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <Pill color={planColor(status)}>{planLabel(status)}</Pill>
+          <span style={{ fontSize: 11.5, color: "var(--txt3)" }}>{b.category}</span>
+        </div>
+        <Field label={`Links (${notes.links.length}) — the documents this box runs on`}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {notes.links.map((l) => (
+              <div key={l.id} style={{ display: "flex", gap: 7, alignItems: "baseline" }}>
+                <a href={l.url} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", fontWeight: 700, fontSize: 12.5, textDecoration: "none" }}>{l.label} ↗</a>
+                <button onClick={() => write({ links: notes.links.filter((x) => x.id !== l.id) })} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", fontSize: 11 }}>remove</button>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <input className="inp" style={{ flex: 1, minWidth: 110 }} value={linkLabel} onChange={(e) => setLinkLabel(e.target.value)} placeholder="label · e.g. DFM notes" />
+              <input className="inp" style={{ flex: 2, minWidth: 170, fontFamily: MONO }} value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} placeholder="https://…" />
+              <Btn small kind="ghost" icon={Plus} onClick={addLink}>Add link</Btn>
+            </div>
+          </div>
+        </Field>
+        <Field label={`Comments (${notes.comments.length})`}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7, maxHeight: 220, overflowY: "auto" }}>
+            {notes.comments.map((c) => (
+              <div key={c.id} style={{ borderLeft: "2px solid var(--acc)", paddingLeft: 9 }}>
+                <div style={{ fontSize: 11, color: "var(--txt3)" }}><b style={{ color: "var(--txt)" }}>{c.byName}</b> · {fmtDate(c.at.slice(0, 10))}</div>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>{c.text}</div>
+              </div>
+            ))}
+            {!notes.comments.length && <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>Nothing said on this box yet.</div>}
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <input className="inp" style={{ flex: 1 }} value={text} onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addComment()} placeholder="Say it here — everyone on the project sees it" />
+            <Btn small icon={Send} onClick={addComment}>Post</Btn>
+          </div>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+/* ─── SOPs — the standard operating procedures this project runs on. Named
+   links (Docs, Slides, Sheets), added one by one or pasted as a list, kept
+   on the project for everyone including the client side. ───────────────── */
+function SopTab({ p, upd }) {
+  const { users, me, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const readOnly = isClient(my);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [bulk, setBulk] = useState("");
+  const sops = p.sops || [];
+  const kindOf = (u) => /presentation/.test(u) ? "Slides" : /spreadsheets/.test(u) ? "Sheet" : /document/.test(u) ? "Doc" : "Link";
+  const addOne = (label, link, { silent = false } = {}) => {
+    const clean = String(link || "").trim();
+    if (!/^https?:\/\//i.test(clean)) { if (!silent) toast("A SOP link starts with http(s)://", "amber"); return false; }
+    const title = String(label || "").trim() || clean.replace(/^https?:\/\//, "").slice(0, 50);
+    upd((cur) => ({ sops: [...(cur.sops || []), { id: uid(), title, url: clean, by: me, byName: my?.name || "", at: new Date().toISOString() }] }));
+    return true;
+  };
+  const addBulk = () => {
+    let n = 0;
+    for (const line of bulk.split(/\n+/)) {
+      const m = /^(.*?)\s*[—–:\-]*\s*(https?:\/\/\S+)/.exec(line.trim());
+      if (m && addOne(m[1].replace(/[—–:\-\s]+$/, ""), m[2], { silent: true })) n++;
+    }
+    setBulk("");
+    toast(n ? `${n} SOP${n === 1 ? "" : "s"} added` : "No 'Name - link' lines found in the paste", n ? "green" : "amber");
+  };
+  return (
+    <Section>
+      <CardLabel right={<Pill color="var(--acc)">{sops.length} SOP{sops.length === 1 ? "" : "s"}</Pill>}>Standard Operating Procedures</CardLabel>
+      <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.55, marginBottom: 12 }}>
+        The procedures this project is built and shipped by — flashing, assembly, test. Everyone on the project (client side included) opens them from here.
+      </div>
+      {sops.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--txt3)", marginBottom: 12 }}>No SOPs pinned yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
+          {sops.map((s) => (
+            <div key={s.id} style={{ display: "flex", alignItems: "baseline", gap: 9, border: "1px solid var(--bdr)", borderRadius: 10, padding: "9px 12px", background: "var(--s1)", flexWrap: "wrap" }}>
+              <Pill color="var(--txt2)">{kindOf(s.url)}</Pill>
+              <a href={s.url} target="_blank" rel="noreferrer" style={{ fontWeight: 700, fontSize: 13, color: "var(--acc)", textDecoration: "none", flex: 1, minWidth: 180 }}>{s.title} ↗</a>
+              <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{s.byName}{s.at ? ` · ${fmtDate(s.at.slice(0, 10))}` : ""}</span>
+              {!readOnly && <button onClick={() => upd((cur) => ({ sops: (cur.sops || []).filter((x) => x.id !== s.id) }))}
+                style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer" }}><X size={13} /></button>}
+            </div>
+          ))}
+        </div>
+      )}
+      {!readOnly && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+            <input className="inp" style={{ flex: 1, minWidth: 150 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Name · e.g. Code flashing SOP" />
+            <input className="inp" style={{ flex: 2, minWidth: 200, fontFamily: MONO }} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://docs.google.com/…" />
+            <Btn small icon={Plus} onClick={() => { if (addOne(name, url)) { setName(""); setUrl(""); } }}>Add SOP</Btn>
+          </div>
+          <div>
+            <textarea className="inp" rows={3} value={bulk} onChange={(e) => setBulk(e.target.value)}
+              placeholder={"Or paste a list, one per line:\nCode flashing SOP - https://docs.google.com/document/d/…\nAssembly SOP - https://docs.google.com/document/d/…"} />
+            <Btn small kind="ghost" icon={Sparkles} style={{ marginTop: 6 }} disabled={!bulk.trim()} onClick={addBulk}>Add all from paste</Btn>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function SwimlaneBoard({ p, upd }) {
+  const { users, tasks, me } = useCtx();
+  const projTasks = useMemo(() => tasks.filter((t) => t.projectId === p.projectId), [tasks, p.projectId]);
+  const [mapAt, setMapAt] = useState(0);
+  useEffect(() => {
+    const bump = () => setMapAt((n) => n + 1);
+    window.addEventListener("eb-process-map", bump);
+    return () => window.removeEventListener("eb-process-map", bump);
+  }, []);
+  const stages = useMemo(() => stagesFromProcess(p, users, projTasks), [p, users, projTasks, mapAt]);
+  const [open, setOpen] = useState(null);     // block
+  const [aiFor, setAiFor] = useState(null);   // block → PlanAddTaskModal seeded
+  /* One box per block of the loaded method; its light is the worst of its
+     board lanes, so a blocked board shows on the box. */
+  const statusOf = (b) => {
+    const mine = stages.filter((s) => s.id.startsWith(`block-${String(b.id).toLowerCase()}`));
+    if (!mine.length) return "pending";
+    if (mine.some((s) => s.status === "blocked")) return "blocked";
+    if (mine.every((s) => s.status === "done")) return "done";
+    if (mine.some((s) => s.status === "active" || s.status === "done")) return "active";
+    return "pending";
+  };
+  const blocks = [...BLOCKS].sort((a, b2) => (a.seq || 0) - (b2.seq || 0));
+  const lanes = SWIM_LANES.map(([name]) => ({ name, boxes: [] }));
+  blocks.forEach((b, i) => {
+    const lane = lanes.find((l) => l.name === swimLaneOf(b)) || lanes[0];
+    lane.boxes.push({ b, col: i });
+  });
+  const used = lanes.filter((l) => l.boxes.length);
+  const noteCount = (b) => {
+    const n = (p.swimNotes || {})[b.id];
+    return { c: n?.comments?.length || 0, l: n?.links?.length || 0 };
+  };
+  return (
+    <Section>
+      {open && <SwimBoxModal p={p} upd={upd} b={open} status={statusOf(open)} onClose={() => setOpen(null)}
+        onAiTask={() => { const b = open; setOpen(null); setAiFor(b); }} />}
+      {aiFor && <PlanAddTaskModal p={p} seed={`In ${aiFor.label || `${aiFor.id} · ${aiFor.name}`}: `} onClose={() => setAiFor(null)} />}
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Swimlane — the method by discipline</span>
+        <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>Click a box: comment, pin links, or hand the AI a task for that block.</span>
+      </div>
+      <div style={{ overflowX: "auto", paddingBottom: 6 }}>
+        <div style={{ minWidth: Math.max(700, blocks.length * 128) }}>
+          {used.map((lane) => (
+            <div key={lane.name} style={{ display: "flex", alignItems: "stretch", borderBottom: "1px dashed var(--bdr2)" }}>
+              <div style={{ width: 118, flexShrink: 0, padding: "12px 8px", fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".05em", display: "flex", alignItems: "center", borderRight: "1px solid var(--bdr2)" }}>{lane.name}</div>
+              <div style={{ position: "relative", flex: 1, height: 84 }}>
+                {lane.boxes.map(({ b, col }) => {
+                  const st = statusOf(b);
+                  const n = noteCount(b);
+                  return (
+                    <button key={b.id} onClick={() => setOpen(b)} title={`${b.label || b.name} — click to comment, link, or raise a task`}
+                      style={{ position: "absolute", left: col * 124 + 8, top: 10, width: 112, height: 62,
+                        border: `1.5px solid ${planColor(st)}`, borderRadius: 9, background: "var(--s1)", cursor: "pointer",
+                        display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, padding: "6px 8px", textAlign: "left" }}>
+                      <span style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 800, color: planColor(st) }}>{b.id}</span>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt)", lineHeight: 1.25, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{b.name}</span>
+                      <span style={{ display: "flex", gap: 6, fontSize: 8.5, color: "var(--txt3)", fontWeight: 700 }}>
+                        {n.c > 0 && <span>💬 {n.c}</span>}{n.l > 0 && <span>🔗 {n.l}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10.5, color: "var(--txt3)", flexWrap: "wrap" }}>
+        {["done", "active", "blocked", "pending"].map((k) => (
+          <span key={k} style={{ display: "inline-flex", gap: 5, alignItems: "center" }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, border: `1.5px solid ${planColor(k)}` }} /> {planLabel(k)}
+          </span>
+        ))}
+      </div>
+    </Section>
   );
 }
 
