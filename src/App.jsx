@@ -1224,6 +1224,7 @@ PROJECT FOLDER: ${pmPath(p.projectId)}
 LINKED BOARD FOLDERS: ${(p.linkedIds || []).map((x) => `${pcbPath(x)}`).join(", ") || "none linked"}
 ${driveData ? `WHAT IS ACTUALLY IN THOSE FOLDERS RIGHT NOW — the full listing plus the text inside the files:\n"""${driveData}"""` : "The Drive read came back empty this time — reason from the known status and the intelligence log below."}
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
+${projectDigest(p)}
 KNOWN STATUS (human-written): """${(p.knownStatus || "not provided").slice(0, 1500)}"""
 MANUAL INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 1500) || "none"}
 Write plain text (no markdown symbols), under 220 words, with these labelled lines: WHERE IT STANDS, HOW IT IS MOVING, RISKS / BLOCKERS, NEXT MOVES. Be concrete and reference the folders, files and IDs above.`;
@@ -1242,7 +1243,7 @@ The file goes into that project's folder in Drive exactly as they sent it. Alway
 ${attachCtx(atts, fresh)}
 WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})
 TODAY: ${todayStr()}
-PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 120)}` : ""}`).join("\n") || "none yet"}
+PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 120)}` : ""}${p.files ? ` · files: ${p.files}` : ""}${p.talk ? ` · ${p.talk} comments on its boxes/files/bars (open the project chat to read them)` : ""}`).join("\n") || "none yet"}
 OPEN TASKS (${ctx.openTasks.length}): ${ctx.openTasks.slice(0, 30).map((t) => `${t.title} — ${t.who} · ${t.projectId || "no project"} · ${t.status}${t.when ? ` · ${t.when}` : ""}`).join("\n") || "none"}
 TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} (${u.title})${u.load ? ` — ${u.load} open` : ""}`).join(", ")}
 RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 160)}`).join(" | ") || "none"}
@@ -1367,7 +1368,7 @@ ${CHAT_STYLE}
 ${ASSISTANT_ACTIONS}
 WHO IS ASKING: ${ctx.meName} (${ctx.meTitle})${ctx.isAdmin ? " — an admin, so anything goes" : ""}
 TODAY: ${todayStr()} ${nowHM()}
-PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · team ${p.teamNames || "none"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 140)}` : ""}`).join("\n") || "none yet"}
+PROJECTS (${ctx.projects.length}): ${ctx.projects.map((p) => `${p.projectId} "${p.name}" · ${p.status} · due ${p.deadline || "?"} · PM ${p.pmName || "unassigned"} · team ${p.teamNames || "none"} · ${p.done}/${p.total} tasks done${p.knownStatus ? ` · status: ${p.knownStatus.slice(0, 140)}` : ""}${p.files ? ` · files: ${p.files}` : ""}${p.talk ? ` · ${p.talk} comments on its boxes/files/bars` : ""}`).join("\n") || "none yet"}
 OPEN TASKS (${ctx.openTasks.length}): ${ctx.openTasks.slice(0, 40).map((t) => `${t.title} — ${t.who} · ${t.projectId || "no project"} · ${t.status}${t.when ? ` · ${t.when}` : ""}`).join("\n") || "none"}
 TEAM (${ctx.team.length}): ${ctx.team.map((u) => `${u.name} — ${u.title}${u.dept ? `, ${u.dept}` : ""} · ${u.load} open task(s)`).join("\n")}
 RECENT SCRUM NOTES: ${ctx.notes.slice(0, 5).map((n) => `${n.date}: ${String(n.raw).slice(0, 200)}`).join(" | ") || "none"}
@@ -1747,6 +1748,29 @@ const CHAT_STYLE = `HOW TO TALK — you are speaking to busy project managers an
 - Answer the question first, in the first sentence. Details after. Under 150 words unless asked for more.
 - No markdown symbols, no bullet characters like * or #. Use plain lines.`;
 
+/* Everything the project's tabs hold that an assistant should know: the
+   boards and manufacturing chain, the SOPs & files shelf, every comment and
+   pinned link left on swimlane boxes, files and gantt bars, and the plan
+   sheet's own activities and dates. Compact, human-written, authoritative. */
+const projectDigest = (p) => {
+  const bits = [];
+  if ((p.boards || []).length) bits.push(`BOARDS: ${p.boards.map((b) => `${b.ref || b.sku}${b.main ? " (MAIN)" : ""}`).join(", ")}`);
+  if (p.kind === "mfg") bits.push(`MANUFACTURING PROJECT — parent design project ${p.parentId || "?"}${(p.runQtys || []).length ? ` · quantity runs: ${p.runQtys.join(", ")}` : ""}`);
+  else if ((p.mfgIds || []).length) bits.push(`MANUFACTURING PROJECT(S): ${p.mfgIds.join(", ")}`);
+  if ((p.sops || []).length) bits.push(`SOPs & FILES pinned on the project:\n${p.sops.map((s) => `- ${s.title} (${s.url})`).join("\n")}`);
+  const nameOf = {};
+  for (const s of p.sops || []) nameOf[s.id] = s.title;
+  for (const r of p.gantt?.rows || []) nameOf[r.id] = r.activity;
+  const talkOf = (store, label) => Object.entries(p[store] || {}).flatMap(([id, n]) => [
+    ...(n.comments || []).map((c) => `- [${label}: ${nameOf[id] || id}] ${c.byName} (${String(c.at).slice(0, 10)}): ${c.text}`),
+    ...(n.links || []).map((l) => `- [${label}: ${nameOf[id] || id}] pinned link: ${l.label} ${l.url}`),
+  ]);
+  const talk = [...talkOf("swimNotes", "block"), ...talkOf("sopNotes", "file"), ...talkOf("ganttNotes", "gantt bar")];
+  if (talk.length) bits.push(`COMMENTS & PINNED LINKS (left on swimlane boxes, files and gantt bars — real people wrote these):\n${talk.slice(-40).join("\n")}`);
+  if (p.gantt?.rows?.length) bits.push(`PROJECT PLAN SHEET (gantt "${p.gantt.tab}" from ${p.gantt.fileName}, uploaded by ${p.gantt.byName}):\n${p.gantt.rows.map((r) => `- ${r.phase} · ${r.activity}: ${r.start} → ${r.end}`).join("\n")}`);
+  return bits.length ? `PROJECT CONTEXT FROM THE TABS (authoritative — answer from it and cite it):\n${bits.join("\n")}`.slice(0, 5000) : "";
+};
+
 const projChatPrompt = (p, projTasks, users, history, q, memory, driveData, atts, fresh = true) => `You are the project assistant for ${p.name || p.projectId} at Elecbits. Help the person in front of you get their answer fast.
 ${CHAT_STYLE}
 The information below is everything you can see, including this project's Google Drive folders AND the text inside the files there, read for you just now. Treat all of it as your own knowledge — you looked at these documents yourself. Never tell the user to go and fetch or paste files for you.
@@ -1778,6 +1802,7 @@ PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.
 TEAM: ${(p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", ") || "none"}
 LINKED IDS: ${(p.linkedIds || []).join(", ") || "none"} | project folder ${pmPath(p.projectId)}
 KNOWN STATUS: """${(p.knownStatus || "—").slice(0, 800)}"""
+${projectDigest(p)}
 INTELLIGENCE LOG: ${(p.intelligence || []).map((e) => e.text).join(" | ").slice(0, 800) || "—"}
 ${driveData ? `THE PROJECT'S DRIVE — the whole folder tree and the text inside the files, read just now:\n"""${driveData}"""` : "No Drive files came back this time. Answer from the project notes above without mentioning Drive at all."}
 LAST SAVED DRIVE ANALYSIS: """${(p.driveAnalysis?.text || "—").slice(0, 800)}"""
@@ -9729,6 +9754,8 @@ function WorkspaceChat() {
         const ts = tasks.filter((t) => t.projectId === p.projectId);
         return { projectId: p.projectId, name: p.name, status: p.status, deadline: p.deadline, knownStatus: p.knownStatus,
           pmName: users.find((u) => u.id === (p.team || []).find((t) => t.slot.startsWith("PM"))?.userId)?.name,
+          files: (p.sops || []).map((s) => s.title).slice(0, 6).join(", "),
+          talk: ["swimNotes", "sopNotes", "ganttNotes"].reduce((n, k) => n + Object.values(p[k] || {}).reduce((m, x) => m + (x.comments?.length || 0), 0), 0),
           done: ts.filter((t) => t.status === "done").length, total: ts.length };
       }),
       openTasks: tasks.filter((t) => t.status !== "done").map((t) => ({
@@ -9881,6 +9908,8 @@ function AssistantModule() {
       return { projectId: p.projectId, name: p.name, status: p.status, deadline: p.deadline, knownStatus: p.knownStatus,
         pmName: users.find((u) => u.id === (p.team || []).find((t) => t.slot.startsWith("PM"))?.userId)?.name,
         teamNames: (p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`).join(", "),
+        files: (p.sops || []).map((s) => s.title).slice(0, 6).join(", "),
+        talk: ["swimNotes", "sopNotes", "ganttNotes"].reduce((n, k) => n + Object.values(p[k] || {}).reduce((m, x) => m + (x.comments?.length || 0), 0), 0),
         done: ts.filter((t) => t.status === "done").length, total: ts.length };
     }),
     openTasks: tasks.filter((t) => t.status !== "done").map((t) => ({
