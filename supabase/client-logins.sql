@@ -1,21 +1,47 @@
 -- ─── CLIENT LOGINS — the customer's own people, on the shared org list ──────
 -- A client is somebody from the customer's side with a login of their own.
 -- They sit on the same roster as staff (one people table, one auth), marked
--- role = 'client', and they are tied to the company they belong to —
--- core.orgs, the list Sales, the PMS tools and Finance already share.
+-- role = 'client', and they carry the id of the company they belong to.
+--
+-- The company id is TEXT, not uuid: the app mints its own short ids for
+-- companies (and mirrors them to core.orgs), so the column must take them
+-- as they are. This script also converts a column an earlier run created
+-- as uuid.
 --
 -- Run once, in the Supabase SQL editor. Safe to re-run.
 
 -- 1. Which company this person belongs to. Null for staff, set for clients.
-alter table core.people
-  add column if not exists org_id uuid references core.orgs(id) on delete set null;
+alter table core.people add column if not exists org_id text;
+
+do $$
+declare fk text;
+begin
+  -- an earlier run made it uuid with a foreign key to core.orgs; loosen both
+  select con.conname into fk
+  from pg_constraint con
+  join pg_class rel on rel.oid = con.conrelid
+  join pg_namespace ns on ns.oid = rel.relnamespace
+  where ns.nspname = 'core' and rel.relname = 'people' and con.contype = 'f'
+    and exists (
+      select 1 from unnest(con.conkey) k
+      join pg_attribute a on a.attrelid = rel.oid and a.attnum = k
+      where a.attname = 'org_id');
+  if fk is not null then
+    execute format('alter table core.people drop constraint %I', fk);
+  end if;
+  if exists (select 1 from information_schema.columns
+             where table_schema = 'core' and table_name = 'people'
+               and column_name = 'org_id' and data_type = 'uuid') then
+    execute 'alter table core.people alter column org_id type text using org_id::text';
+  end if;
+end $$;
 
 create index if not exists people_org_idx on core.people (org_id) where org_id is not null;
 
 comment on column core.people.org_id is
-  'For role = client: the customer organisation this person belongs to. Staff
-   rows leave it null. Joins the login to core.orgs so a client sees only the
-   projects their own company is named on.';
+  'For role = client: the id of the customer company this person belongs to
+   (the app''s company id, mirrored to core.orgs). Staff rows leave it null.
+   It scopes a client login to the projects their own company is named on.';
 
 -- 2. The app writes 'client' as a role; whatever check constraint the column
 --    carries must accept it. Rebuilt only if one exists.
@@ -44,11 +70,30 @@ alter table core.people
 --    app enforces this in the UI; this is the same rule at the database, so a
 --    stolen token cannot walk past it.
 do $$
+declare fk text;
 begin
   if exists (select 1 from pg_tables where schemaname = 'core' and tablename = 'projects') then
-    execute 'alter table core.projects add column if not exists org_id uuid references core.orgs(id) on delete set null';
+    -- the policy depends on the column, so it goes first
+    execute 'drop policy if exists projects_client_read on core.projects';
+    execute 'alter table core.projects add column if not exists org_id text';
+    select con.conname into fk
+    from pg_constraint con
+    join pg_class rel on rel.oid = con.conrelid
+    join pg_namespace ns on ns.oid = rel.relnamespace
+    where ns.nspname = 'core' and rel.relname = 'projects' and con.contype = 'f'
+      and exists (
+        select 1 from unnest(con.conkey) k
+        join pg_attribute a on a.attrelid = rel.oid and a.attnum = k
+        where a.attname = 'org_id');
+    if fk is not null then
+      execute format('alter table core.projects drop constraint %I', fk);
+    end if;
+    if exists (select 1 from information_schema.columns
+               where table_schema = 'core' and table_name = 'projects'
+                 and column_name = 'org_id' and data_type = 'uuid') then
+      execute 'alter table core.projects alter column org_id type text using org_id::text';
+    end if;
     execute $p$
-      drop policy if exists projects_client_read on core.projects;
       create policy projects_client_read on core.projects for select
       using (
         exists (

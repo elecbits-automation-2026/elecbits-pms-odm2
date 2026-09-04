@@ -10413,6 +10413,14 @@ export default function App() {
        than lose the whole record on a workspace that has not migrated. */
     const full = { ...row, auth_id: u.authId || null, org_id: u.orgId || null };
     let { error } = await withLayoutRetry(supabase, () => tbl(supabase, "people").upsert(full));
+    /* "invalid input syntax for type uuid" = the workspace's org_id column is
+       still uuid-typed while the app's company ids are short strings — the
+       updated client-logins.sql converts it to text. Until then, save the
+       person without the company link rather than losing the whole row. */
+    if (error && u.orgId && /invalid input syntax for type uuid/i.test(error.message || "")) {
+      ({ error } = await withLayoutRetry(supabase, () =>
+        tbl(supabase, "people").upsert({ ...row, auth_id: u.authId || null })));
+    }
     if (error && /org_id/.test(error.message || "")) {
       ({ error } = await withLayoutRetry(supabase, () =>
         tbl(supabase, "people").upsert({ ...row, auth_id: u.authId || null })));
