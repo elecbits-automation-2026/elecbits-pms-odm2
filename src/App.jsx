@@ -2713,7 +2713,7 @@ const PROJ_TABS = [
   ["plan", "Plan", ListChecks, "plan"],
   ["swim", "Swimlane", GitBranch, ""],
   ["gantt", "Gantt", Calendar, ""],
-  ["sop", "SOPs", FileText, "sop"],
+  ["sop", "SOPs & Files", FileText, "sop"],
   ["tasks", "To-dos", CheckCircle2, "tasks"],
   ["mom", "Brainstorming", Lightbulb, "mom"],
   ["files", "Report", FileText, ""],
@@ -9113,7 +9113,7 @@ const swimLaneOf = (block) => {
   return SWIM_LANES[0][0];
 };
 
-function SwimBoxModal({ p, upd, b, status, onClose, onAiTask, storeKey = "swimNotes" }) {
+function SwimBoxModal({ p, upd, b, status, onClose, onAiTask, storeKey = "swimNotes", noLinks = false }) {
   const { users, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const notes = (p[storeKey] || {})[b.id] || { comments: [], links: [] };
@@ -9146,7 +9146,7 @@ function SwimBoxModal({ p, upd, b, status, onClose, onAiTask, storeKey = "swimNo
           <Pill color={planColor(status)}>{planLabel(status)}</Pill>
           <span style={{ fontSize: 11.5, color: "var(--txt3)" }}>{b.category}</span>
         </div>
-        <Field label={`Links (${notes.links.length}) — the documents this box runs on`}>
+        {!noLinks && <Field label={`Links (${notes.links.length}) — the documents this box runs on`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             {notes.links.map((l) => (
               <div key={l.id} style={{ display: "flex", gap: 7, alignItems: "baseline" }}>
@@ -9160,7 +9160,7 @@ function SwimBoxModal({ p, upd, b, status, onClose, onAiTask, storeKey = "swimNo
               <Btn small kind="ghost" icon={Plus} onClick={addLink}>Add link</Btn>
             </div>
           </div>
-        </Field>
+        </Field>}
         <Field label={`Comments (${notes.comments.length})`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 7, maxHeight: 220, overflowY: "auto" }}>
             {notes.comments.map((c) => (
@@ -9303,7 +9303,16 @@ function SopTab({ p, upd }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [bulk, setBulk] = useState("");
+  const [renaming, setRenaming] = useState(null);   // {id, value}
+  const [talk, setTalk] = useState(null);           // sop entry → comments modal
+  const [aiFor, setAiFor] = useState(null);         // sop entry → AI add-task
   const sops = p.sops || [];
+  const noteCount = (s) => ((p.sopNotes || {})[s.id]?.comments?.length || 0);
+  const rename = () => {
+    if (!renaming?.value.trim()) { setRenaming(null); return; }
+    upd((cur) => ({ sops: (cur.sops || []).map((x) => (x.id === renaming.id ? { ...x, title: renaming.value.trim() } : x)) }));
+    setRenaming(null);
+  };
   const kindOf = (u) => /presentation/.test(u) ? "Slides" : /spreadsheets/.test(u) ? "Sheet" : /document/.test(u) ? "Doc" : "Link";
   const addOne = (label, link, { silent = false } = {}) => {
     const clean = String(link || "").trim();
@@ -9323,18 +9332,39 @@ function SopTab({ p, upd }) {
   };
   return (
     <Section>
-      <CardLabel right={<Pill color="var(--acc)">{sops.length} SOP{sops.length === 1 ? "" : "s"}</Pill>}>Standard Operating Procedures</CardLabel>
+      {talk && <SwimBoxModal p={p} upd={upd} storeKey="sopNotes" noLinks status="active"
+        b={{ id: talk.id, label: talk.title, category: kindOf(talk.url), sub: `${kindOf(talk.url)} · ${p.projectId} · comments live on this file for everyone` }}
+        onClose={() => setTalk(null)} onAiTask={() => { const s = talk; setTalk(null); setAiFor(s); }} />}
+      {aiFor && <PlanAddTaskModal p={p} seed={`Regarding the file "${aiFor.title}": `} onClose={() => setAiFor(null)} />}
+      <CardLabel right={<Pill color="var(--acc)">{sops.length} file{sops.length === 1 ? "" : "s"}</Pill>}>SOPs &amp; Files</CardLabel>
       <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.55, marginBottom: 12 }}>
-        The procedures this project is built and shipped by — flashing, assembly, test. Everyone on the project (client side included) opens them from here.
+        The procedures and key files this project is built and shipped by. Everyone on the project (client side included) opens them, comments on them, and can hand the AI a task about one.
       </div>
       {sops.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: "var(--txt3)", marginBottom: 12 }}>No SOPs pinned yet.</div>
+        <div style={{ fontSize: 12.5, color: "var(--txt3)", marginBottom: 12 }}>No files pinned yet.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
           {sops.map((s) => (
             <div key={s.id} style={{ display: "flex", alignItems: "baseline", gap: 9, border: "1px solid var(--bdr)", borderRadius: 10, padding: "9px 12px", background: "var(--s1)", flexWrap: "wrap" }}>
               <Pill color="var(--txt2)">{kindOf(s.url)}</Pill>
-              <a href={s.url} target="_blank" rel="noreferrer" style={{ fontWeight: 700, fontSize: 13, color: "var(--acc)", textDecoration: "none", flex: 1, minWidth: 180 }}>{s.title} ↗</a>
+              {renaming?.id === s.id ? (
+                <span style={{ display: "flex", gap: 6, flex: 1, minWidth: 200 }}>
+                  <input className="inp" autoFocus style={{ flex: 1 }} value={renaming.value}
+                    onChange={(e) => setRenaming({ id: s.id, value: e.target.value })}
+                    onKeyDown={(e) => e.key === "Enter" && rename()} />
+                  <Btn small kind="green" icon={CheckCircle2} onClick={rename}>Save</Btn>
+                </span>
+              ) : (
+                <a href={s.url} target="_blank" rel="noreferrer" style={{ fontWeight: 700, fontSize: 13, color: "var(--acc)", textDecoration: "none", flex: 1, minWidth: 180 }}>{s.title} ↗</a>
+              )}
+              <button onClick={() => setTalk(s)} title="Comments on this file — and the AI add-a-task"
+                style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: noteCount(s) ? "var(--acc)" : "var(--txt3)", cursor: "pointer", fontSize: 11, fontWeight: 700, padding: "2px 9px" }}>
+                💬 {noteCount(s) || ""}
+              </button>
+              {!readOnly && renaming?.id !== s.id && (
+                <button onClick={() => setRenaming({ id: s.id, value: s.title })} title="Rename"
+                  style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer" }}><Pencil size={12} /></button>
+              )}
               <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{s.byName}{s.at ? ` · ${fmtDate(s.at.slice(0, 10))}` : ""}</span>
               {!readOnly && <button onClick={() => upd((cur) => ({ sops: (cur.sops || []).filter((x) => x.id !== s.id) }))}
                 style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer" }}><X size={13} /></button>}
