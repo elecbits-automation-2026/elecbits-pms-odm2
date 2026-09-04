@@ -130,7 +130,13 @@ const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Sr
    firmware engineers and project managers with nothing to separate them.
    Nobody is BLOCKED — a stand-in is a real thing — but the people whose
    resource role matches the slot are grouped at the top under it.        */
-export const isRealPerson = (u) => !!u && u.id !== "u-admin" && !/^admin$/i.test(u.name || "");
+export const isRealPerson = (u) => !!u && u.id !== "u-admin" && !/^admin$/i.test(u.name || "") && u.role !== "client";
+/* A client is somebody from the customer's side with a login of their own.
+   They are on the roster so they can be named on a project and given review
+   work — but they are not staff: they never fill an Elecbits team slot, and
+   they see only the projects they are named on. */
+export const isClient = (u) => u?.role === "client";
+export const clientPeople = (users) => (users || []).filter(isClient);
 
 const SLOT_ROLES = [
   [/senior pm|technical manager/i, ["sr_pm"]],
@@ -2309,7 +2315,7 @@ const ChoiceCard = ({ title, sub, icon: Ic, onClick, on }) => (
 let PENDING_PROJECT_OPEN = null;
 
 function ProjectsModule() {
-  const { projects, setProjects, users, me, tasks, sheetSync, toast } = useCtx();
+  const { projects, setProjects, users, me, tasks, clients, sheetSync, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = my?.role === "superadmin";
   const [addExisting, setAddExisting] = useState(false);
@@ -2320,7 +2326,12 @@ function ProjectsModule() {
      people ended up working blind. */
   const seesAll = ["superadmin", "dept_head"].includes(my?.role);
   const myProjIds = useMemo(() => new Set(tasks.filter((t) => t.assigneeId === me && t.projectId).map((t) => t.projectId)), [tasks, me]);
-  const visibleProjects = seesAll ? projects
+  /* A client sees their own company's projects: the ones they are named on,
+     and any project belonging to their organisation. Never anything else —
+     this is another customer's account. */
+  const visibleProjects = isClient(my)
+    ? projects.filter((p) => (p.clientTeam || []).includes(me) || (my.orgId && p.orgId === my.orgId))
+    : seesAll ? projects
     : projects.filter((p) => (p.team || []).some((x) => x.userId === me) || p.createdBy === me || myProjIds.has(p.projectId));
   const setStatus = (id, status) => { setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status } : p))); sheetSync("Project Data and IDs (Google Sheet)", `Status → ${status}`); };
   // A deep link (Key Accounts row) opens only what this person may see.
@@ -2333,11 +2344,15 @@ function ProjectsModule() {
           <div style={{ fontWeight: 700, fontSize: 15 }}>Projects</div>
           <div style={{ fontSize: 12.5, color: "var(--txt2)", marginTop: 3 }}>Add an in-flight project by ID — PM, linked IDs, team, timeline and its known status. The OS reads its PM + PCB Drive folders and tells you how it's moving.</div>
         </div>
-        {isAdmin ? <Btn icon={Plus} onClick={() => setAddExisting(true)}>Add existing project</Btn> : <Pill color="var(--txt2)"><Shield size={11} /> Adding is admin-only</Pill>}
+        {isAdmin ? <Btn icon={Plus} onClick={() => setAddExisting(true)}>Add existing project</Btn>
+          : isClient(my) ? <Pill color="var(--acc)"><Building2 size={11} /> {clients.find((c) => c.id === my.orgId)?.name || "Client"} view</Pill>
+          : <Pill color="var(--txt2)"><Shield size={11} /> Adding is admin-only</Pill>}
       </div>
       {visibleProjects.length === 0 ? (
-        <div className="card"><Empty icon={FolderPlus} title={seesAll ? "No projects yet" : "No projects assigned to you yet"}
-          sub={seesAll ? "Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it."
+        <div className="card"><Empty icon={FolderPlus}
+          title={isClient(my) ? "No projects shared with you yet" : seesAll ? "No projects yet" : "No projects assigned to you yet"}
+          sub={isClient(my) ? "Your Elecbits project manager adds you to a project and it appears here — with its plan, its progress and the reviews waiting on you."
+             : seesAll ? "Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it."
                        : "Projects appear here once you are on a project's team or carry a task on one — ask your admin to staff you."} /></div>
       ) : visibleProjects.map((p) => {
         const dl = daysLeft(p.deadline);
@@ -2387,7 +2402,15 @@ function ProjectsModule() {
    timeline, and a known-status paragraph. No LLD gates — this is an existing
    project the OS starts tracking (Drive intelligence lives in the detail view). */
 function AddExistingProject({ onClose }) {
-  const { projects, setProjects, users, me, toast, sheetSync, memory, setMemory } = useCtx();
+  const { projects, setProjects, clients, setClients, users, me, toast, sheetSync, memory, setMemory } = useCtx();
+  /* WHOSE project this is, and WHO on their side is involved. The company
+     comes from the shared org list; the people are client logins already on
+     the roster (they signed up, an admin marked them client). Naming them
+     here is what lets them see this project at all. */
+  const [orgId, setOrgId] = useState("");
+  const [newOrg, setNewOrg] = useState("");
+  const [clientIds, setClientIds] = useState([]);
+  const orgClients = useMemo(() => clientPeople(users).filter((u) => !orgId || u.orgId === orgId), [users, orgId]);
   const [learning, setLearning] = useState("");
   const [learnBusy, setLearnBusy] = useState(false);
   const [projectId, setProjectId] = useState("");
@@ -2417,9 +2440,18 @@ function AddExistingProject({ onClose }) {
   const submit = () => {
     if (!valid) return;
     const team = [{ slot: "PM (Project Manager)", userId: pmId }, ...rows.filter((r) => r.userId)];
+    /* A company typed here joins the shared org list, so the next project —
+       and Sales — pick it from the same place. */
+    let org = clients.find((c) => c.id === orgId);
+    if (!org && newOrg.trim()) {
+      org = { id: uid(), clientId: "", name: newOrg.trim() };
+      setClients((cs) => [org, ...cs]);
+    }
     const p = {
       id: uid(), projectId: clean, idMode: "manual", origin: "existing", name: name.trim(),
-      clientName: "", clientId: "", industry: "", orgSize: "", contact: {},
+      clientName: org?.name || "", clientId: org?.clientId || "", orgId: org?.id || "",
+      clientTeam: clientIds.filter((cid) => !org || (users.find((u) => u.id === cid)?.orgId || org.id) === org.id),
+      industry: "", orgSize: "", contact: {},
       linkedIds: linked.map((x) => x.trim().toUpperCase()).filter(Boolean),
       team, startDate, deadline, status, knownStatus: knownStatus.trim(),
       lldCustomer: null, lldDesigner: null, intelligence: [], chat: [],
@@ -2458,6 +2490,38 @@ function AddExistingProject({ onClose }) {
             </select>
           </Field>
           <Field label="Status"><select className="inp" value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((s) => <option key={s.k} value={s.k}>{s.k}</option>)}</select></Field>
+        </div>
+        {/* THE CLIENT SIDE. Naming people here is what gives them the login's
+            view of this project — and who can be named is who has signed up
+            and been marked a client. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Client company">
+            <select className="inp" value={orgId} onChange={(e) => { setOrgId(e.target.value); setClientIds([]); }}>
+              <option value="">— internal / not set —</option>
+              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              <option value="__new">+ a company not on the list…</option>
+            </select>
+            {orgId === "__new" && (
+              <input className="inp" style={{ marginTop: 6 }} value={newOrg} onChange={(e) => setNewOrg(e.target.value)} placeholder="Company name, e.g. Schneider Electric" />
+            )}
+          </Field>
+          <Field label="People from the client on this project">
+            {orgClients.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.5, padding: "6px 0" }}>
+                Nobody from the client has a login yet. They sign up at the app's front door; then, in Resources, set their login type to <b>Client</b> and pick their company — they'll appear here.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 120, overflowY: "auto" }}>
+                {orgClients.map((u) => (
+                  <label key={u.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, cursor: "pointer" }}>
+                    <input type="checkbox" checked={clientIds.includes(u.id)}
+                      onChange={() => setClientIds((x) => (x.includes(u.id) ? x.filter((y) => y !== u.id) : [...x, u.id]))} />
+                    {u.name} <span style={{ color: "var(--txt3)", fontSize: 11 }}>{u.title}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </Field>
         </div>
         <Field label="Linked IDs (GW / PCB — add multiple)">
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2513,6 +2577,10 @@ function AddExistingProject({ onClose }) {
    Daily-Scrum tasks linked to this project; layout mirrors the PMS ProjectPage. */
 const projTasksCount = (tasks, pid) => tasks.filter((t) => t.projectId === pid).length;
 /* The project page, one job at a time. */
+/* What a client sees of a project: everything that IS the project — where it
+   stands, the plan, the to-dos, the brainstorms, the reports — but not the
+   internal email desk, which carries our side of the correspondence. */
+const projTabsFor = (role) => (role === "client" ? PROJ_TABS.filter(([k]) => k !== "email") : PROJ_TABS);
 const PROJ_TABS = [
   ["overview", "Overview", Gauge, ""],
   ["plan", "Plan", ListChecks, "plan"],
@@ -2582,14 +2650,209 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
 const Section = ({ children, style }) => <div className="card" style={{ padding: 16, ...style }}>{children}</div>;
 const CardLabel = ({ children, right }) => <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 12 }}><span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>{children}</span>{right}</div>;
 
+/* ═══ ASK THE CLIENT ══════════════════════════════════════════════════════
+   Review, approval, a decision only they can make — it becomes THEIR task,
+   on their own board, with the one thing an email never carries: what is
+   waiting on it. A dependency written down is why the answer comes back. */
+function AskClientModal({ p, onClose }) {
+  const { users, setTasks, me, toast } = useCtx();
+  const contacts = (p.clientTeam || []).map((id) => users.find((u) => u.id === id)).filter(Boolean);
+  const [who, setWho] = useState(contacts[0]?.id || "");
+  const [title, setTitle] = useState("");
+  const [dependency, setDependency] = useState("");
+  const [due, setDue] = useState(todayStr());
+  const ok = who && title.trim() && dependency.trim();
+  const raise = () => {
+    if (!ok) return;
+    setTasks((ts) => [{
+      id: uid(), projectId: p.projectId, linked: true, title: title.trim(),
+      assigneeId: who, date: due, startTime: "10:00", endTime: "18:00",
+      steps: [], conditions: [], status: "pending", origin: "client-review",
+      dependency: dependency.trim(), createdBy: me, createdAt: new Date().toISOString(), work: {},
+    }, ...ts]);
+    toast(`Asked ${users.find((u) => u.id === who)?.name || "the client"} — it is on their board now`, "green");
+    onClose();
+  };
+  return (
+    <Modal title="Ask the client to review" sub={`${p.projectId} · it becomes their task, with the dependency written on it`} onClose={onClose} width={560}
+      footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="green" icon={CheckCircle2} disabled={!ok} onClick={raise}>Send it to them</Btn></>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+        <Field label="Who on the client side" req>
+          <select className="inp" value={who} onChange={(e) => setWho(e.target.value)}>
+            {contacts.map((u) => <option key={u.id} value={u.id}>{u.name} · {u.title}</option>)}
+          </select>
+        </Field>
+        <Field label="What you need from them" req>
+          <input className="inp" value={title} onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Review and approve the enclosure CAD (Rev B)" />
+        </Field>
+        <Field label="What waits on it — write the dependency" req>
+          <textarea className="inp" rows={3} value={dependency} onChange={(e) => setDependency(e.target.value)}
+            placeholder="e.g. Tooling cannot be released until this is approved; every day of delay moves first-article by a day." />
+        </Field>
+        <Field label="Needed by"><input type="date" className="inp" value={due} onChange={(e) => setDue(e.target.value)} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+/* "Add a task" — anyone on the project (client login included) describes what
+   has to happen, and the AI answers with the placement a PM would have worked
+   out by hand: which block of the process it belongs to, who on the team
+   should carry it, what date fits the block's window, and whether it is too
+   big for one sitting and must be split into subtasks. The person edits the
+   proposal and confirms; what lands on the board is the exact same task shape
+   the Elecbits team's own to-dos have, so it files, groups and closes like
+   any of them. */
+function PlanAddTaskModal({ p, onClose }) {
+  const { users, tasks, setTasks, me, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const projTasks = useMemo(() => tasks.filter((t) => t.projectId === p.projectId), [tasks, p.projectId]);
+  const lanes = useMemo(() => stagesFromProcess(p, users, projTasks), [p, users, projTasks]);
+  /* Everyone the task could land on: the named team, the client's own people,
+     and whoever is asking — a client's task can sit with the client. */
+  const candidates = useMemo(() => {
+    const ids = [...new Set([
+      ...(p.team || []).map((t) => t.userId),
+      ...(p.clientTeam || []),
+      me,
+    ])].filter(Boolean);
+    return ids.map((id) => users.find((u) => u.id === id)).filter(Boolean);
+  }, [p.team, p.clientTeam, users, me]);
+  const [desc, setDesc] = useState("");
+  const [due, setDue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [prop, setProp] = useState(null);   // {block, why, rows: [{title, assigneeId, date, hours}]}
+  const nameToId = (name) => {
+    const n = String(name || "").trim().toLowerCase();
+    if (!n) return me;
+    const hit = candidates.find((u) => u.name.toLowerCase() === n)
+      || candidates.find((u) => u.name.toLowerCase().includes(n) || n.includes(u.name.toLowerCase()))
+      || users.find((u) => u.name.toLowerCase() === n);
+    return hit?.id || me;
+  };
+  const clamp = (h) => Math.min(8, Math.max(1, Math.round(Number(h) || 4)));
+  const propose = async () => {
+    if (!desc.trim() || busy) return;
+    setBusy(true);
+    try {
+      const r = await claude(
+        `You place a new task into a running electronics-product project.
+Project ${p.projectId} — ${p.name || ""}. Today is ${todayStr()}. Project deadline: ${p.deadline || "not set"}.
+The plan is these blocks, each with its date window:
+${lanes.map((s) => `- ${s.name}: ${s.start || "?"} → ${s.end || "?"}`).join("\n") || "- (no plan dates yet)"}
+The people who can carry a task:
+${candidates.map((u) => `- ${u.name} (${u.title || u.role})`).join("\n")}
+${my?.name || "Someone"} describes the task:
+"""${desc.trim()}"""
+${due ? `They want it done by ${due}.` : ""}
+Decide: which block it belongs to, who should do it, what date fits (inside the block's window where one exists, never after the deadline, never before today), and whether it is too big for one sitting and must be split into 2–4 subtasks.
+Answer STRICT JSON only, nothing else:
+{"block":"<block name copied exactly from the list above, or \\"\\" if none fits>","why":"<one plain sentence: where it sits and why, and whether you split it>","tasks":[{"title":"<imperative, specific>","assignee":"<name copied exactly from the people list>","date":"YYYY-MM-DD","hours":<1-8>}]}
+One entry in "tasks" means no split was needed; several entries ARE the split.`,
+        { maxTokens: 900, model: POWER_MODEL });
+      const rows = (Array.isArray(r?.tasks) && r.tasks.length ? r.tasks : [{ title: desc.trim() }])
+        .slice(0, 6)
+        .map((t) => ({
+          title: String(t.title || desc.trim()).slice(0, 200),
+          assigneeId: nameToId(t.assignee),
+          date: /^\d{4}-\d{2}-\d{2}$/.test(t.date || "") ? t.date : (due || todayStr()),
+          hours: clamp(t.hours),
+        }));
+      setProp({ block: lanes.find((s) => s.name === r?.block)?.name || String(r?.block || ""), why: String(r?.why || ""), rows });
+    } catch {
+      /* AI unreachable — the task still gets raised, just without the
+         placement worked out. It lands as raised-in-scrum and the filing
+         pass picks it up later. */
+      setProp({
+        block: "", why: "The AI could not be reached — placed as raised in the scrum; the plan will file it once it can.",
+        rows: [{ title: desc.trim().slice(0, 200), assigneeId: me, date: due || todayStr(), hours: 4 }],
+      });
+    }
+    setBusy(false);
+  };
+  const setRow = (i, patch) => setProp((pr) => ({ ...pr, rows: pr.rows.map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+  const create = () => {
+    if (!prop) return;
+    const at = new Date().toISOString();
+    const made = prop.rows.filter((r) => r.title.trim()).map((r) => {
+      const h = clamp(r.hours);
+      const endTime = `${String(Math.min(18, 10 + h)).padStart(2, "0")}:00`;
+      const sn = matchStep({ title: r.title })?.no;
+      return {
+        id: uid(), projectId: p.projectId, linked: true, title: r.title.trim(),
+        assigneeId: r.assigneeId, date: r.date || todayStr(), startTime: "10:00", endTime,
+        steps: [], conditions: [], status: "pending", origin: "plan-add",
+        ...(sn ? { stepNo: sn } : {}), ...(prop.block ? { block: prop.block } : {}),
+        createdBy: me, createdAt: at, work: {},
+      };
+    });
+    if (!made.length) return;
+    setTasks((ts) => [...made, ...ts]);
+    toast(made.length === 1 ? "Task added to the board" : `Split into ${made.length} subtasks — all on the board`, "green");
+    onClose();
+  };
+  return (
+    <Modal title="Add a task" sub={`${p.projectId} · describe it — the AI works out the block, the date and the person`} onClose={onClose} width={640}
+      footer={prop
+        ? <><Btn kind="ghost" onClick={() => setProp(null)}>Back</Btn><Btn kind="green" icon={CheckCircle2} disabled={!prop.rows.some((r) => r.title.trim())} onClick={create}>{prop.rows.length === 1 ? "Add the task" : `Add all ${prop.rows.length}`}</Btn></>
+        : <><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn icon={busy ? Loader2 : Sparkles} disabled={busy || !desc.trim()} onClick={propose}>{busy ? "Placing it…" : "Place it in the plan"}</Btn></>}>
+      {!prop ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          <Field label="What has to happen" req>
+            <textarea className="inp" rows={4} autoFocus value={desc} onChange={(e) => setDesc(e.target.value)}
+              placeholder="e.g. The antenna matching needs to be re-tuned after the enclosure change — measure, adjust the network, and re-run the range test." />
+          </Field>
+          <Field label="Needed by (optional)">
+            <input type="date" className="inp" value={due} onChange={(e) => setDue(e.target.value)} />
+          </Field>
+          <div style={{ fontSize: 11.5, color: "var(--txt3)", lineHeight: 1.55 }}>
+            The AI reads the project plan and answers with which block this belongs to, the timeline, who should do it — and splits it into subtasks when it is too big for one. You check its answer before anything lands.
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Pill color={prop.block ? "var(--acc)" : "var(--amber)"}>{prop.block || "No block fits — raised in the scrum"}</Pill>
+            {prop.rows.length > 1 && <Pill color="var(--purple)">split into {prop.rows.length} subtasks</Pill>}
+          </div>
+          {prop.why && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.55 }}>{prop.why}</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+            {prop.rows.map((r, i) => (
+              <div key={i} style={{ border: "1px solid var(--bdr)", borderRadius: 10, padding: 11, display: "flex", flexDirection: "column", gap: 8, background: "var(--s1)" }}>
+                <input className="inp" value={r.title} onChange={(e) => setRow(i, { title: e.target.value })} />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <select className="inp" style={{ flex: 1, minWidth: 150 }} value={r.assigneeId} onChange={(e) => setRow(i, { assigneeId: e.target.value })}>
+                    {candidates.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  </select>
+                  <input type="date" className="inp" style={{ width: 150 }} value={r.date} onChange={(e) => setRow(i, { date: e.target.value })} />
+                  <select className="inp" style={{ width: 92 }} value={clamp(r.hours)} onChange={(e) => setRow(i, { hours: Number(e.target.value) })}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map((h) => <option key={h} value={h}>{h} h</option>)}
+                  </select>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--txt3)" }}>Edit anything above — it lands on the board exactly like every other to-do, files under its block, and closes through the same gate.</div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const { tasks, setTasks, users, notes, me, now, setProjects, memory, setMemory, toast, sheetSync } = useCtx();
   const [confirmDel, setConfirmDel] = useState(false);
   const my = users.find((u) => u.id === me);
-  const isPM = isAdmin || my?.role === "pm" || my?.role === "dept_head";
+  const amClient = isClient(my);
+  const isPM = !amClient && (isAdmin || my?.role === "pm" || my?.role === "dept_head");
   const [showLLD, setShowLLD] = useState(false);
   const [editTeam, setEditTeam] = useState(false);
   const [teamDraft, setTeamDraft] = useState(p.team || []);
+  const [editClients, setEditClients] = useState(false);
+  const [clientDraft, setClientDraft] = useState(p.clientTeam || []);
+  const [askClient, setAskClient] = useState(null);
+  const [addTask, setAddTask] = useState(false);
   const [editStatus, setEditStatus] = useState(false);
   const [statusDraft, setStatusDraft] = useState(p.knownStatus || "");
   const [intel, setIntel] = useState(p.driveAnalysis?.text || "");
@@ -2994,6 +3257,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {askClient && <AskClientModal p={p} onClose={() => setAskClient(false)} />}
+      {addTask && <PlanAddTaskModal p={p} onClose={() => setAddTask(false)} />}
       {/* header */}
       <div className="card" style={{ padding: "14px 18px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -3035,7 +3300,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           compete for the same attention; each of these is now the only thing
           on screen when you are actually doing it. */}
       <div className="card" style={{ padding: "0 14px", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", overflowX: "auto" }}>
-        {PROJ_TABS.map(([k, label, Ic, badge]) => {
+        {projTabsFor(my?.role).map(([k, label, Ic, badge]) => {
           const n = badge === "tasks" ? openTasks.length : badge === "mom" ? (p.moms || []).length : badge === "plan" ? (p.plan?.stages || []).length : 0;
           return (
             <button key={k} data-ptab={k} onClick={() => setTab(k)}
@@ -3113,6 +3378,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                     toast(`${raised.length} to-dos raised — the method to the end of the project`, "green");
                   }}>Generate tasks till the end of the project</Btn>
               )}
+              {tab === "tasks" && isPM && (p.clientTeam || []).length > 0 && (
+                <Btn small kind="ghost" icon={Users}
+                  title="Ask somebody on the client side to review or approve — they get it as their own task, with what it blocks written on it."
+                  onClick={() => setAskClient(true)}>Ask the client to review</Btn>
+              )}
+              {tab === "tasks" && (
+                <Btn small kind="ghost" icon={Plus}
+                  title="Describe a task — the AI works out which block it belongs to, the timeline, the person, and splits it into subtasks when it is too big."
+                  onClick={() => setAddTask(true)}>Add a task</Btn>
+              )}
               {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
             {todos.length === 0 ? (
@@ -3189,7 +3464,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             </Section>
           )}
 
-          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onFile={fileTodos} filing={filing} myName={my?.name} meId={my?.id} />}
+          {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onAddTask={() => setAddTask(true)} myName={my?.name} meId={my?.id} />}
 
           {tab === "mom" && (
           <Section>
@@ -3319,6 +3594,65 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                         <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>{t.slot}</div>
                       </div>
                       {t.slot.startsWith("PM") && <Pill color="var(--purple)">PM</Pill>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Section>
+
+          {/* WHO ON THEIR SIDE. These people have logins: they see this
+              project, review the work, and answer what is asked of them. */}
+          <Section>
+            <CardLabel right={isPM && (
+              <button onClick={() => { setClientDraft(p.clientTeam || []); setEditClients(!editClients); }}
+                style={{ background: "none", border: "none", color: editClients ? "var(--txt2)" : "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+                {editClients ? "Cancel" : "Edit client side"}
+              </button>)}>
+              Client side{p.clientName ? ` — ${p.clientName}` : ""}
+            </CardLabel>
+            {editClients ? (
+              <div>
+                {clientPeople(users).length === 0 ? (
+                  <div style={{ fontSize: 12, color: "var(--txt3)", lineHeight: 1.55 }}>
+                    Nobody from a client has a login yet. They sign up at the front door; then, in Resources, set their login type to <b>Client</b> and pick their company.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 190, overflowY: "auto" }}>
+                    {clientPeople(users).map((u) => (
+                      <label key={u.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, cursor: "pointer" }}>
+                        <input type="checkbox" checked={clientDraft.includes(u.id)}
+                          onChange={() => setClientDraft((x) => (x.includes(u.id) ? x.filter((y) => y !== u.id) : [...x, u.id]))} />
+                        <AvatarDot user={u} size={22} />
+                        <span style={{ fontWeight: 600 }}>{u.name}</span>
+                        <span style={{ color: "var(--txt3)", fontSize: 11 }}>{u.title}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                  <Btn small kind="green" icon={CheckCircle2} onClick={() => {
+                    setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, clientTeam: clientDraft } : x)));
+                    setEditClients(false);
+                    toast(`${clientDraft.length} client contact(s) on ${p.projectId}`, "green");
+                  }}>Save client side</Btn>
+                  <Btn small kind="ghost" onClick={() => setEditClients(false)}>Cancel</Btn>
+                </div>
+              </div>
+            ) : (p.clientTeam || []).length === 0 ? (
+              <div style={{ fontSize: 12.5, color: "var(--txt2)" }}>Nobody from the client is on this project yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(p.clientTeam || []).map((cid) => {
+                  const u = users.find((x) => x.id === cid);
+                  return (
+                    <div key={cid} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <AvatarDot user={u} size={30} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12.5 }}>{u?.name || "—"}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--txt2)" }}>{u?.title || "client"}</div>
+                      </div>
+                      <Pill color="var(--acc)">client</Pill>
                     </div>
                   );
                 })}
@@ -4931,13 +5265,21 @@ function TasksModule() {
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   const isPM = my?.role === "pm";
   const myProjectIds = projects.filter((p) => (p.team || []).some((t) => t.userId === me)).map((p) => p.projectId);
-  const visible = tasks.filter((t) => isAdmin ? true : isPM ? (t.assigneeId === me || t.createdBy === me || myProjectIds.includes(t.projectId)) : t.assigneeId === me);
+  const amClient = isClient(my);
+  const clientProjectIds = useMemo(() => (amClient
+    ? projects.filter((p) => (p.clientTeam || []).includes(me) || (my.orgId && p.orgId === my.orgId)).map((p) => p.projectId)
+    : []), [amClient, projects, me, my]);
+  /* A client sees the work asked OF them — reviews, approvals, inputs — and
+     nothing of our internal task list. */
+  const visible = tasks.filter((t) => amClient ? (t.assigneeId === me && clientProjectIds.includes(t.projectId))
+    : isAdmin ? true : isPM ? (t.assigneeId === me || t.createdBy === me || myProjectIds.includes(t.projectId)) : t.assigneeId === me);
   /* Every project this person belongs to — team membership first, then any
      project their tasks name. Shown even with ZERO tasks: being staffed on a
      project you cannot see was the complaint this fixes. */
-  const myProjects = useMemo(() => projects.filter((p) =>
-    (p.team || []).some((x) => x.userId === me) || tasks.some((t) => t.assigneeId === me && t.projectId === p.projectId)),
-    [projects, tasks, me]);
+  const myProjects = useMemo(() => (isClient(my)
+    ? projects.filter((p) => (p.clientTeam || []).includes(me) || (my.orgId && p.orgId === my.orgId))
+    : projects.filter((p) => (p.team || []).some((x) => x.userId === me) || tasks.some((t) => t.assigneeId === me && t.projectId === p.projectId))),
+    [projects, tasks, me, my]);
   const [group, setGroup] = useState("project");
   const [personF, setPersonF] = useState("all");
   const [projF, setProjF] = useState("all");
@@ -5170,6 +5512,71 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
           {t.lastFeedback && <div style={{ marginTop: 6, color: "var(--amber)" }}><b>Last AI feedback:</b> {t.lastFeedback}</div>}
           {t.aiVerification?.feedback && <div style={{ marginTop: 6, color: "var(--green)" }}><b>Verified:</b> {t.aiVerification.feedback}</div>}
           {t.escalated && <div style={{ marginTop: 6, color: "var(--red)" }}><b>Escalated to Shreya:</b> {t.escalated.note || "—"}</div>}
+          {t.dependency && (
+            <div style={{ marginTop: 8, padding: "7px 10px", borderRadius: 8, background: "color-mix(in srgb, var(--amber) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--amber) 35%, transparent)", color: "var(--txt2)", lineHeight: 1.5 }}>
+              <b style={{ color: "var(--amber)" }}>What waits on this:</b> {t.dependency}
+            </div>
+          )}
+          <TaskReviews t={t} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══ THE CLIENT'S VERDICT ════════════════════════════════════════════════
+   Our own AI gate decides whether a task was finished honestly. Only the
+   customer can say whether it was finished WELL — so every task carries a
+   review thread the client side writes in, and everybody reads. It sits on
+   the task, not in an email, which is why it can still be found in month
+   nine. */
+function TaskReviews({ t }) {
+  const { users, me, setTasks, projects, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const amClient = isClient(my);
+  const p = projects.find((x) => x.projectId === t.projectId);
+  const onThisProject = !p || amClient
+    ? (p ? ((p.clientTeam || []).includes(me) || (my?.orgId && p.orgId === my.orgId)) : false)
+    : true;
+  const [draft, setDraft] = useState("");
+  const [verdict, setVerdict] = useState("good");
+  const reviews = t.clientReviews || [];
+  const add = () => {
+    if (!draft.trim()) return;
+    const r = { id: uid(), by: me, byName: my?.name || "Client", at: new Date().toISOString(), verdict, text: draft.trim() };
+    setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, clientReviews: [...(x.clientReviews || []), r] } : x)));
+    setDraft("");
+    toast(verdict === "rework" ? "Sent back for rework — the team sees it on the task" : "Review posted", verdict === "rework" ? "amber" : "green");
+  };
+  if (!reviews.length && !(amClient && onThisProject)) return null;
+  const vColor = (v) => (v === "rework" ? "var(--red)" : v === "ok" ? "var(--amber)" : "var(--green)");
+  const vLabel = { good: "Good", ok: "Acceptable", rework: "Needs rework" };
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px dashed var(--bdr2)", paddingTop: 9 }}>
+      <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--txt3)", marginBottom: 6 }}>
+        Client review{reviews.length > 1 ? `s · ${reviews.length}` : ""}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {reviews.map((r) => (
+          <div key={r.id} style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", fontSize: 12 }}>
+            <span style={{ fontWeight: 700, color: vColor(r.verdict) }}>{vLabel[r.verdict] || r.verdict}</span>
+            <span style={{ flex: 1, minWidth: 160, color: "var(--txt2)" }}>{r.text}</span>
+            <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{r.byName} · {fmtDate(String(r.at).slice(0, 10))}</span>
+          </div>
+        ))}
+      </div>
+      {amClient && onThisProject && (
+        <div style={{ display: "flex", gap: 7, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+          <select className="inp" style={{ width: 140, padding: "5px 8px", fontSize: 12 }} value={verdict} onChange={(e) => setVerdict(e.target.value)}>
+            <option value="good">Good</option>
+            <option value="ok">Acceptable</option>
+            <option value="rework">Needs rework</option>
+          </select>
+          <input className="inp" style={{ flex: 1, minWidth: 180, padding: "5px 9px", fontSize: 12 }}
+            placeholder="What is good, what is not — the team reads this on the task"
+            value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
+          <Btn small kind={verdict === "rework" ? "danger" : "green"} disabled={!draft.trim()} onClick={add}>Post review</Btn>
         </div>
       )}
     </div>
@@ -5928,7 +6335,7 @@ const RESOURCE_ROLES = [
 ];
 const rrInfo = (key) => RESOURCE_ROLES.find((r) => r.key === key);
 const DEPT_LIST = ["Hardware", "Firmware", "Industrial Design", "Testing", "Project Management", "Supply Chain", "DevOps", "Solution Architecture", "Soldering & Testing"];
-const LOGIN_TYPES = [["superadmin", "Super Admin"], ["pm", "Project Manager"], ["engineer", "Developer"]];
+const LOGIN_TYPES = [["superadmin", "Super Admin"], ["pm", "Project Manager"], ["engineer", "Developer"], ["client", "Client (customer side)"]];
 const PROJECT_TYPES = [["engineering", "Engineering Services"], ["elecbits_product", "Elecbits Product"], ["modifier", "Modifier"]];
 const projWindow = (p) => ({ start: p.startDate || (p.createdAt || "").slice(0, 10), end: p.deadline || "9999-12-31" });
 
@@ -6317,7 +6724,9 @@ const UNIQ_RR = (users) => [...new Set(users.map((u) => u.resourceRole).filter(B
    name, email, department, grouped role/function, login type, role-based
    skills, project type, live preview; edit mode adds a confirmed Remove. */
 function ResourceModal({ mode, user, onClose }) {
-  const { users, addUser, updateUser, removeUser, provisionLogin, toast } = useCtx();
+  const { users, clients, addUser, updateUser, removeUser, provisionLogin, toast } = useCtx();
+  const [orgId, setOrgId] = useState(user?.orgId || "");
+  const [clientTitle, setClientTitle] = useState(user?.role === "client" ? (user?.title || "") : "");
   const [pwd, setPwd] = useState("");
   const [pwdBusy, setPwdBusy] = useState(false);
   const [pwdErr, setPwdErr] = useState("");
@@ -6351,12 +6760,22 @@ function ResourceModal({ mode, user, onClose }) {
 
   const save = async () => {
     if (!name.trim() || emailProblem || pwdBusy) return;
+    if (login === "client" && !orgId) { setPwdErr("Choose the client's company — it decides which projects they see."); return; }
     if (pwd && pwd.length < 8) { setPwdErr("At least 8 characters — or leave it blank and they sign up themselves."); return; }
-    const u = {
+    const org = clients.find((c) => c.id === orgId);
+    const u = login === "client" ? {
+      /* A client carries no team slot, no capacity and no skills — they are
+         not staffed on anything. What they carry is their company. */
+      id: user?.id || uuid(), name: name.trim(), email: addr, role: "client",
+      title: clientTitle.trim() || `${org?.name || "Client"} — client`,
+      orgId, dept: org?.name || "", resourceRole: "", skills: [], projectTags: [],
+      maxProjects: 0, color: user?.color || _PALETTE[users.length % _PALETTE.length],
+    } : {
       id: user?.id || uuid(), name: name.trim(), email: addr,
       role: login, title: info?.label ? (ROLE_TITLE[rr] || info.label) : "Team",
       resourceRole: rr, dept: dept || info?.dept || "", skills, projectTags: [ptype],
       maxProjects: info?.cap || 3, color: user?.color || _PALETTE[users.length % _PALETTE.length],
+      orgId: "",
     };
     if (editing) updateUser(u); else addUser(u);
     if (!pwd) { onClose(); return; }
@@ -6401,22 +6820,43 @@ function ResourceModal({ mode, user, onClose }) {
               </span>
             )}
           </Field>
-          <Field label="Department">
-            <select className="inp" value={dept} onChange={(e) => pickDept(e.target.value)}>
-              <option value="">— Select Department —</option>
-              {DEPT_LIST.map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </Field>
+          {/* A client belongs to a COMPANY, not a department — and the company
+              is the shared org list, so Sales, PMS and Finance mean the same
+              customer when they say "Schneider". */}
+          {login === "client" ? (
+            <Field label="Client company" req>
+              <select className="inp" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+                <option value="">— choose the customer —</option>
+                {clients.map((c) => <option key={c.id} value={c.id}>{c.name}{c.clientId ? ` · ${c.clientId}` : ""}</option>)}
+              </select>
+              {!orgId && <span style={{ fontSize: 11, color: "var(--amber)", marginTop: 4, display: "block", lineHeight: 1.45 }}>
+                Needed — it decides which projects they can see. Not listed? Add the company on a project first.
+              </span>}
+            </Field>
+          ) : (
+            <Field label="Department">
+              <select className="inp" value={dept} onChange={(e) => pickDept(e.target.value)}>
+                <option value="">— Select Department —</option>
+                {DEPT_LIST.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+          )}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="Role / Function">
-            <select className="inp" value={rr} onChange={(e) => pickRr(e.target.value)}>
-              {["Senior", "Junior", "Shared"].map((tier) => {
-                const opts = roleOptions.filter((r) => r.tier === tier);
-                return opts.length ? <optgroup key={tier} label={tier}>{opts.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}</optgroup> : null;
-              })}
-            </select>
-          </Field>
+          {login === "client" ? (
+            <Field label="Their title at the customer">
+              <input className="inp" value={clientTitle} onChange={(e) => setClientTitle(e.target.value)} placeholder="e.g. Design Manager" />
+            </Field>
+          ) : (
+            <Field label="Role / Function">
+              <select className="inp" value={rr} onChange={(e) => pickRr(e.target.value)}>
+                {["Senior", "Junior", "Shared"].map((tier) => {
+                  const opts = roleOptions.filter((r) => r.tier === tier);
+                  return opts.length ? <optgroup key={tier} label={tier}>{opts.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}</optgroup> : null;
+                })}
+              </select>
+            </Field>
+          )}
           <Field label="Login type">
             <select className="inp" value={login} onChange={(e) => setLogin(e.target.value)}>
               {LOGIN_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
@@ -7997,7 +8437,7 @@ function StageDetail({ stage, tasks, users, onClose }) {
   );
 }
 
-function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, filing, myName, meId }) {
+function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onAddTask, myName, meId }) {
   /* Opens on the METHOD, not on a guess about it. The other views show a plan
      an AI or an uploaded checklist produced; this one shows the company's own
      308-step process with this project's dates in it. Which of the two a PM
@@ -8068,7 +8508,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onFile, f
               <button key={k} onClick={() => setView(k)} style={{ padding: "5px 11px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11.5, fontWeight: 700, background: view === k ? "var(--s1)" : "transparent", color: view === k ? "var(--acc)" : "var(--txt2)" }}>{label}</button>
             ))}
           </div>
-          <Btn small kind="ghost" icon={filing ? Loader2 : ListChecks} disabled={filing} title="Put every open to-do against the process step it belongs to" onClick={() => onFile(stages)}>{filing ? "Filing…" : "File the to-dos"}</Btn>
+          <Btn small icon={Plus} title="Describe a task — the AI works out which block it belongs to, the timeline, the person, and splits it into subtasks when it is too big." onClick={onAddTask}>Add a task</Btn>
         </div>
       </div>
 
@@ -9317,20 +9757,20 @@ function ChatLogsModule() {
 const NAV_GROUPS = [
   ["Projects", [
     { id: "projects", label: "Projects", icon: FolderPlus },
-    { id: "scrum", label: "Daily Scrum", icon: NotebookPen },
-    { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb },
+    { id: "scrum", label: "Daily Scrum", icon: NotebookPen, notRoles: ["client"] },
+    { id: "mom", label: "Brainstorming Sessions", icon: Lightbulb, notRoles: ["client"] },
   ]],
   ["Clients", [
     { id: "keyacc", label: "Key Accounts", icon: Building2, admin: true },
-    { id: "client", label: "Client Communication", icon: Video },
+    { id: "client", label: "Client Communication", icon: Video, notRoles: ["client"] },
   ]],
   ["Resources", [
     // Engineers don't manage the roster — the whole section is noise to them.
-    { id: "resources", label: "Resources", icon: Users, notRoles: ["engineer"] },
+    { id: "resources", label: "Resources", icon: Users, notRoles: ["engineer", "client"] },
   ]],
   ["Personal", [
     { id: "tasks", label: "My Projects & Tasks", icon: ListChecks },
-    { id: "perf", label: "Performance & Training", icon: Gauge },
+    { id: "perf", label: "Performance & Training", icon: Gauge, notRoles: ["client"] },
   ]],
   ["AI", [
     { id: "assistant", label: "Assistant", icon: Bot },
@@ -9816,8 +10256,15 @@ export default function App() {
     // auth_id is only there once the workspace has run fix-resource-creation.sql.
     // Send it when we know it, and drop it if the column does not exist yet, so
     // an un-migrated workspace still saves the rest of the record.
-    let { error } = await withLayoutRetry(supabase, () =>
-      tbl(supabase, "people").upsert({ ...row, auth_id: u.authId || null }));
+    /* org_id ties a CLIENT login to the customer company on core.orgs. It
+       exists once client-logins.sql has run; drop it (like auth_id) rather
+       than lose the whole record on a workspace that has not migrated. */
+    const full = { ...row, auth_id: u.authId || null, org_id: u.orgId || null };
+    let { error } = await withLayoutRetry(supabase, () => tbl(supabase, "people").upsert(full));
+    if (error && /org_id/.test(error.message || "")) {
+      ({ error } = await withLayoutRetry(supabase, () =>
+        tbl(supabase, "people").upsert({ ...row, auth_id: u.authId || null })));
+    }
     if (error && /auth_id/.test(error.message || "")) {
       ({ error } = await tbl(supabase, "people").upsert(row));
     }

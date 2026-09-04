@@ -119,6 +119,9 @@ export async function fetchProfiles() {
       email: p.email || "",
       // Full resource record, so Dept / capacity / skills survive a refresh.
       dept: p.dept || "",
+      // For a client login: the customer organisation they belong to
+      // (core.orgs, the company-wide list). Null for staff.
+      orgId: p.org_id || "",
       resourceRole: p.resource_role || "",
       skills: p.skills || [],
       maxProjects: p.max_projects || undefined,
