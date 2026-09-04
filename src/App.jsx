@@ -3119,6 +3119,70 @@ function MfgRunSections({ p }) {
   );
 }
 
+/* Attach a manufacturing project to a design project that exists already —
+   because 1844 arrives AFTER 1809 in real life, and a repeat order means
+   another one later. Same registrar rules: its own ID, its own Mfg PM, the
+   design project recorded as parent, boards carried verbatim. */
+function AttachMfgModal({ p, onClose }) {
+  const { users, projects, setProjects, me, toast, sheetSync } = useCtx();
+  const [mfgId, setMfgId] = useState("");
+  const [mfgPmId, setMfgPmId] = useState("");
+  const [mfgRuns, setMfgRuns] = useState("");
+  const clean = mfgId.trim().toUpperCase();
+  const dupe = clean && projects.some((x) => normId(x.projectId) === normId(clean));
+  const offGrammar = clean && !dupe && !matchesIdGrammar(clean);
+  const runList = mfgRuns.split(/[,\s]+/).map((x) => parseInt(x, 10)).filter((n) => n > 0);
+  /* Runs the loaded process map already declares for this serial — typed
+     quantities only ever ADD to these. */
+  const mapRuns = runsInMap(serialOf(clean));
+  const ok = clean && !dupe && mfgPmId;
+  const attach = () => {
+    if (!ok) return;
+    const mfg = {
+      id: uid(), projectId: clean, idMode: "manual", origin: "existing", kind: "mfg",
+      parentId: p.projectId, name: `${p.name} — Manufacturing`,
+      clientName: p.clientName || "", clientId: p.clientId || "", orgId: p.orgId || "",
+      clientTeam: p.clientTeam || [],
+      industry: "", orgSize: "", contact: {},
+      linkedIds: p.linkedIds || [], boards: p.boards || [], runQtys: runList,
+      team: [{ slot: "Mfg PM (Manufacturing)", userId: mfgPmId }],
+      startDate: p.startDate || todayStr(), deadline: p.deadline, status: "Planning", knownStatus: "",
+      lldCustomer: null, lldDesigner: null, intelligence: [], chat: [],
+      createdAt: new Date().toISOString(), createdBy: me,
+    };
+    setProjects((ps) => [mfg, ...ps.map((x) => (x.id === p.id ? { ...x, mfgIds: [...new Set([...(x.mfgIds || []), clean])] } : x))]);
+    sheetSync("Project Data and IDs (Google Sheet)", `${clean} registered (manufacturing, parent ${p.projectId})`);
+    toast(`${clean} attached — the run tree lives on this project's overview now`, "green");
+    onClose();
+  };
+  return (
+    <Modal title="Attach the manufacturing project" sub={`${p.projectId} becomes its parent · boards carry over verbatim`} onClose={onClose} width={560}
+      footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="green" icon={CheckCircle2} disabled={!ok} onClick={attach}>Attach it</Btn></>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+        <Field label="Mfg Project ID" req>
+          <input className="inp" style={{ fontFamily: MONO }} value={mfgId} onChange={(e) => setMfgId(e.target.value)} placeholder="e.g. Eb-21-EL-287-01-1844-040926" />
+          {dupe && <span style={{ color: "var(--red)", fontSize: 11 }}>Already exists — a repeat order gets its own new ID.</span>}
+          {offGrammar && <span style={{ color: "var(--amber)", fontSize: 11 }}>Doesn't match the registrar grammar — fine for legacy IDs.</span>}
+        </Field>
+        <Field label="Manufacturing PM" req>
+          <select className="inp" value={mfgPmId} onChange={(e) => setMfgPmId(e.target.value)}>
+            <option value="">— choose Mfg PM —</option>
+            <SlotOptions slot="Mfg PM (Manufacturing)" users={users} />
+          </select>
+        </Field>
+        <Field label="Quantity runs (optional — the process map's own runs always count)">
+          <input className="inp" style={{ fontFamily: MONO }} value={mfgRuns} onChange={(e) => setMfgRuns(e.target.value)} placeholder="e.g. 50, 100, 1000" />
+          {clean && mapRuns.length > 0 && (
+            <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 4, fontFamily: MONO }}>
+              already in the loaded workbook: {mapRuns.map((q) => `${serialOf(clean)}-${q}`).join(" · ")}
+            </div>
+          )}
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
 function MfgRunTree({ mfg, compact = false }) {
   const { tasks, users } = useCtx();
   const serial = serialOf(mfg.projectId);
@@ -3199,6 +3263,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [clientDraft, setClientDraft] = useState(p.clientTeam || []);
   const [askClient, setAskClient] = useState(null);
   const [addTask, setAddTask] = useState(false);
+  const [attachMfg, setAttachMfg] = useState(false);
   const [editStatus, setEditStatus] = useState(false);
   const [statusDraft, setStatusDraft] = useState(p.knownStatus || "");
   const [intel, setIntel] = useState(p.driveAnalysis?.text || "");
@@ -3649,6 +3714,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {askClient && <AskClientModal p={p} onClose={() => setAskClient(false)} />}
       {addTask && <PlanAddTaskModal p={p} onClose={() => setAddTask(false)} />}
+      {attachMfg && <AttachMfgModal p={p} onClose={() => setAttachMfg(false)} />}
       {/* header */}
       <div className="card" style={{ padding: "14px 18px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -3694,7 +3760,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           const parent = p.kind === "mfg" ? projects.find((x) => normId(x.projectId) === normId(p.parentId || "")) : null;
           const jump = (id) => window.dispatchEvent(new CustomEvent("eb-open-project", { detail: id }));
           const serial = serialOf(p.projectId);
-          if (!(p.boards || []).length && !kids.length && !parent && !(p.runQtys || []).length) return null;
+          if (!(p.boards || []).length && !kids.length && !parent && !(p.runQtys || []).length && !isPM) return null;
           return (
             <div style={{ marginTop: 11, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", fontSize: 11.5 }}>
               {parent && (
@@ -3722,6 +3788,14 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   mfg: {k.projectId} ↗
                 </button>
               ))}
+              {/* manufacturing usually arrives after design — attach it here */}
+              {p.kind !== "mfg" && !kids.length && isPM && (
+                <button onClick={() => setAttachMfg(true)}
+                  title="Attach the registrar-issued manufacturing project — its own Mfg PM, this project as parent, the run tree on this overview"
+                  style={{ display: "flex", gap: 5, alignItems: "center", background: "none", border: "1px dashed var(--bdr2)", borderRadius: 99, padding: "3px 10px", cursor: "pointer", color: "var(--purple)", fontWeight: 700, fontSize: 11 }}>
+                  <Plus size={11} /> attach manufacturing project
+                </button>
+              )}
             </div>
           );
         })()}
