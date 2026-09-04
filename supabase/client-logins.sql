@@ -10,6 +10,16 @@
 --
 -- Run once, in the Supabase SQL editor. Safe to re-run.
 
+-- 0. The read policy from an earlier run references org_id on BOTH tables,
+--    and Postgres refuses to retype a column a policy depends on — so the
+--    policy goes first, and is recreated at the end.
+do $$
+begin
+  if exists (select 1 from pg_tables where schemaname = 'core' and tablename = 'projects') then
+    execute 'drop policy if exists projects_client_read on core.projects';
+  end if;
+end $$;
+
 -- 1. Which company this person belongs to. Null for staff, set for clients.
 alter table core.people add column if not exists org_id text;
 
