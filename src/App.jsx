@@ -2712,6 +2712,7 @@ const PROJ_TABS = [
   ["overview", "Overview", Gauge, ""],
   ["plan", "Plan", ListChecks, "plan"],
   ["swim", "Swimlane", GitBranch, ""],
+  ["gantt", "Gantt", Calendar, ""],
   ["sop", "SOPs", FileText, "sop"],
   ["tasks", "To-dos", CheckCircle2, "tasks"],
   ["mom", "Brainstorming", Lightbulb, "mom"],
@@ -3989,6 +3990,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           {tab === "plan" && <PlanBoard p={p} upd={upd} projTasks={projTasks} users={users} busy={planBusy} onBuild={buildPlan} onSheet={planFromSheet} onAddTask={() => setAddTask(true)} myName={my?.name} meId={my?.id} />}
 
           {tab === "swim" && <SwimlaneBoard p={p} upd={upd} />}
+
+          {tab === "gantt" && <GanttTab p={p} upd={upd} />}
 
           {tab === "sop" && <SopTab p={p} upd={upd} />}
 
@@ -9110,15 +9113,15 @@ const swimLaneOf = (block) => {
   return SWIM_LANES[0][0];
 };
 
-function SwimBoxModal({ p, upd, b, status, onClose, onAiTask }) {
+function SwimBoxModal({ p, upd, b, status, onClose, onAiTask, storeKey = "swimNotes" }) {
   const { users, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
-  const notes = (p.swimNotes || {})[b.id] || { comments: [], links: [] };
+  const notes = (p[storeKey] || {})[b.id] || { comments: [], links: [] };
   const [text, setText] = useState("");
   const [linkLabel, setLinkLabel] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
   const write = (patch) => upd((cur) => ({
-    swimNotes: { ...(cur.swimNotes || {}), [b.id]: { comments: notes.comments, links: notes.links, ...patch } },
+    [storeKey]: { ...(cur[storeKey] || {}), [b.id]: { comments: notes.comments, links: notes.links, ...patch } },
   }));
   const addComment = () => {
     if (!text.trim()) return;
@@ -9133,7 +9136,7 @@ function SwimBoxModal({ p, upd, b, status, onClose, onAiTask }) {
     setLinkLabel(""); setLinkUrl("");
   };
   return (
-    <Modal title={b.label || `${b.id} · ${b.name}`} sub={`${b.steps || "—"} steps · ${p.projectId} · comments and links live on this box for everyone`} onClose={onClose} width={620}
+    <Modal title={b.label || `${b.id} · ${b.name}`} sub={b.sub || `${b.steps || "—"} steps · ${p.projectId} · comments and links live on this box for everyone`} onClose={onClose} width={620}
       footer={<>
         <Btn kind="ghost" icon={Sparkles} onClick={onAiTask}>Add a task with AI</Btn>
         <Btn kind="green" icon={CheckCircle2} onClick={onClose}>Done</Btn>
@@ -9176,6 +9179,117 @@ function SwimBoxModal({ p, upd, b, status, onClose, onAiTask }) {
         </Field>
       </div>
     </Modal>
+  );
+}
+
+/* ─── GANTT — the project plan sheet, as a chart. The PM uploads the plan
+   workbook (the "Updated Gantt" tab wins), the rows become bars grouped by
+   phase, and every bar opens the same conversation a swimlane box does —
+   comments, pinned links, and the AI add-a-task — for staff AND clients. */
+function GanttTab({ p, upd }) {
+  const { users, me, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const readOnly = isClient(my);
+  const fileRef = useRef(null);
+  const [open, setOpen] = useState(null);
+  const [aiFor, setAiFor] = useState(null);
+  const g = p.gantt || null;
+  const parse = async (file) => {
+    try {
+      const XLSX = await import("xlsx");
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      /* "only the updated gantt": a tab named Updated wins; else the last. */
+      const name = wb.SheetNames.find((n) => /updated/i.test(n)) || wb.SheetNames[wb.SheetNames.length - 1];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: "" });
+      const hi = rows.findIndex((r) => /^no\.?$/i.test(String(r[0]).trim()));
+      if (hi < 0) { toast("No 'No. | Phase | Activity | Start | End' header row found", "amber"); return; }
+      const iso = (v) => {
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        if (typeof v === "number" && v > 20000) return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 10);
+        const d = new Date(String(v)); return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+      };
+      const out = [];
+      for (let i = hi + 1; i < rows.length; i++) {
+        const r = rows[i];
+        const activity = String(r[2] || "").trim();
+        if (!activity) continue;
+        const start = iso(r[3]), end = iso(r[4]);
+        if (!start && !end) continue;
+        out.push({ id: `g${String(r[0]).replace(/\.0$/, "") || i}`, no: String(r[0]).replace(/\.0$/, ""),
+          phase: String(r[1] || "").trim() || "PLAN", activity, start: start || end, end: end || start });
+      }
+      if (!out.length) { toast(`"${name.trim()}" has no dated activity rows`, "amber"); return; }
+      upd({ gantt: { fileName: file.name, tab: name.trim(), at: new Date().toISOString(), byName: my?.name || "", rows: out } });
+      toast(`${out.length} activities from "${name.trim()}" — this is the project Gantt now, for everyone`, "green");
+    } catch (e) { toast(`Couldn't read that file: ${e?.message || e}`, "amber"); }
+  };
+  const rows = g?.rows || [];
+  const ms = rows.flatMap((r) => [r.start, r.end]).map((d) => new Date(d).getTime()).filter((n) => !Number.isNaN(n));
+  const t0 = ms.length ? Math.min(...ms) : Date.now();
+  const t1 = ms.length ? Math.max(...ms) : Date.now() + 86400000;
+  const span = Math.max(1, t1 - t0);
+  const pct = (d) => Math.max(0, Math.min(100, ((new Date(d).getTime() - t0) / span) * 100));
+  const todayMs = Date.now();
+  const todayIn = todayMs >= t0 && todayMs <= t1;
+  const phases = [...new Set(rows.map((r) => r.phase))];
+  const PCOL = ["var(--acc)", "var(--purple)", "var(--amber)", "var(--green)", "var(--blue)", "var(--red)"];
+  const colOf = (ph) => PCOL[phases.indexOf(ph) % PCOL.length];
+  const schedState = (r) => (todayMs > new Date(r.end).getTime() ? "done" : todayMs >= new Date(r.start).getTime() ? "active" : "pending");
+  const badge = (r) => { const n = (p.ganttNotes || {})[r.id]; return { c: n?.comments?.length || 0, l: n?.links?.length || 0 }; };
+  return (
+    <Section>
+      {open && <SwimBoxModal p={p} upd={upd} storeKey="ganttNotes" status={schedState(open)}
+        b={{ id: open.id, label: open.activity, category: open.phase, sub: `${open.phase} · ${fmtDate(open.start)} → ${fmtDate(open.end)} · comments and links live on this bar for everyone` }}
+        onClose={() => setOpen(null)} onAiTask={() => { const r = open; setOpen(null); setAiFor(r); }} />}
+      {aiFor && <PlanAddTaskModal p={p} seed={`Regarding "${aiFor.activity}" (${aiFor.phase}, ${fmtDate(aiFor.start)} → ${fmtDate(aiFor.end)}): `} onClose={() => setAiFor(null)} />}
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>Gantt — the project plan sheet</span>
+        {g && <Pill color="var(--green)">{g.tab}</Pill>}
+        {g && <span style={{ fontSize: 11, color: "var(--txt3)" }}>from {g.fileName} · {g.byName} · {fmtDate(g.at.slice(0, 10))}</span>}
+        {!readOnly && (
+          <span style={{ marginLeft: "auto" }}>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) parse(f); }} />
+            <Btn small kind="ghost" icon={Upload} title='Upload the plan workbook — the "Updated Gantt" tab becomes the chart, for everyone including the client side'
+              onClick={() => fileRef.current?.click()}>{g ? "Upload a newer plan" : "Upload the plan sheet"}</Btn>
+          </span>
+        )}
+      </div>
+      {!g ? (
+        <Empty icon={Calendar} title="No plan sheet yet" sub='Upload the project-plan workbook — its "Updated Gantt" tab becomes the chart. Click any bar to comment, pin links, or raise a task with the AI.' />
+      ) : (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--txt3)", fontWeight: 700, marginBottom: 6 }}>
+            <span>{fmtDate(new Date(t0).toISOString().slice(0, 10))}</span><span>{fmtDate(new Date(t1).toISOString().slice(0, 10))}</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {phases.map((ph) => (
+              <div key={ph}>
+                <div style={{ fontSize: 10, fontWeight: 800, color: colOf(ph), textTransform: "uppercase", letterSpacing: ".07em", margin: "8px 0 3px" }}>{ph}</div>
+                {rows.filter((r) => r.phase === ph).map((r) => {
+                  const a = pct(r.start), bp = pct(r.end);
+                  const n = badge(r);
+                  return (
+                    <button key={r.id} onClick={() => setOpen(r)} title="Click to comment, pin links, or raise a task with the AI"
+                      style={{ display: "flex", alignItems: "center", gap: 10, background: "transparent", border: "none", borderRadius: 7, padding: "4px 6px", cursor: "pointer", textAlign: "left", width: "100%" }}>
+                      <span style={{ width: 210, flexShrink: 0, fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--txt)" }}>
+                        {r.activity}
+                        {(n.c > 0 || n.l > 0) && <span style={{ fontSize: 9, color: "var(--txt3)", marginLeft: 5 }}>{n.c > 0 ? `💬${n.c}` : ""}{n.l > 0 ? ` 🔗${n.l}` : ""}</span>}
+                      </span>
+                      <span style={{ position: "relative", flex: 1, height: 15, background: "var(--s2)", borderRadius: 5, minWidth: 90, overflow: "hidden" }}>
+                        <span style={{ position: "absolute", left: `${a}%`, width: `${Math.max(2.5, bp - a)}%`, top: 0, bottom: 0, borderRadius: 5, background: colOf(ph), opacity: schedState(r) === "pending" ? 0.45 : 0.9 }} />
+                        {todayIn && <span title="today" style={{ position: "absolute", left: `${pct(new Date().toISOString().slice(0, 10))}%`, top: 0, bottom: 0, width: 2, background: "var(--red)", opacity: 0.7, pointerEvents: "none" }} />}
+                      </span>
+                      <span style={{ width: 118, flexShrink: 0, fontSize: 10, color: "var(--txt3)", fontFamily: MONO, textAlign: "right" }}>{fmtDate(r.start)} → {fmtDate(r.end)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Section>
   );
 }
 
