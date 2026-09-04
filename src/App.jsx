@@ -124,6 +124,15 @@ const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Mf
    from the same spec and passes too. */
 const EB_PID_RE = /^EB-\d{2}-[A-Z0-9]{2,6}-\d{1,5}-\d{1,4}-\d{1,6}(-[A-Z]{1,3}-\d{1,4})?(-\d{6})?$/;
 const matchesIdGrammar = (id) => EB_PID_RE.test(String(id || "").trim().toUpperCase());
+/* The registrar serial — 1844 out of Eb-21-EL-287-01-1844, dated instance
+   form and derived suffix included. Run IDs hang off THIS (1844-50), so it
+   must never come back as the date block or the suffix number. */
+const serialOf = (id) => {
+  const base = String(id || "").trim().toUpperCase()
+    .replace(/-\d{6}$/, "")               // dated instance-folder form
+    .replace(/-[A-Z]{1,3}-\d{1,4}$/, ""); // derived-family suffix block
+  return base.split("-").pop() || String(id || "").trim();
+};
 
 /* ─── WHO CAN BE PUT IN A SLOT ────────────────────────────────────────────
    Two rules, both learned the hard way.
@@ -2489,8 +2498,14 @@ function AddExistingProject({ onClose }) {
     }
     /* The declared board set: full SKU + short ref + hierarchy, kept both as
        the rich record and as the flat linkedIds every existing view reads. */
+    /* A dated full SKU (…-GW-119-040926) still yields the right short ref:
+       the tail pair before any date block. Typed refs always win. */
+    const refFromSku = (sku) => (String(sku).replace(/-\d{6}$/, "").match(/([A-Z]{1,3}-\d{1,4})$/) || [])[1] || "";
     const boardMeta = boards
-      .map((b) => ({ sku: b.sku.trim().toUpperCase(), ref: b.ref.trim().toUpperCase(), main: !!b.main }))
+      .map((b) => {
+        const sku = b.sku.trim().toUpperCase();
+        return { sku, ref: b.ref.trim().toUpperCase() || refFromSku(sku), main: !!b.main };
+      })
       .filter((b) => b.sku || b.ref);
     if (boardMeta.length && !boardMeta.some((b) => b.main)) boardMeta[0].main = true;
     const clientBits = {
@@ -2630,7 +2645,7 @@ function AddExistingProject({ onClose }) {
             <input className="inp" style={{ fontFamily: MONO }} value={mfgRuns} onChange={(e) => setMfgRuns(e.target.value)} placeholder="e.g. 50, 100, 1000" />
             {runList.length > 0 && mfgClean && (
               <div style={{ fontSize: 10.5, color: "var(--txt3)", marginTop: 4, fontFamily: MONO }}>
-                {runList.map((q) => `${mfgClean.split("-").pop()}-${q}`).join(" · ")} — a top-up later is a new run, never an edit.
+                {runList.map((q) => `${serialOf(mfgClean)}-${q}`).join(" · ")} — a top-up later is a new run, never an edit.
               </div>
             )}
           </Field>
@@ -3404,7 +3419,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           const kids = projects.filter((x) => x.kind === "mfg" && x.parentId === p.projectId);
           const parent = p.kind === "mfg" ? projects.find((x) => normId(x.projectId) === normId(p.parentId || "")) : null;
           const jump = (id) => window.dispatchEvent(new CustomEvent("eb-open-project", { detail: id }));
-          const serial = String(p.projectId).split("-").pop();
+          const serial = serialOf(p.projectId);
           if (!(p.boards || []).length && !kids.length && !parent && !(p.runQtys || []).length) return null;
           return (
             <div style={{ marginTop: 11, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", fontSize: 11.5 }}>
