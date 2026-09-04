@@ -33,9 +33,12 @@ begin
   end if;
 end $$;
 
+-- NOT VALID: applies to every new write, but never fails the script over a
+-- legacy row whose role predates this list.
 alter table core.people
   add constraint people_role_check
-  check (role in ('superadmin', 'dept_head', 'pm', 'engineer', 'developer', 'client'));
+  check (role in ('superadmin', 'dept_head', 'pm', 'engineer', 'developer', 'client'))
+  not valid;
 
 -- 3. A client reads the projects their company is on, and nothing else. The
 --    app enforces this in the UI; this is the same rule at the database, so a
@@ -43,6 +46,7 @@ alter table core.people
 do $$
 begin
   if exists (select 1 from pg_tables where schemaname = 'core' and tablename = 'projects') then
+    execute 'alter table core.projects add column if not exists org_id uuid references core.orgs(id) on delete set null';
     execute $p$
       drop policy if exists projects_client_read on core.projects;
       create policy projects_client_read on core.projects for select
