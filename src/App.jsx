@@ -28,7 +28,7 @@ import {
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
-  Video, Mic, MessagesSquare, Building2
+  Video, Mic, MessagesSquare, Building2, UserPlus
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 import schneiderTracker from "./data/schneider-tracker.json";
@@ -9754,6 +9754,157 @@ function ChatLogsModule() {
   );
 }
 
+/* ─── ADD CLIENTS — the customer side's logins, in their own place ──────────
+   Creating a customer login has nothing to do with staffing the team, so it
+   does not live inside Add Resources. One page: the companies, their people,
+   and one button that makes a login a client can use the moment it saves. */
+function AddClientModal({ user, onClose }) {
+  const { users, clients, setClients, addUser, updateUser, provisionLogin, toast } = useCtx();
+  const editing = !!user;
+  const [name, setName] = useState(user?.name || "");
+  const [email, setEmail] = useState(user?.email || "");
+  const [orgId, setOrgId] = useState(user?.orgId || "");
+  const [newOrg, setNewOrg] = useState("");
+  const [title, setTitle] = useState(user?.title || "");
+  const [pwd, setPwd] = useState("");
+  const [showPwd, setShowPwd] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const addr = email.trim().toLowerCase();
+  const taken = users.find((u) => u.id !== user?.id && addr && (u.email || "").toLowerCase() === addr);
+  const emailProblem = !addr ? "Needed — it is how they sign in."
+    : !emailShapeOk(addr) ? "That doesn't look like an email address."
+    : taken ? `${taken.name} already has this email on the roster.` : "";
+  const save = async () => {
+    if (busy) return;
+    if (!name.trim()) { setErr("Their name is needed."); return; }
+    if (emailProblem) { setErr(emailProblem); return; }
+    if (!orgId || (orgId === "__new" && !newOrg.trim())) { setErr("Choose their company — it decides which projects they see."); return; }
+    if (pwd && pwd.length < 8) { setErr("Password: at least 8 characters — or leave it blank and they sign up themselves."); return; }
+    let org = clients.find((c) => c.id === orgId);
+    if (orgId === "__new") {
+      org = { id: uid(), clientId: "", name: newOrg.trim() };
+      setClients((cs) => [org, ...cs]);
+    }
+    const u = {
+      id: user?.id || uuid(), name: name.trim(), email: addr, role: "client",
+      title: title.trim() || `${org?.name || "Client"} — client`,
+      orgId: org?.id || "", dept: org?.name || "", resourceRole: "", skills: [], projectTags: [],
+      maxProjects: 0, color: user?.color || _PALETTE[users.length % _PALETTE.length],
+    };
+    if (editing) updateUser(u); else addUser(u);
+    if (!pwd) { toast(`${u.name} saved — they sign up themselves with ${addr}`, "green"); onClose(); return; }
+    setBusy(true); setErr("");
+    const res = await provisionLogin(addr, pwd, name.trim());
+    setBusy(false);
+    if (res === "") { toast(`Login ready — ${addr} can sign in now`, "green"); onClose(); }
+    else if (res === "reset") { toast(`Password reset — ${addr} signs in with the new one`, "green"); onClose(); }
+    else setErr(res);
+  };
+  return (
+    <Modal title={editing ? `Edit ${user.name}` : "Add a client"} sub="Somebody from the customer's side — they see their company's projects, review the work, and get review tasks" onClose={onClose} width={560}
+      footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="green" icon={CheckCircle2} disabled={busy} onClick={save}>{busy ? "Creating login…" : editing ? "Save changes" : "Add the client"}</Btn></>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+        <Field label="Full name" req><input className="inp" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Rajesh Kumar" /></Field>
+        <Field label="Email" req>
+          <input className="inp" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="rajesh@customer.com" />
+          {email && emailProblem && <div style={{ fontSize: 11.5, color: "var(--red)", marginTop: 4 }}>{emailProblem}</div>}
+        </Field>
+        <Field label="Their company" req>
+          <select className="inp" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+            <option value="">— choose the company —</option>
+            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <option value="__new">+ a company not on the list…</option>
+          </select>
+          {orgId === "__new" && (
+            <input className="inp" style={{ marginTop: 6 }} value={newOrg} onChange={(e) => setNewOrg(e.target.value)} placeholder="Company name, e.g. Schneider Electric" />
+          )}
+        </Field>
+        <Field label="Their title at the company">
+          <input className="inp" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Sourcing Manager" />
+        </Field>
+        <Field label="Set their password (optional)">
+          <div style={{ display: "flex", gap: 7 }}>
+            <div style={{ position: "relative", flex: 1 }}>
+              <input className="inp" style={{ width: "100%", paddingRight: 34 }} type={showPwd ? "text" : "password"} value={pwd} onChange={(e) => { setPwd(e.target.value); setErr(""); }} placeholder="leave blank — they sign up themselves" />
+              <button onClick={() => setShowPwd((s) => !s)} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex" }}>{showPwd ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            </div>
+            <Btn small kind="ghost" onClick={() => { setPwd(genPassword()); setShowPwd(true); setErr(""); }} title="Generate a strong password">Generate</Btn>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--txt3)", marginTop: 5, lineHeight: 1.5 }}>With a password set, their login works the moment you save — share it with them and they sign in at this same URL.</div>
+        </Field>
+        {err && <div style={{ fontSize: 12, color: "var(--red)", fontWeight: 600 }}>{err}</div>}
+      </div>
+    </Modal>
+  );
+}
+
+function ClientsModule() {
+  const { users, clients, projects, removeUser } = useCtx();
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [confirmDel, setConfirmDel] = useState("");
+  const people = clientPeople(users);
+  /* Every company that has people or projects, plus a bucket for anyone whose
+     company row has gone missing — nobody silently disappears. */
+  const groups = clients
+    .map((c) => ({ org: c, people: people.filter((u) => u.orgId === c.id), projects: projects.filter((p) => p.orgId === c.id) }))
+    .filter((g) => g.people.length || g.projects.length);
+  const orphans = people.filter((u) => !clients.some((c) => c.id === u.orgId));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {(adding || editing) && <AddClientModal user={editing} onClose={() => { setAdding(false); setEditing(null); }} />}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 19, fontWeight: 800 }}>Add Clients</div>
+          <div style={{ fontSize: 12.5, color: "var(--txt2)", marginTop: 3, lineHeight: 1.55 }}>
+            Customer-side logins. A client signs in like anyone else, sees only their company's projects, reviews the quality of each task, and receives the review tasks you send with the dependency written on them. Name them on a project from the project's <b>Client side</b> panel.
+          </div>
+        </div>
+        <Btn icon={UserPlus} style={{ marginLeft: "auto" }} onClick={() => setAdding(true)}>Add a client</Btn>
+      </div>
+      {groups.length === 0 && orphans.length === 0 ? (
+        <Empty icon={Building2} title="No clients yet" sub="Add the first customer-side person — pick or create their company, set a password, and they can sign in right away." />
+      ) : (
+        [...groups, ...(orphans.length ? [{ org: { id: "__none", name: "No company set" }, people: orphans, projects: [] }] : [])].map((g) => (
+          <Section key={g.org.id}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: g.people.length ? 11 : 0, flexWrap: "wrap" }}>
+              <Building2 size={15} style={{ color: "var(--acc)" }} />
+              <span style={{ fontWeight: 800, fontSize: 14 }}>{g.org.name}</span>
+              <Pill color="var(--acc)">{g.people.length} {g.people.length === 1 ? "person" : "people"}</Pill>
+              {g.projects.length > 0 && <Pill color="var(--purple)">{g.projects.length} project{g.projects.length === 1 ? "" : "s"}</Pill>}
+            </div>
+            {g.people.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--txt3)" }}>Projects exist for this company but nobody from their side has a login yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {g.people.map((u) => (
+                  <div key={u.id} style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid var(--bdr)", borderRadius: 10, padding: "9px 12px", background: "var(--s1)", flexWrap: "wrap" }}>
+                    <span style={{ width: 28, height: 28, borderRadius: "50%", background: u.color || "var(--acc)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11.5, fontWeight: 800, flexShrink: 0 }}>{(u.name || "?").split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase()}</span>
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{ fontWeight: 700, fontSize: 13 }}>{u.name}</span>
+                      <span style={{ display: "block", fontSize: 11.5, color: "var(--txt3)" }}>{u.email} · {u.title}</span>
+                    </span>
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+                      {u.authId ? <Pill color="var(--green)">can sign in</Pill> : <Pill color="var(--amber)">no login yet</Pill>}
+                      <Btn small kind="ghost" icon={Pencil} onClick={() => setEditing(u)}>Edit</Btn>
+                      {confirmDel === u.id ? (
+                        <Btn small kind="danger" icon={Trash2} onClick={() => { removeUser(u.id, u.name); setConfirmDel(""); }}>Sure?</Btn>
+                      ) : (
+                        <Btn small kind="ghost" icon={Trash2} onClick={() => setConfirmDel(u.id)} />
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
+        ))
+      )}
+    </div>
+  );
+}
+
 const NAV_GROUPS = [
   ["Projects", [
     { id: "projects", label: "Projects", icon: FolderPlus },
@@ -9762,6 +9913,7 @@ const NAV_GROUPS = [
   ]],
   ["Clients", [
     { id: "keyacc", label: "Key Accounts", icon: Building2, admin: true },
+    { id: "addclients", label: "Add Clients", icon: UserPlus, notRoles: ["engineer", "client"] },
     { id: "client", label: "Client Communication", icon: Video, notRoles: ["client"] },
   ]],
   ["Resources", [
@@ -10427,6 +10579,7 @@ export default function App() {
             {view === "memory" && <MemoryModule />}
             {view === "chats" && <ChatLogsModule />}
             {view === "keyacc" && <KeyAccountsModule />}
+            {view === "addclients" && <ClientsModule />}
           </div>
         </main>
         {view !== "assistant" && <WorkspaceChat />}
