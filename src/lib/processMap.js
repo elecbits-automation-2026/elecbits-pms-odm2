@@ -484,6 +484,7 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
   };
   const steps = [];
   const byNo = new Map();
+  let srcRows = 0;
   for (let i = headerRow + 1; i < flow.length; i++) {
     const r = flow[i];
     /* "118" is a step. "118.a"/"118.b" are its per-board copies, and the v11
@@ -492,6 +493,7 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
        step their base number names; the app re-expands per project itself. */
     const noMatch = /^(\d+)(?:[./][a-z0-9-]+)*$/i.exec(clean(r[C.no]));
     if (!noMatch || !clean(r[C.step])) continue;
+    srcRows++;
     const no = Number(noMatch[1]);
     const cell = (k) => (C[k] >= 0 ? clean(r[C[k]]) : "");
     /* The v11 Board column names each row's instance — a dated board folder
@@ -559,7 +561,7 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
     }
   }
   if (!steps.length) return { error: `${file.name} opened, but its Process Flow tab has no step rows.` };
-  say(`Process Flow parsed — ${flow.length - headerRow - 1} rows folded to ${steps.length} steps · ${linkedCount(steps)} carry their own file links`);
+  say(`Process Flow parsed — ${srcRows} pieces of work, ${steps.length} unique steps · nothing dropped: every board and run copy keeps its own link, dates and status`);
   {
     const scoped = steps.filter((s) => s.scope).length;
     if (scoped) say(`Split Rules read — ${scoped} steps declare their scope (${steps.filter((s) => /^mfg-/.test(s.scope)).length} manufacturing)`);
@@ -733,11 +735,27 @@ export async function loadProcessMapFromUpload(file, { onStage } = {}) {
   say(kept ? "Saved — this workbook survives reloads on this browser" : SOURCE.error);
   say("Adopted as the method ✓");
   const linked = steps.filter((x) => x.openLink).length;
-  return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked,
+  return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked, rows: srcRows,
            projectCopy: projectCopy?.projectId || "",
            /* the parsed map, ready to be saved into the SHARED workspace so
               every login — clients included — reads this same plan */
            share: { map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy }, source: { ...SOURCE } } };
+}
+
+/* The quantity runs the LOADED MAP itself declares — read from the run ids
+   its rows carry ("1844-50", "1844-GW-119-50"). The workbook is the truth:
+   a run it knows about exists whether or not anyone typed it into a form. */
+export function runsInMap(serial) {
+  if (!serial) return [];
+  const qtys = new Set();
+  const re = new RegExp(`^${serial}-(\\d+)$`, "i");
+  for (const s of STEPS) {
+    for (const k of [...Object.keys(s.when || {}), ...Object.keys(s.openLinks || {})]) {
+      const m = re.exec(String(k).trim());
+      if (m) qtys.add(Number(m[1]));
+    }
+  }
+  return [...qtys].sort((a, b) => a - b);
 }
 
 /* A workbook somebody uploaded ANYWHERE, arriving through the shared

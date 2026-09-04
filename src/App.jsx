@@ -38,7 +38,7 @@ import { matchStep, fileNameFor, folderFor, pathFor, waveOf, STEPS, knowsWhereIt
          BLOCKS, CONVERGENCE, blocksInSequence, blockById, buildPlan as buildProcessPlan,
          sourceLine, servesOf, templateFor,
          LINKS, loadTemplateLinks, templateLinkFor, linksLine,
-         loadProcessMap, loadProcessMapFromUpload, adoptSharedMap, PIN, pinWorkbook, clearPin, SOURCE,
+         loadProcessMap, loadProcessMapFromUpload, adoptSharedMap, runsInMap, PIN, pinWorkbook, clearPin, SOURCE,
          projectCopyOf, WAVES, stepByNo, boardsOf, boardScoped, TEMPLATES,
          openLinkFor, locationFor, fileTargetFor, driveRootFor, driveFileIdOf } from "./lib/processMap.js";
 import { supabase, supabaseEnabled, supabaseConfigured, supabaseUrl, supabaseAnonKey, supabaseInitError } from "./lib/supabase.js";
@@ -3014,7 +3014,9 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
 function MfgRunSections({ p }) {
   const { tasks, users } = useCtx();
   const serial = serialOf(p.projectId);
-  const runs = p.runQtys || [];
+  /* The map is the truth: runs it carries exist even if nobody typed them
+     into the form. The typed list only ever ADDS. */
+  const runs = [...new Set([...(p.runQtys || []), ...runsInMap(serial)])].sort((a, b) => a - b);
   const boards = (p.boards || []).map((b) => ({ ref: b.ref || b.sku, main: !!b.main })).filter((b) => b.ref);
   const runSteps = STEPS.filter((s) => s.scope === "mfg-run");
   const boardSteps = STEPS.filter((s) => s.scope === "mfg-run-board");
@@ -3120,7 +3122,7 @@ function MfgRunSections({ p }) {
 function MfgRunTree({ mfg, compact = false }) {
   const { tasks, users } = useCtx();
   const serial = serialOf(mfg.projectId);
-  const runs = mfg.runQtys || [];
+  const runs = [...new Set([...(mfg.runQtys || []), ...runsInMap(serial)])].sort((a, b) => a - b);
   const boards = (mfg.boards || []).map((b) => ({ ref: b.ref || b.sku, main: !!b.main })).filter((b) => b.ref);
   const pm = users.find((u) => u.id === mfg.team?.[0]?.userId);
   const mfgTasks = tasks.filter((t) => t.projectId === mfg.projectId);
@@ -3707,7 +3709,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   {b.ref || b.sku} · {b.main ? "MAIN" : "daughter"}
                 </Pill>
               ))}
-              {(p.runQtys || []).map((q) => (
+              {[...new Set([...(p.runQtys || []), ...(p.kind === "mfg" ? runsInMap(serial) : [])])].sort((a, b) => a - b).map((q) => (
                 <button key={q} title="Open this run's steps in the plan"
                   onClick={() => { PENDING_RUN = `${serial}-${q}`; setTab("plan"); window.dispatchEvent(new CustomEvent("eb-open-run", { detail: `${serial}-${q}` })); }}
                   style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 800, padding: "3px 10px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--purple)", cursor: "pointer" }}>
@@ -8573,7 +8575,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                 )}
                 {wbModal.done && !wbModal.error && (
                   <div style={{ marginTop: 4, padding: "9px 11px", borderRadius: 9, background: "color-mix(in srgb, var(--green) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--green) 35%, transparent)", fontSize: 12, color: "var(--txt)" }}>
-                    <b>{wbModal.summary?.steps}</b> steps · <b>{wbModal.summary?.blocks}</b> blocks · <b>{wbModal.summary?.linked}</b> per-step links{wbModal.summary?.projectCopy ? <> · {wbModal.summary.projectCopy}'s copy</> : null} — every plan, task and work window now reads this workbook.
+                    <b>{wbModal.summary?.rows || wbModal.summary?.steps}</b> pieces of work · <b>{wbModal.summary?.steps}</b> unique steps · <b>{wbModal.summary?.blocks}</b> blocks · <b>{wbModal.summary?.linked}</b> per-step links{wbModal.summary?.projectCopy ? <> · {wbModal.summary.projectCopy}'s copy</> : null} — the design plan carries the board copies, the manufacturing plan carries every run, and every task and work window reads this workbook.
                   </div>
                 )}
               </div>
