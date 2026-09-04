@@ -27,7 +27,7 @@ begin
   join pg_class rel on rel.oid = con.conrelid
   join pg_namespace ns on ns.oid = rel.relnamespace
   where ns.nspname = 'core' and rel.relname = 'people'
-    and con.contype = 'c' and pg_get_constraintdef(con) ilike '%role%';
+    and con.contype = 'c' and pg_get_constraintdef(con.oid) ilike '%role%';
   if c_name is not null then
     execute format('alter table core.people drop constraint %I', c_name);
   end if;
