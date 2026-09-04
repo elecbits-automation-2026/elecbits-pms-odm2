@@ -368,9 +368,12 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
    What the workbook cannot know is filled from the bundled register: folders
    for the templates it never declares, the tree each one belongs to, what
    good looks like. An upload should improve the method, not amputate it.    */
-export async function loadProcessMapFromUpload(file) {
+export async function loadProcessMapFromUpload(file, { onStage } = {}) {
+  const say = (line) => { try { onStage?.(line); } catch { /* display only */ } };
+  say(`Reading ${file.name} — ${Math.max(1, Math.round((file.size || 0) / 1024))} KB…`);
   const XLSX = await import("xlsx");
   const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  say(`Workbook open — tabs: ${wb.SheetNames.join(", ")}`);
   /* blankrows matters: sheet_to_json silently DROPS fully-empty rows, which
      shifts every later row index off the sheet's real rows — and hyperlinks
      are addressed by the sheet's real rows. With blank rows kept and the
@@ -517,6 +520,11 @@ export async function loadProcessMapFromUpload(file) {
     if (loc) { if (boardKey) st.locations[boardKey] = st.locations[boardKey] || loc; st.location = st.location || loc; }
   }
   if (!steps.length) return { error: `${file.name} opened, but its Process Flow tab has no step rows.` };
+  say(`Process Flow parsed — ${flow.length - headerRow - 1} rows folded to ${steps.length} steps · ${linkedCount(steps)} carry their own file links`);
+  {
+    const scoped = steps.filter((s) => s.scope).length;
+    if (scoped) say(`Split Rules read — ${scoped} steps declare their scope (${steps.filter((s) => /^mfg-/.test(s.scope)).length} manufacturing)`);
+  }
 
   const templates = {};
   {
@@ -649,6 +657,8 @@ export async function loadProcessMapFromUpload(file) {
     });
   }
   mergedBlocks.forEach((b, i) => { b.seq = i + 1; });
+  say(`Templates matched — ${Object.keys(templates).length} · blocks — ${mergedBlocks.length}${synthN ? ` (${synthN} new for this workbook's categories)` : ""}`);
+  if (projectCopy?.projectId) say(`This is ${projectCopy.projectId}'s own copy — its step links serve that project`);
 
   adopt({ steps, templates,
     blocks: mergedBlocks.length ? mergedBlocks : (BUNDLED.blocks || []),
@@ -658,15 +668,29 @@ export async function loadProcessMapFromUpload(file) {
     from: "upload", error: "", fileName: file.name, path: "", editLink: "",
     modifiedTime: "", fetchedAt: new Date().toISOString(),
   });
-  try {
-    const payload = JSON.stringify({
-      map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy },
-      source: { ...SOURCE },
-    });
-    localStorage.setItem(CACHE_KEY, payload);
-    // The upload's own slot — the one a Drive sync can never overwrite.
-    localStorage.setItem(UPLOAD_KEY, payload);
-  } catch { /* quota */ }
+  /* The UPLOAD SLOT IS WRITTEN FIRST, and if the quota is full the Drive
+     cache is evicted to make room. The old order wrote the cache first and
+     let the upload's own save fail silently — so a reload resurrected the
+     WRONG workbook (a 554-step Drive copy of another project) over the one
+     somebody deliberately handed in. The upload is the deliberate act; it is
+     the copy that must survive the browser. */
+  const payload = JSON.stringify({
+    map: { steps, templates, blocks: MAP.blocks, convergence: MAP.convergence, projectCopy },
+    source: { ...SOURCE },
+  });
+  let kept = false;
+  try { localStorage.setItem(UPLOAD_KEY, payload); kept = true; }
+  catch {
+    try {
+      localStorage.removeItem(CACHE_KEY);
+      localStorage.setItem(UPLOAD_KEY, payload);
+      kept = true;
+    } catch { /* still too big — in-memory only */ }
+  }
+  if (kept) { try { localStorage.setItem(CACHE_KEY, payload); } catch { /* cache is optional */ } }
+  else SOURCE.error = "This workbook is too large for the browser to keep — it is the method for THIS session, but re-upload it after a reload.";
+  say(kept ? "Saved — this workbook survives reloads on this browser" : SOURCE.error);
+  say("Adopted as the method ✓");
   const linked = steps.filter((x) => x.openLink).length;
   return { ok: true, steps: steps.length, blocks: MAP.blocks.length, linked,
            projectCopy: projectCopy?.projectId || "" };

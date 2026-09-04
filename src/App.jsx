@@ -8341,12 +8341,24 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
     return () => window.removeEventListener("eb-process-map", bump);
   }, []);
   useEffect(() => { loadProcessMap(driveAction).then(() => setMapAt((n) => n + 1)); }, []);
+  /* The upload runs in a MODAL that narrates itself — what file, how many
+     rows, how they folded, how many links came out, whether it was saved —
+     so a 2 MB workbook of 840 rows never disappears into a silent spinner. */
+  const [wbModal, setWbModal] = useState(null);   // null | {file, lines: [], done, error}
   const uploadWorkbook = async (file) => {
-    setSrcNote(`Reading ${file.name}…`);
+    setWbModal({ file: file.name, lines: [], done: false, error: "" });
     try {
-      const r = await loadProcessMapFromUpload(file);
-      setSrcNote(r.error || `${file.name}: ${r.steps} steps adopted as the method`);
-    } catch (e) { setSrcNote(`Couldn't read ${file.name}: ${e?.message || e}`); }
+      const r = await loadProcessMapFromUpload(file, {
+        onStage: (line) => setWbModal((m) => (m ? { ...m, lines: [...m.lines, line] } : m)),
+      });
+      if (r.error) { setWbModal((m) => (m ? { ...m, done: true, error: r.error } : m)); setSrcNote(r.error); return; }
+      setWbModal((m) => (m ? { ...m, done: true, summary: r } : m));
+      setSrcNote(`${file.name}: ${r.steps} steps adopted as the method`);
+    } catch (e) {
+      const msg = `Couldn't read ${file.name}: ${e?.message || e}`;
+      setWbModal((m) => (m ? { ...m, done: true, error: msg } : m));
+      setSrcNote(msg);
+    }
   };
   const syncNow = async () => {
     if (syncStage) return;
@@ -8463,6 +8475,33 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
           <input ref={wbRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) uploadWorkbook(f); }} />
+          {wbModal && (
+            <Modal title="Upload the workbook" sub={wbModal.file} onClose={() => wbModal.done && setWbModal(null)} width={620}
+              footer={wbModal.done
+                ? <Btn kind={wbModal.error ? "ghost" : "green"} icon={CheckCircle2} onClick={() => setWbModal(null)}>{wbModal.error ? "Close" : "Done — it is the method now"}</Btn>
+                : <span style={{ fontSize: 11.5, color: "var(--txt3)", display: "flex", gap: 7, alignItems: "center" }}><Loader2 className="spin" size={13} /> working…</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {wbModal.lines.map((l, i) => (
+                  <div key={i} className="fade" style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12, lineHeight: 1.5 }}>
+                    <CheckCircle2 size={12} style={{ color: "var(--green)", flexShrink: 0, transform: "translateY(1.5px)" }} />
+                    <span style={{ color: "var(--txt)" }}>{l}</span>
+                  </div>
+                ))}
+                {!wbModal.lines.length && !wbModal.done && <div style={{ fontSize: 12, color: "var(--txt2)" }}>Opening the file…</div>}
+                {wbModal.error && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12, color: "var(--red)", fontWeight: 600 }}>
+                    <AlertTriangle size={12} style={{ flexShrink: 0, transform: "translateY(1.5px)" }} />
+                    <span>{wbModal.error}</span>
+                  </div>
+                )}
+                {wbModal.done && !wbModal.error && (
+                  <div style={{ marginTop: 4, padding: "9px 11px", borderRadius: 9, background: "color-mix(in srgb, var(--green) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--green) 35%, transparent)", fontSize: 12, color: "var(--txt)" }}>
+                    <b>{wbModal.summary?.steps}</b> steps · <b>{wbModal.summary?.blocks}</b> blocks · <b>{wbModal.summary?.linked}</b> per-step links{wbModal.summary?.projectCopy ? <> · {wbModal.summary.projectCopy}'s copy</> : null} — every plan, task and work window now reads this workbook.
+                  </div>
+                )}
+              </div>
+            </Modal>
+          )}
           <Btn small kind="ghost" icon={Upload} title="Hand over the process workbook directly — parsed here, no Drive needed"
                onClick={() => wbRef.current?.click()}>Upload the workbook</Btn>
           <Btn small kind={mine ? "primary" : "ghost"} icon={Users} onClick={() => setMine((v) => !v)}>{mine ? "Everyone's steps" : "Only mine"}</Btn>
