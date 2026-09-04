@@ -2382,16 +2382,23 @@ function ProjectsModule() {
           sub={isClient(my) ? "Your Elecbits project manager adds you to a project and it appears here — with its plan, its progress and the reviews waiting on you."
              : seesAll ? "Add an existing project — enter its Project ID, PM, linked PCB IDs, team, timeline and known status, and the OS starts tracking it."
                        : "Projects appear here once you are on a project's team or carry a task on one — ask your admin to staff you."} /></div>
-      ) : visibleProjects.map((p) => {
+      ) : visibleProjects.filter((p) => p.kind !== "mfg" || !visibleProjects.some((x) => normId(x.projectId) === normId(p.parentId || ""))).map((p) => {
+        /* A manufacturing project is not its own card — it lives INSIDE its
+           design project, as the run tree on that project's overview. It is
+           still a full project underneath (team, tasks, plan), reached
+           through the mfg chip — except for someone who can see ONLY the
+           manufacturing side (its Mfg PM), who keeps the card or they would
+           have no door at all. */
         const dl = daysLeft(p.deadline);
         const pm = p.team?.find((t) => t.slot.startsWith("PM"));
+        const mfgKid = projects.find((x) => x.kind === "mfg" && x.parentId === p.projectId);
         return (
           <div key={p.id} className="card rowHover" style={{ padding: 16, cursor: "pointer" }} onClick={() => setOpenId(p.id)} title="Open full progress & to-dos">
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
               <div style={{ minWidth: 240, flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: MONO, fontWeight: 600, fontSize: 13.5, color: "var(--acc)" }}>{p.projectId}</span>
-                  {p.kind === "mfg" && <Pill color="var(--purple)">Manufacturing · parent {p.parentId}</Pill>}
+                  {mfgKid && <Pill color="var(--purple)">mfg: {mfgKid.projectId}{(mfgKid.runQtys || []).length ? ` · ${mfgKid.runQtys.length} runs` : ""}</Pill>}
                   {(p.boards || []).some((b) => b.main) && (p.boards || []).length > 1 && <Pill color="var(--txt2)">{(p.boards || []).length} boards</Pill>}
                   {p.idMode === "manual" && <Pill color="var(--txt3)">manual ID</Pill>}
                   {Date.now() - new Date(p.createdAt).getTime() < 7 * 86400000 && <Pill color="var(--green)"><Zap size={10} /> NEW</Pill>}
@@ -2835,10 +2842,19 @@ function PlanAddTaskModal({ p, onClose }) {
     ])].filter(Boolean);
     return ids.map((id) => users.find((u) => u.id === id)).filter(Boolean);
   }, [p.team, p.clientTeam, users, me]);
+  /* The project's boards, as the short refs people use in conversation. A
+     subtask belongs to ONE board (or none — project-level work), and the
+     board is written into the title because the title is how everything
+     downstream (filing, step lights, lanes) reads board scope. */
+  const boardRefs = useMemo(() => {
+    const metas = (p.boards || []).map((b) => ({ ref: b.ref || b.sku, main: !!b.main })).filter((b) => b.ref);
+    if (metas.length) return metas;
+    return boardsOf(p).map((id, i) => ({ ref: id, main: i === 0 }));
+  }, [p.boards, p.linkedIds]);
   const [desc, setDesc] = useState("");
   const [due, setDue] = useState("");
   const [busy, setBusy] = useState(false);
-  const [prop, setProp] = useState(null);   // {block, why, rows: [{title, assigneeId, date, hours}]}
+  const [prop, setProp] = useState(null);   // {why, rows: [{title, assigneeId, date, hours, block, board}]}
   const nameToId = (name) => {
     const n = String(name || "").trim().toLowerCase();
     if (!n) return me;
@@ -2859,14 +2875,18 @@ The plan is these blocks, each with its date window:
 ${lanes.map((s) => `- ${s.name}: ${s.start || "?"} → ${s.end || "?"}`).join("\n") || "- (no plan dates yet)"}
 The people who can carry a task:
 ${candidates.map((u) => `- ${u.name} (${u.title || u.role})`).join("\n")}
+${boardRefs.length ? `The project's boards (a subtask about one board names it; project-level work names none):
+${boardRefs.map((b) => `- ${b.ref}${b.main ? " (MAIN)" : " (daughter)"}`).join("\n")}` : ""}
 ${my?.name || "Someone"} describes the task:
 """${desc.trim()}"""
 ${due ? `They want it done by ${due}.` : ""}
-Decide: which block it belongs to, who should do it, what date fits (inside the block's window where one exists, never after the deadline, never before today), and whether it is too big for one sitting and must be split into 2–4 subtasks.
+Decide: who should do each piece, what date fits (inside the right block's window where one exists, never after the deadline, never before today), and whether it is too big for one sitting and must be split into 2–4 subtasks.
+A task can span the process: EACH subtask carries the block IT belongs to, and they may differ — antenna layout is hardware design while vendor selection is sourcing. Never force unrelated work into one block.
 Answer STRICT JSON only, nothing else:
-{"block":"<block name copied exactly from the list above, or \\"\\" if none fits>","why":"<one plain sentence: where it sits and why, and whether you split it>","tasks":[{"title":"<imperative, specific>","assignee":"<name copied exactly from the people list>","date":"YYYY-MM-DD","hours":<1-8>}]}
+{"why":"<one plain sentence: where the pieces sit and why, and whether you split it>","tasks":[{"title":"<imperative, specific>","assignee":"<name copied exactly from the people list>","date":"YYYY-MM-DD","hours":<1-8>,"block":"<block name copied exactly from the list above, or \\"\\" if none fits>","board":"<one board ref from the boards list, or \\"\\" for project-level work>"}]}
 One entry in "tasks" means no split was needed; several entries ARE the split.`,
-        { maxTokens: 900, model: POWER_MODEL });
+        { maxTokens: 1100, model: POWER_MODEL });
+      const laneName = (b) => lanes.find((s) => s.name === b)?.name || String(b || "");
       const rows = (Array.isArray(r?.tasks) && r.tasks.length ? r.tasks : [{ title: desc.trim() }])
         .slice(0, 6)
         .map((t) => ({
@@ -2874,15 +2894,17 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
           assigneeId: nameToId(t.assignee),
           date: /^\d{4}-\d{2}-\d{2}$/.test(t.date || "") ? t.date : (due || todayStr()),
           hours: clamp(t.hours),
+          block: laneName(t.block ?? r?.block),
+          board: boardRefs.find((b) => b.ref.toLowerCase() === String(t.board || "").trim().toLowerCase())?.ref || "",
         }));
-      setProp({ block: lanes.find((s) => s.name === r?.block)?.name || String(r?.block || ""), why: String(r?.why || ""), rows });
+      setProp({ why: String(r?.why || ""), rows });
     } catch {
       /* AI unreachable — the task still gets raised, just without the
          placement worked out. It lands as raised-in-scrum and the filing
          pass picks it up later. */
       setProp({
-        block: "", why: "The AI could not be reached — placed as raised in the scrum; the plan will file it once it can.",
-        rows: [{ title: desc.trim().slice(0, 200), assigneeId: me, date: due || todayStr(), hours: 4 }],
+        why: "The AI could not be reached — placed as raised in the scrum; the plan will file it once it can.",
+        rows: [{ title: desc.trim().slice(0, 200), assigneeId: me, date: due || todayStr(), hours: 4, block: "", board: "" }],
       });
     }
     setBusy(false);
@@ -2894,12 +2916,17 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
     const made = prop.rows.filter((r) => r.title.trim()).map((r) => {
       const h = clamp(r.hours);
       const endTime = `${String(Math.min(18, 10 + h)).padStart(2, "0")}:00`;
-      const sn = matchStep({ title: r.title })?.no;
+      /* The board rides IN the title — that is how filing, the step lights
+         and the lanes read board scope everywhere else. */
+      const withBoard = r.board && !r.title.toLowerCase().includes(r.board.toLowerCase())
+        ? `${r.title.trim()} — ${r.board}` : r.title.trim();
+      const sn = matchStep({ title: withBoard })?.no;
       return {
-        id: uid(), projectId: p.projectId, linked: true, title: r.title.trim(),
+        id: uid(), projectId: p.projectId, linked: true, title: withBoard,
         assigneeId: r.assigneeId, date: r.date || todayStr(), startTime: "10:00", endTime,
         steps: [], conditions: [], status: "pending", origin: "plan-add",
-        ...(sn ? { stepNo: sn } : {}), ...(prop.block ? { block: prop.block } : {}),
+        ...(sn ? { stepNo: sn } : {}), ...(r.block ? { block: r.block } : {}),
+        ...(r.board ? { board: r.board } : {}),
         createdBy: me, createdAt: at, work: {},
       };
     });
@@ -2929,7 +2956,9 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <Pill color={prop.block ? "var(--acc)" : "var(--amber)"}>{prop.block || "No block fits — raised in the scrum"}</Pill>
+            {/* one task can span the process — every block involved is named */}
+            {[...new Set(prop.rows.map((r) => r.block).filter(Boolean))].map((b) => <Pill key={b} color="var(--acc)">{b}</Pill>)}
+            {prop.rows.every((r) => !r.block) && <Pill color="var(--amber)">No block fits — raised in the scrum</Pill>}
             {prop.rows.length > 1 && <Pill color="var(--purple)">split into {prop.rows.length} subtasks</Pill>}
           </div>
           {prop.why && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.55 }}>{prop.why}</div>}
@@ -2946,6 +2975,18 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
                     {[1, 2, 3, 4, 5, 6, 7, 8].map((h) => <option key={h} value={h}>{h} h</option>)}
                   </select>
                 </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <select className="inp" title="Which block of the process this piece belongs to" style={{ flex: 2, minWidth: 170 }} value={r.block} onChange={(e) => setRow(i, { block: e.target.value })}>
+                    <option value="">— no block · raised in the scrum —</option>
+                    {lanes.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+                  </select>
+                  {boardRefs.length > 0 && (
+                    <select className="inp" title="Which PCB this piece is about — project-level work names none" style={{ flex: 1, minWidth: 120 }} value={r.board} onChange={(e) => setRow(i, { board: e.target.value })}>
+                      <option value="">— whole project —</option>
+                      {boardRefs.map((b) => <option key={b.ref} value={b.ref}>{b.ref}{b.main ? " · MAIN" : ""}</option>)}
+                    </select>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -2953,6 +2994,75 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
         </div>
       )}
     </Modal>
+  );
+}
+
+/* ─── THE MANUFACTURING SIDE, INSIDE THE DESIGN PROJECT ─────────────────────
+   1844 lives inside 1809: the manufacturing project is not another card in
+   the Projects list, it is a section of the design project it serves. What
+   the section shows is the run tree in the registrar's own words — per run
+   1844-50, per board within it 1844-GW-119-50, per product build
+   1844-BUILD-50 — the same IDs the process map instance carries. */
+function MfgRunTree({ mfg, compact = false }) {
+  const { tasks, users } = useCtx();
+  const serial = serialOf(mfg.projectId);
+  const runs = mfg.runQtys || [];
+  const boards = (mfg.boards || []).map((b) => ({ ref: b.ref || b.sku, main: !!b.main })).filter((b) => b.ref);
+  const pm = users.find((u) => u.id === mfg.team?.[0]?.userId);
+  const mfgTasks = tasks.filter((t) => t.projectId === mfg.projectId);
+  const stat = (runId) => {
+    const mine = mfgTasks.filter((t) => (t.title || "").toUpperCase().includes(runId.toUpperCase()));
+    return { total: mine.length, done: mine.filter((t) => t.status === "done").length };
+  };
+  /* What each level of a run holds, read off the loaded process map. */
+  const nRun = STEPS.filter((s) => s.scope === "mfg-run").length;
+  const nBoard = STEPS.filter((s) => s.scope === "mfg-run-board").length;
+  const nBuild = STEPS.filter((s) => s.scope === "mfg-run-build").length;
+  const jump = () => window.dispatchEvent(new CustomEvent("eb-open-project", { detail: mfg.id }));
+  const chip = (id, color, done, total) => (
+    <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: MONO, fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 7, border: "1px solid var(--bdr)", background: "var(--s2)", color }}>
+      {id}
+      {total > 0 && <span style={{ fontSize: 9.5, color: done === total ? "var(--green)" : "var(--txt3)" }}>{done}/{total}</span>}
+    </span>
+  );
+  return (
+    <div style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 13, background: "var(--s1)", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <Pill color="var(--purple)">Manufacturing</Pill>
+        <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12.5, color: "var(--purple)" }}>{mfg.projectId}</span>
+        {pm && <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>Mfg PM: {pm.name}</span>}
+        <Pill color={statColor(mfg.status)}>{mfg.status}</Pill>
+        <button onClick={jump} style={{ marginLeft: "auto", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 11.5, fontWeight: 700 }}>
+          Open the manufacturing plan ↗
+        </button>
+      </div>
+      {runs.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: "var(--txt3)" }}>No quantity runs declared yet — quantities are frozen at issue, and each becomes its own run here ({serial}-50, {serial}-500…).</div>
+      ) : runs.map((q) => {
+        const runId = `${serial}-${q}`;
+        const st = stat(runId);
+        return (
+          <div key={q} style={{ border: "1px solid var(--bdr2)", borderRadius: 9, padding: "9px 11px", display: "flex", flexDirection: "column", gap: 7 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: MONO, fontWeight: 800, fontSize: 13, color: "var(--txt)" }}>{runId}</span>
+              <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{q} units · frozen at issue</span>
+              {st.total > 0 && <Pill color={st.done === st.total ? "var(--green)" : "var(--blue)"}>{st.done}/{st.total} to-dos done</Pill>}
+              {nRun > 0 && <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--txt3)" }}>{nRun} run steps · {nBoard}/board · {nBuild} build</span>}
+            </div>
+            {!compact && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {boards.map((b) => {
+                  const id = `${serial}-${b.ref}-${q}`;
+                  const s2 = stat(id);
+                  return chip(id, b.main ? "var(--acc)" : "var(--txt2)", s2.done, s2.total);
+                })}
+                {(() => { const id = `${serial}-BUILD-${q}`; const s2 = stat(id); return chip(id, "var(--amber)", s2.done, s2.total); })()}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3585,6 +3695,21 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             )}
           </Section>
           )}
+
+          {/* The manufacturing side of THIS project — the run tree in the
+              registrar's IDs, right where the design work lives. */}
+          {tab === "overview" && (() => {
+            const kids = p.kind === "mfg" ? [p] : projects.filter((x) => x.kind === "mfg" && x.parentId === p.projectId);
+            if (!kids.length) return null;
+            return (
+              <Section>
+                <CardLabel>Manufacturing — runs by quantity and PCB</CardLabel>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {kids.map((m) => <MfgRunTree key={m.id} mfg={m} />)}
+                </div>
+              </Section>
+            );
+          })()}
 
           {/* a glance at the plan from the overview, without the whole board */}
           {tab === "overview" && (p.plan?.stages || []).length > 0 && (
@@ -8110,9 +8235,13 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
      wrong placement would put somebody's work in the wrong block and be
      invisible; an unplaced one is at least visibly unplaced. */
   const { open: todosByStep, done: doneByStep } = useMemo(() => tasksByStep(tasks, boards), [tasks, boards.join(",")]);
+  /* A task that DECLARED its block (Add a task) is not unplaced — it files
+     under that block even when its words name no step. */
   const unplacedTodos = useMemo(
-    () => tasks.filter((t) => t.status !== "done" && !matchStep(t))
+    () => tasks.filter((t) => t.status !== "done" && !matchStep(t) && !t.block)
       .sort((a, b) => String(a.date || "9999").localeCompare(String(b.date || "9999"))), [tasks]);
+  const addsForBlock = (bid) => tasks.filter((t) =>
+    t.status !== "done" && !matchStep(t) && String(t.block || "").startsWith(`${bid} ·`));
   const plan = useMemo(
     () => buildProcessPlan(p, users, {
       // Two trees, not one: PM artefacts live under the project folder and
@@ -8147,6 +8276,11 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
     : plan.filter((r) => !r.board || r.board === boardPick);
   const rows = mine ? byBoard.filter((r) => String(r.assigneeId) === String(meId)) : byBoard;
   const inBlock = (id) => rows.filter((r) => r.block === id);
+  /* A v11 map carries manufacturing blocks too — on a DESIGN project those
+     have no rows at all (and vice versa), which is different from "filtered
+     out": a block with nothing in the whole plan simply is not this
+     project's work, and an empty shell would only mislead. */
+  const planHasBlock = new Set(plan.map((r) => r.block));
   const toggle = (id) => setOpenBlocks((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   /* System-raised to-dos COME FROM THE 308 — the step's own words, its owner,
@@ -8247,7 +8381,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
         <Empty icon={ListChecks} title="No steps land on you in this project" sub="Steps are handed out by the slot somebody holds on this project's team. If that looks wrong, check the team on the Overview tab." />
       )}
 
-      {groups.map((g) => (
+      {groups.filter((g) => g.blocks.some((b) => planHasBlock.has(b.id))).map((g) => (
         <div key={g.group} style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 800, color: "var(--txt)", letterSpacing: ".05em" }}>{g.group}</span>
@@ -8259,7 +8393,7 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
             </span>
           </div>
 
-          {g.blocks.map((b) => {
+          {g.blocks.filter((b) => planHasBlock.has(b.id)).map((b) => {
             const list = inBlock(b.id);
             const isOpen = openBlocks.has(b.id);
             return (
@@ -8435,6 +8569,25 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
                     </table>
                   </div>
                 ))}
+                {/* Work ADDED to this block — a task that chose its block in
+                    "Add a task" but names no step of the method. It belongs
+                    here, visibly, not in an unplaced pile at the bottom. */}
+                {isOpen && addsForBlock(b.id).length > 0 && (
+                  <div style={{ borderTop: "1px solid var(--bdr2)", padding: "8px 12px", display: "flex", flexDirection: "column", gap: 5 }}>
+                    <div style={{ fontSize: 9.5, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em" }}>Added to this block</div>
+                    {addsForBlock(b.id).map((t) => (
+                      <div key={t.id} style={{ display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap", fontSize: 11 }}>
+                        <span style={{ padding: "0 5px", borderRadius: 4, background: "color-mix(in srgb, var(--purple) 14%, transparent)", color: "var(--purple)", fontWeight: 800, fontSize: 9 }}>ADDED</span>
+                        <span style={{ color: "var(--txt)" }}>{t.title}</span>
+                        {t.board && <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, padding: "1px 6px", borderRadius: 5, background: "color-mix(in srgb, var(--blue) 14%, transparent)", color: "var(--blue)" }}>{t.board}</span>}
+                        <span style={{ color: "var(--txt3)" }}>
+                          {users.find((u) => u.id === t.assigneeId)?.name || "unassigned"}{t.date ? ` · ${fmtDate(t.date)}` : ""}
+                        </span>
+                        <Pill color={t.status === "blocked" ? "var(--amber)" : t.status === "in-progress" ? "var(--blue)" : "var(--txt3)"}>{t.status}</Pill>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -8618,7 +8771,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onAddTask
      those the words cannot place, because everything else is already sitting
      against the step it belongs to inside the Process view. */
   const unplaced = useMemo(
-    () => projTasks.filter((t) => t.status !== "done" && !matchStep(t)),
+    () => projTasks.filter((t) => t.status !== "done" && !matchStep(t) && !t.block),
     [projTasks, mapAt]);
   const stages = useMemo(() => {
     const fromMethod = processStages.map((s) => ({ ...s, ...(edits[s.id] || {}) }));

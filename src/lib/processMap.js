@@ -372,7 +372,11 @@ export async function loadProcessMapFromUpload(file) {
     const at = new Map();
     for (const addr in sh) {
       if (addr[0] === "!") continue;
-      const t = sh[addr]?.l?.Target;
+      /* Two ways a link is written: a real cell hyperlink, or an =HYPERLINK()
+         FORMULA — which is how the v11 instantiation scripts write column K.
+         The formula's first argument is the link. */
+      const t = sh[addr]?.l?.Target
+        || (String(sh[addr]?.f || "").match(/HYPERLINK\s*\(\s*"([^"]+)"/i) || [])[1];
       if (t) { const c = XLSX.utils.decode_cell(addr); at.set(`${c.r - origin.r}:${c.c - origin.c}`, t); }
     }
     return (r, c) => (c >= 0 ? at.get(`${r}:${c}`) || "" : "");
@@ -403,6 +407,10 @@ export async function loadProcessMapFromUpload(file) {
     // step runs per board or once for the project
     pcb: col(/^pcb$/),
     scope: col(/^scope$/),
+    // the v11 instance layout: one row per board/run, the Board column naming
+    // which, and the Split Rule column declaring how the step instances
+    board: col(/^board$/),
+    splitRule: col(/^split rule/),
     // EVERY per-board link column, not just the first: one project workbook
     // carries one "Open — <board>" column per PCB, and each is a source.
     opens: H.map((h, i) => (/^open\b/.test(h) ? i : -1)).filter((i) => i >= 0),
@@ -419,21 +427,35 @@ export async function loadProcessMapFromUpload(file) {
   }
 
   const flowLink = linksOf("Process Flow");
+  /* v11's Split Rule column, translated into the app's scope words. Board
+     steps run per board; Board-Main runs once, on the MAIN board; the Mfg-*
+     scopes belong to the manufacturing project, not the design one. */
+  const SPLIT_SCOPES = {
+    "project": "project", "board": "board", "board-main": "board-main",
+    "mfg-project": "mfg-project", "mfg-run": "mfg-run",
+    "mfg-runxboard": "mfg-run-board", "mfg-run-build": "mfg-run-build",
+  };
   const steps = [];
   const byNo = new Map();
   for (let i = headerRow + 1; i < flow.length; i++) {
     const r = flow[i];
-    /* "118" is a step; "118.a" and "118.b" are the SAME step run on two
-       boards — the 2-PCB copy writes one row per board, and the app folds
-       them back into one step carrying a link per board. It re-explodes per
-       project itself, so a workbook and a two-board plan never disagree
-       about what a step is. */
-    const noMatch = /^(\d+)(?:\.[a-z0-9]+)?$/i.exec(clean(r[C.no]));
+    /* "118" is a step. "118.a"/"118.b" are its per-board copies, and the v11
+       instance adds "373/50" and "373/50.a" — the same step run per quantity
+       run (and per board within a run). All copies fold back into the ONE
+       step their base number names; the app re-expands per project itself. */
+    const noMatch = /^(\d+)(?:[./][a-z0-9-]+)*$/i.exec(clean(r[C.no]));
     if (!noMatch || !clean(r[C.step])) continue;
     const no = Number(noMatch[1]);
     const cell = (k) => (C[k] >= 0 ? clean(r[C[k]]) : "");
-    const pcbRaw = cell("pcb");
+    /* The v11 Board column names each row's instance — a dated board folder
+       ("…-GW-119-040926  (main)"), a run ("1844-50"), or "—" for project
+       rows. The board KEY keeps the board name and drops the decoration. */
+    const boardCol = C.board >= 0
+      ? clean(r[C.board]).replace(/\s*\((main|daughter)\)\s*$/i, "").replace(/^[—–-]$/, "")
+      : "";
+    const pcbRaw = cell("pcb") || boardCol;
     const boardKey = pcbRaw && !/^both$/i.test(pcbRaw) ? pcbRaw : "";
+    const perRowBoards = C.pcb >= 0 || C.board >= 0;
     let st = byNo.get(no);
     if (!st) {
       st = {
@@ -444,14 +466,17 @@ export async function loadProcessMapFromUpload(file) {
         templateId: cell("templateId"), template: cell("template"),
         action: cell("action"), whatToDo: cell("whatToDo"),
         owner: cell("owner"), responsibility: cell("responsibility"), guidelines: cell("guidelines"),
-        // A declared scope ("Board" / "Project") outranks every inferred rule.
-        scope: cell("scope").toLowerCase() || "",
+        // A declared scope ("Board" / "Project") outranks every inferred
+        // rule — and v11 declares it as the Split Rule.
+        scope: cell("scope").toLowerCase()
+          || SPLIT_SCOPES[cell("splitRule").toLowerCase().replace(/×/g, "x").replace(/\s+/g, "")]
+          || "",
         openLink: "", openLinks: {}, masterLink: "", location: "", locations: {},
       };
       /* the older layouts: one row per step, per-board links as extra
          "Open — <board>" COLUMNS keyed by their own label. A per-row layout
          (a PCB column exists) owns its links row by row instead. */
-      for (const c of (C.pcb >= 0 ? [] : C.opens)) {
+      for (const c of (perRowBoards ? [] : C.opens)) {
         const label = clean(flow[headerRow][c]).replace(/^open\s*[—–-]?\s*/i, "").replace(/^this project$/i, "");
         const url = flowLink(i, c);
         if (url) st.openLinks[label] = url;
@@ -465,7 +490,7 @@ export async function loadProcessMapFromUpload(file) {
        would hand an unknown board the first board's link. */
     const url = flowLink(i, C.open);
     if (url) {
-      if (C.pcb >= 0) st.openLinks[boardKey] = st.openLinks[boardKey] || url;
+      if (perRowBoards) st.openLinks[boardKey] = st.openLinks[boardKey] || url;
       st.openLink = st.openLink || url;
     }
     const master = flowLink(i, C.master);
@@ -568,9 +593,47 @@ export async function loadProcessMapFromUpload(file) {
     if (projectId) projectCopy = { projectId, pcbId, pcbIds, pcbFolders,
       pmFolderLink: pmLink || pmText, pcbFolderLink: pcbLink || pcbText };
   }
+  /* The v11 instance carries no Project tab, but its FILE NAME is the project
+     id — "Eb21EL287011809040926_MasterProcessFlow_v11.xlsx". That identity is
+     what gates the per-step links to the right project, so it must not be
+     lost just because the tab is. */
+  if (!projectCopy) {
+    const stem = String(file.name || "").split("_")[0].trim();
+    if (/^eb\d/i.test(stem.replace(/[^a-z0-9]/gi, "")))
+      projectCopy = { projectId: stem, pcbId: "", pcbIds: [], pcbFolders: {}, pmFolderLink: "", pcbFolderLink: "" };
+  }
+
+  /* The v11 instance writes its Flow Map as prose, so no block table arrives
+     with it — and its category list outgrew the bundled blocks (commercial
+     cycles, design release, ECN, incoming, the BB blocks). A category no
+     block claims would fall out of every by-block view, so the gap is
+     synthesized: bundled blocks keep the categories they know, and every
+     category left over becomes a block of its own, in phase order. */
+  const baseBlocks = blocks.length ? blocks : (BUNDLED.blocks || []);
+  const claimed = new Set(baseBlocks.map((b) => b.category));
+  const catOrder = [...new Set(steps.map((s) => s.category).filter(Boolean))]
+    .map((name) => ({
+      name,
+      phase: Number((name.match(/^(\d+)/) || [])[1]) || 99,
+      first: Math.min(...steps.filter((s) => s.category === name).map((s) => s.no)),
+    }))
+    .sort((a, b) => a.phase - b.phase || a.first - b.first);
+  const mergedBlocks = [];
+  let synthN = 0;
+  for (const c of catOrder) {
+    if (claimed.has(c.name)) { mergedBlocks.push(...baseBlocks.filter((b) => b.category === c.name)); continue; }
+    synthN++;
+    const short = c.name.replace(/^\d+\s*·\s*/, "").trim();
+    mergedBlocks.push({
+      seq: 0, id: `N${synthN}`, group: "N", kind: "Serial", name: short,
+      label: `N${synthN} · ${short}`, block: "", category: c.name, sourceRows: "",
+      steps: steps.filter((s) => s.category === c.name).length, runs: "",
+    });
+  }
+  mergedBlocks.forEach((b, i) => { b.seq = i + 1; });
 
   adopt({ steps, templates,
-    blocks: blocks.length ? blocks : (BUNDLED.blocks || []),
+    blocks: mergedBlocks.length ? mergedBlocks : (BUNDLED.blocks || []),
     convergence: convergence.length ? convergence : (BUNDLED.convergence || []),
     projectCopy });
   Object.assign(SOURCE, {
@@ -644,9 +707,11 @@ export const BOARD_TRACKS = ["H", "F"];
    inside pre-design). A declared scope wins; the wave-track rule serves the
    workbooks that never say. */
 export const boardScoped = (step) =>
-  step?.scope === "board" ? true
-  : step?.scope === "project" ? false
+  ["board", "board-main", "mfg-run-board"].includes(step?.scope) ? true
+  : ["project", "mfg-project", "mfg-run", "mfg-run-build"].includes(step?.scope) ? false
   : BOARD_TRACKS.includes(String(step?.wave || "").charAt(0));
+/* Steps that belong to the MANUFACTURING project, not the design one. */
+export const mfgScoped = (step) => /^mfg-/.test(step?.scope || "");
 export const boardsOf = (project) => (project?.linkedIds || []).map((x) => String(x).trim()).filter(Boolean);
 
 /* The project workbook stays in the Project ID folder — ONE file per project,
@@ -1130,9 +1195,23 @@ export function buildPlan(project, users = [], opts = {}) {
     pcb: typeof opts.pcbRootFor === "function" ? (board ? opts.pcbRootFor(board) : "") : (opts.pcbRoot || ""),
   });
 
-  const steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
+  /* A v11 map carries the WHOLE method — design and manufacturing. A design
+     project plans the design side; a manufacturing project (kind "mfg")
+     plans the manufacturing side. A map with no mfg steps planned everything
+     for everyone before, and still does. */
+  const kind = project?.kind || opts.kind || "design";
+  const hasMfg = STEPS.some(mfgScoped);
+  let steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
+  if (hasMfg) steps = steps.filter((s) => (kind === "mfg" ? mfgScoped(s) : !mfgScoped(s)));
   const categories = only ? CATEGORIES.filter((c) => only.has(c.name)) : CATEGORIES;
   const when = scheduleSteps({ start, end, milestones: opts.milestones || [], steps, categories });
+  /* Product-level work happens once, on the MAIN board — declared at setup. */
+  const mainBoard = (() => {
+    const metas = project?.boards || [];
+    const m = metas.find((b) => b.main);
+    const id = m ? (m.sku || m.ref) : "";
+    return (id && boards.find((b) => String(b).toUpperCase() === String(id).toUpperCase())) || boards[0] || "";
+  })();
 
   /* A board-scoped step on a two-board project is two pieces of work: two
      schematics, two DRC gates, two fab releases — each with its own file, its
@@ -1142,8 +1221,10 @@ export function buildPlan(project, users = [], opts = {}) {
      count, and a single-board project builds the same plan it always did. */
   return steps.flatMap((s) => {
     const w = when.get(s.no) || {};
-    const perBoard = multi && boardScoped(s);
-    const instances = perBoard ? boards : [""];
+    /* Board-Main is board work that runs ONCE — on the MAIN board, never a
+       lane per board. Everything else board-scoped instances per board. */
+    const perBoard = multi && boardScoped(s) && s.scope !== "board-main";
+    const instances = perBoard ? boards : (multi && s.scope === "board-main") ? [mainBoard] : [""];
     return instances.map((board) => {
       const useBoard = board || pcbId;
       const roots = rootsFor(useBoard);
