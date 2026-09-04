@@ -8533,10 +8533,14 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
      agree, and said out loud when they do not. */
   const normId = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const copy = projectCopyOf();
-  const copyMatches = !!copy && !!normId(p.projectId) &&
-    (normId(copy.projectId) === normId(p.projectId) ||
-     normId(copy.projectId).includes(normId(p.projectId)) ||
-     normId(p.projectId).includes(normId(copy.projectId)));
+  /* The family's copy serves the family: the design project it names AND
+     the manufacturing project whose parent it is. 1844's run links live in
+     1809's workbook — flagging them "don't apply" there was wrong. */
+  const idMatches = (x) => !!normId(x) &&
+    (normId(copy?.projectId) === normId(x) ||
+     normId(copy?.projectId).includes(normId(x)) ||
+     normId(x).includes(normId(copy?.projectId)));
+  const copyMatches = !!copy && (idMatches(p.projectId) || (p.kind === "mfg" && idMatches(p.parentId)));
   /* Where each open to-do belongs. matchStep reads the words and is
      deliberately strict — half the significant words in common or it returns
      nothing — so a to-do lands on the step it names or on none at all. A
