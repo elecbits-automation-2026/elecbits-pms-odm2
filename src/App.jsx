@@ -119,8 +119,10 @@ const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Mf
    Design + manufacturing project IDs: Eb-21-EL-287-01-1809 — Elecbits, year,
    vertical, client account, sub-account, registrar serial. A derived project
    appends exactly ONE suffix block (…-1279-D-2) and is never suffixed again.
-   Legacy projects predate the grammar, so the form warns; it does not block. */
-const EB_PID_RE = /^EB-\d{2}-[A-Z0-9]{2,6}-\d{1,5}-\d{1,4}-\d{1,6}(-[A-Z]{1,3}-\d{1,4})?$/;
+   Legacy projects predate the grammar, so the form warns; it does not block.
+   A trailing 6-digit date block (…-1809-040926) is the instance-folder form
+   from the same spec and passes too. */
+const EB_PID_RE = /^EB-\d{2}-[A-Z0-9]{2,6}-\d{1,5}-\d{1,4}-\d{1,6}(-[A-Z]{1,3}-\d{1,4})?(-\d{6})?$/;
 const matchesIdGrammar = (id) => EB_PID_RE.test(String(id || "").trim().toUpperCase());
 
 /* ─── WHO CAN BE PUT IN A SLOT ────────────────────────────────────────────
