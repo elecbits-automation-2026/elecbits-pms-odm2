@@ -302,6 +302,24 @@ export async function loadProcessMap(readDrive, { force = false } = {}) {
       }
     }
 
+    /* Drive's synced copy can be ANOTHER project's instance — the pin points
+       wherever it points. Replacing a deliberately uploaded project copy
+       with a different project's workbook hands every step the wrong links
+       and, on a pre-v11 server reader, erases the manufacturing structure
+       entirely. The upload stands; the note says why. */
+    {
+      const slot = fromUploadSlot();
+      const stem = (n) => String(n || "").split("_")[0].replace(/[^a-z0-9]/gi, "").toLowerCase();
+      const upId = stem(slot?.map?.projectCopy?.projectId || slot?.source?.fileName);
+      const drId = stem(r.file?.name);
+      if (slot && upId && drId && upId !== drId && !upId.includes(drId) && !drId.includes(upId)) {
+        if (SOURCE.from !== "upload") { adopt(slot.map); Object.assign(SOURCE, slot.source); }
+        Object.assign(SOURCE, { from: "upload",
+          error: `Drive's synced copy is ${r.file?.name || "another project's workbook"} — keeping the uploaded ${slot.source?.fileName || "workbook"}. Pin this project's own copy to sync it from Drive.` });
+        return MAP;
+      }
+    }
+
     adopt({ steps: r.steps, templates: r.templates || {},
              // A workbook without a Flow Map (or a server that read none) must
              // not dissolve the block structure the whole plan is read by.
@@ -1197,12 +1215,14 @@ export function buildPlan(project, users = [], opts = {}) {
 
   /* A v11 map carries the WHOLE method — design and manufacturing. A design
      project plans the design side; a manufacturing project (kind "mfg")
-     plans the manufacturing side. A map with no mfg steps planned everything
-     for everyone before, and still does. */
+     plans its once-per-project steps HERE and its run-level steps in the
+     run sections, per declared run — never as one flat 800-row wall. A map
+     with no mfg steps planned everything for everyone before, and still
+     does. */
   const kind = project?.kind || opts.kind || "design";
   const hasMfg = STEPS.some(mfgScoped);
   let steps = only ? STEPS.filter((s) => only.has(s.category)) : STEPS;
-  if (hasMfg) steps = steps.filter((s) => (kind === "mfg" ? mfgScoped(s) : !mfgScoped(s)));
+  if (hasMfg) steps = steps.filter((s) => (kind === "mfg" ? s.scope === "mfg-project" : !mfgScoped(s)));
   const categories = only ? CATEGORIES.filter((c) => only.has(c.name)) : CATEGORIES;
   const when = scheduleSteps({ start, end, milestones: opts.milestones || [], steps, categories });
   /* Product-level work happens once, on the MAIN board — declared at setup. */

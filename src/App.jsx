@@ -2334,6 +2334,10 @@ const ChoiceCard = ({ title, sub, icon: Ic, onClick, on }) => (
 /* Another module (Key Accounts) can ask the Projects page to open straight
    onto one project — set this, switch the view, and the mount picks it up. */
 let PENDING_PROJECT_OPEN = null;
+/* And straight onto one TAB of it, and one RUN inside the manufacturing
+   plan — a run chip anywhere in the app is a door to that run's steps. */
+let PENDING_PROJECT_TAB = null;
+let PENDING_RUN = null;
 
 function ProjectsModule() {
   const { projects, setProjects, users, me, tasks, clients, sheetSync, toast } = useCtx();
@@ -3003,6 +3007,106 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
    the section shows is the run tree in the registrar's own words — per run
    1844-50, per board within it 1844-GW-119-50, per product build
    1844-BUILD-50 — the same IDs the process map instance carries. */
+/* ─── ONE RUN'S STEPS, run by run — the manufacturing plan's real shape ─────
+   The map's Split Rules say what a run holds: its own steps (Mfg-Run), each
+   board's steps inside it (Mfg-Run×Board), and the product build's
+   (Mfg-Run-Build). One section per declared run, in the registrar's IDs. */
+function MfgRunSections({ p }) {
+  const { tasks, users } = useCtx();
+  const serial = serialOf(p.projectId);
+  const runs = p.runQtys || [];
+  const boards = (p.boards || []).map((b) => ({ ref: b.ref || b.sku, main: !!b.main })).filter((b) => b.ref);
+  const runSteps = STEPS.filter((s) => s.scope === "mfg-run");
+  const boardSteps = STEPS.filter((s) => s.scope === "mfg-run-board");
+  const buildSteps = STEPS.filter((s) => s.scope === "mfg-run-build");
+  const [openRun, setOpenRun] = useState(() => { const v = PENDING_RUN; PENDING_RUN = null; return v || (runs.length ? `${serial}-${runs[0]}` : ""); });
+  useEffect(() => {
+    const go = (e) => { setOpenRun(e.detail); setTimeout(() => document.getElementById(`run-${e.detail}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 60); };
+    window.addEventListener("eb-open-run", go);
+    return () => window.removeEventListener("eb-open-run", go);
+  }, []);
+  const mfgTasks = tasks.filter((t) => t.projectId === p.projectId);
+  /* A step's state inside ONE run: the to-dos naming this run id whose words
+     matched this step. No task raised = red, some open = amber, all done. */
+  const stepState = (s, runId) => {
+    const mine = mfgTasks.filter((t) => (t.title || "").toUpperCase().includes(runId.toUpperCase()) && matchStep(t)?.no === s.no);
+    if (!mine.length) return "pending";
+    return mine.every((t) => t.status === "done") ? "done" : "active";
+  };
+  const row = (s, runId, board = "") => {
+    const st = stepState(s, runId);
+    const link = openLinkFor(s, board);
+    return (
+      <div key={`${s.no}-${board}`} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "4px 0", fontSize: 11.5, flexWrap: "wrap" }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: planColor(st), flexShrink: 0, alignSelf: "center" }} />
+        <span style={{ fontFamily: MONO, color: "var(--txt3)", width: 34, flexShrink: 0 }}>{s.no}</span>
+        <span style={{ color: "var(--txt)", flex: 1, minWidth: 200 }}>{s.step}</span>
+        {link && <a href={link} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", fontWeight: 700, textDecoration: "none", fontSize: 10.5 }}>Open ↗</a>}
+        <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{s.responsibility || s.owner || ""}</span>
+      </div>
+    );
+  };
+  if (p.kind !== "mfg") return null;
+  if (!runSteps.length && !buildSteps.length && !boardSteps.length) {
+    return (
+      <div style={{ border: "1px dashed var(--bdr2)", borderRadius: 9, padding: "11px 13px", fontSize: 11.5, color: "var(--txt2)", marginTop: 10 }}>
+        The loaded process map has no run-level steps — upload this project family's <b>Master-Process-Flow v11</b> workbook above, and each run below becomes its own board-by-board plan.
+      </div>
+    );
+  }
+  if (!runs.length) {
+    return <div style={{ border: "1px dashed var(--bdr2)", borderRadius: 9, padding: "11px 13px", fontSize: 11.5, color: "var(--txt2)", marginTop: 10 }}>No quantity runs declared yet — each frozen quantity becomes its own section here ({serial}-50, {serial}-500…).</div>;
+  }
+  return (
+    <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+        Runs — quantity frozen at issue · {runSteps.length} run steps, {boardSteps.length} per board, {buildSteps.length} per build
+      </div>
+      {runs.map((q) => {
+        const runId = `${serial}-${q}`;
+        const isOpen = openRun === runId;
+        return (
+          <div key={q} id={`run-${runId}`} style={{ border: "1px solid var(--bdr2)", borderRadius: 9, overflow: "hidden" }}>
+            <button onClick={() => setOpenRun(isOpen ? "" : runId)}
+              style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: "var(--s2)", border: "none", cursor: "pointer", textAlign: "left", color: "var(--txt)" }}>
+              <ChevronDown size={13} style={{ transform: isOpen ? "none" : "rotate(-90deg)", transition: "transform .15s", color: "var(--txt3)", flexShrink: 0 }} />
+              <span style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 800, color: "var(--purple)" }}>{runId}</span>
+              <span style={{ fontSize: 11, color: "var(--txt3)" }}>{q} units</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--txt3)", fontFamily: MONO }}>
+                {boards.map((b) => `${serial}-${b.ref}-${q}`).join(" · ")} · {serial}-BUILD-{q}
+              </span>
+            </button>
+            {isOpen && (
+              <div style={{ padding: "9px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+                {runSteps.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 3 }}>{runId} — the run itself</div>
+                    {runSteps.map((s) => row(s, runId))}
+                  </div>
+                )}
+                {boards.map((b) => (
+                  <div key={b.ref}>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: b.main ? "var(--acc)" : "var(--txt3)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 3 }}>
+                      {serial}-{b.ref}-{q} · {b.main ? "MAIN board" : "daughter board"}
+                    </div>
+                    {boardSteps.map((s) => row(s, `${serial}-${b.ref}-${q}`, b.ref))}
+                  </div>
+                ))}
+                {buildSteps.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "var(--amber)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 3 }}>{serial}-BUILD-{q} · product build — MAIN thread</div>
+                    {buildSteps.map((s) => row(s, `${serial}-BUILD-${q}`))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function MfgRunTree({ mfg, compact = false }) {
   const { tasks, users } = useCtx();
   const serial = serialOf(mfg.projectId);
@@ -3018,12 +3122,15 @@ function MfgRunTree({ mfg, compact = false }) {
   const nRun = STEPS.filter((s) => s.scope === "mfg-run").length;
   const nBoard = STEPS.filter((s) => s.scope === "mfg-run-board").length;
   const nBuild = STEPS.filter((s) => s.scope === "mfg-run-build").length;
-  const jump = () => window.dispatchEvent(new CustomEvent("eb-open-project", { detail: mfg.id }));
-  const chip = (id, color, done, total) => (
-    <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: MONO, fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 7, border: "1px solid var(--bdr)", background: "var(--s2)", color }}>
+  const jump = () => { PENDING_PROJECT_TAB = "plan"; window.dispatchEvent(new CustomEvent("eb-open-project", { detail: mfg.id })); };
+  /* Every run id is a door: it opens the manufacturing plan ON that run. */
+  const openRun = (runId) => { PENDING_RUN = runId; PENDING_PROJECT_TAB = "plan"; window.dispatchEvent(new CustomEvent("eb-open-project", { detail: mfg.id })); window.dispatchEvent(new CustomEvent("eb-open-run", { detail: runId })); };
+  const chip = (id, color, done, total, runId) => (
+    <button key={id} onClick={() => openRun(runId || id)} title="Open this run's steps in the manufacturing plan"
+      style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: MONO, fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 7, border: "1px solid var(--bdr)", background: "var(--s2)", color, cursor: "pointer" }}>
       {id}
       {total > 0 && <span style={{ fontSize: 9.5, color: done === total ? "var(--green)" : "var(--txt3)" }}>{done}/{total}</span>}
-    </span>
+    </button>
   );
   return (
     <div style={{ border: "1px solid var(--bdr)", borderRadius: 11, padding: 13, background: "var(--s1)", display: "flex", flexDirection: "column", gap: 10 }}>
@@ -3044,7 +3151,8 @@ function MfgRunTree({ mfg, compact = false }) {
         return (
           <div key={q} style={{ border: "1px solid var(--bdr2)", borderRadius: 9, padding: "9px 11px", display: "flex", flexDirection: "column", gap: 7 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontFamily: MONO, fontWeight: 800, fontSize: 13, color: "var(--txt)" }}>{runId}</span>
+              <button onClick={() => openRun(runId)} title="Open this run's steps in the manufacturing plan"
+                style={{ fontFamily: MONO, fontWeight: 800, fontSize: 13, color: "var(--txt)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>{runId}</button>
               <span style={{ fontSize: 10.5, color: "var(--txt3)" }}>{q} units · frozen at issue</span>
               {st.total > 0 && <Pill color={st.done === st.total ? "var(--green)" : "var(--blue)"}>{st.done}/{st.total} to-dos done</Pill>}
               {nRun > 0 && <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--txt3)" }}>{nRun} run steps · {nBoard}/board · {nBuild} build</span>}
@@ -3054,9 +3162,9 @@ function MfgRunTree({ mfg, compact = false }) {
                 {boards.map((b) => {
                   const id = `${serial}-${b.ref}-${q}`;
                   const s2 = stat(id);
-                  return chip(id, b.main ? "var(--acc)" : "var(--txt2)", s2.done, s2.total);
+                  return chip(id, b.main ? "var(--acc)" : "var(--txt2)", s2.done, s2.total, runId);
                 })}
-                {(() => { const id = `${serial}-BUILD-${q}`; const s2 = stat(id); return chip(id, "var(--amber)", s2.done, s2.total); })()}
+                {(() => { const id = `${serial}-BUILD-${q}`; const s2 = stat(id); return chip(id, "var(--amber)", s2.done, s2.total, runId); })()}
               </div>
             )}
           </div>
@@ -3096,7 +3204,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
   const [closedStages, setClosedStages] = useState([]);
-  const [tab, setTab] = useState("overview");
+  const [tab, setTab] = useState(() => { const t = PENDING_PROJECT_TAB; PENDING_PROJECT_TAB = null; return t || "overview"; });
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
   const chatLastAtts = useRef([]);      // so "save that here" still works next turn
@@ -3545,7 +3653,13 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   {b.ref || b.sku} · {b.main ? "MAIN" : "daughter"}
                 </Pill>
               ))}
-              {(p.runQtys || []).map((q) => <Pill key={q} color="var(--purple)">{serial}-{q}</Pill>)}
+              {(p.runQtys || []).map((q) => (
+                <button key={q} title="Open this run's steps in the plan"
+                  onClick={() => { PENDING_RUN = `${serial}-${q}`; setTab("plan"); window.dispatchEvent(new CustomEvent("eb-open-run", { detail: `${serial}-${q}` })); }}
+                  style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 800, padding: "3px 10px", borderRadius: 99, border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--purple)", cursor: "pointer" }}>
+                  {serial}-{q}
+                </button>
+              ))}
               {kids.map((k) => (
                 <button key={k.id} onClick={() => jump(k.id)} title="Registrar-issued manufacturing project — its own PM, this project as parent"
                   style={{ display: "flex", gap: 5, alignItems: "center", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 99, padding: "3px 10px", cursor: "pointer", color: "var(--purple)", fontWeight: 700, fontFamily: MONO }}>
@@ -5659,9 +5773,22 @@ function TasksModule() {
       {filtered.length === 0 && (group !== "project" || projGroups.length === 0) ? (
         <div className="card"><Empty icon={ListChecks} title="No tasks here yet" sub="Tasks arrive from Daily Scrum — write a note, organise it with AI, and push. Branch sub-tasks land here too." /></div>
       ) : group === "project" ? (
-        projGroups.map(([pid, ts]) => {
+        (() => {
+          /* The manufacturing project folds INTO its design project here too
+             — one card, with the manufacturing side as a strip inside it. It
+             stands alone only when its parent is not in this person's view. */
+          const pidSet = new Set(projGroups.map(([k]) => k));
+          const folded = new Set(); const subOf = new Map();
+          for (const [pid] of projGroups) {
+            const proj = projects.find((x) => x.projectId === pid);
+            if (proj?.kind === "mfg" && proj.parentId && pidSet.has(proj.parentId)) { folded.add(pid); subOf.set(proj.parentId, pid); }
+          }
+          return projGroups.filter(([pid]) => !folded.has(pid)).map(([pid, ts]) => {
           const p = projects.find((x) => x.projectId === pid);
           const done = ts.filter((t) => t.status === "done").length;
+          const mfgPid = subOf.get(pid);
+          const mfgP = mfgPid ? projects.find((x) => x.projectId === mfgPid) : null;
+          const mfgTs = mfgPid ? (projGroups.find(([k]) => k === mfgPid)?.[1] || []) : [];
           return (
             <div key={pid} className="card" style={{ overflow: "hidden" }}>
               <div style={{ padding: "13px 16px", borderBottom: "1px solid var(--bdr)", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", background: "var(--s2)" }}>
@@ -5685,9 +5812,25 @@ function TasksModule() {
                   You are on this project's team — no tasks raised for you yet. Open the project's plan to see where it stands.
                 </div>
               )}
+              {mfgP && (
+                <div style={{ borderTop: "1px solid var(--bdr)" }}>
+                  <div style={{ padding: "9px 16px", display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", background: "color-mix(in srgb, var(--purple) 5%, transparent)" }}>
+                    <Pill color="var(--purple)">Manufacturing</Pill>
+                    <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12, color: "var(--purple)" }}>{mfgP.projectId}</span>
+                    <Pill color={statColor(mfgP.status)}>{mfgP.status}</Pill>
+                    {(mfgP.runQtys || []).length > 0 && <span style={{ fontSize: 10.5, color: "var(--txt3)", fontFamily: MONO }}>{mfgP.runQtys.map((q) => `${serialOf(mfgP.projectId)}-${q}`).join(" · ")}</span>}
+                    <Btn small kind="ghost" style={{ padding: "3px 9px", fontSize: 11, marginLeft: "auto" }}
+                         onClick={() => { PENDING_PROJECT_OPEN = mfgP.id; setView("projects"); }}>Open ↗</Btn>
+                  </div>
+                  {mfgTs.length > 0 && (
+                    <div>{mfgTs.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+                  )}
+                </div>
+              )}
             </div>
           );
-        })
+          });
+        })()
       ) : group === "timeline" ? (
         timelineGroups.map(([dt, ts]) => (
           <div key={dt} className="card" style={{ overflow: "hidden" }}>
@@ -8593,6 +8736,9 @@ export function ProcessPlan({ p, users, meId, tasks = [] }) {
           })}
         </div>
       ))}
+
+      {/* a manufacturing project's real shape: one section per quantity run */}
+      <MfgRunSections p={p} />
 
       {unplacedTodos.length > 0 && (
         <div style={{ border: "1px solid var(--bdr2)", borderRadius: 9, padding: "11px 13px", marginBottom: 10 }}>
