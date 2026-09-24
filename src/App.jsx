@@ -1320,6 +1320,9 @@ Finish the job in one go. If an answer needs three lookups and two changes, do a
 
 Check before you claim. If you are asked what exists, look — do not answer from memory of the conversation. list_projects and read_drive are cheap.
 
+DRAFT BEFORE DOING
+Actions that CHANGE anything — projects, tasks, the team, memory, scrum notes, trainings, Drive writes — are not executed when you call them. Each call is captured into a DRAFT the person must approve. Still call the tools exactly as if they would run, all of them, in one complete pass: the full draft appears under your reply with Approve and Discard buttons. In your reply, say in one or two plain sentences what the draft will do and that it is waiting for their go-ahead — never claim it is already done. If they answer asking for a change, produce a fresh, complete draft with the corrected calls; the old draft is set aside automatically. Reads (list_projects, read_drive, list_folder, read_file, list_memory) still run immediately — use them freely to get the draft right.
+
 WHAT YOU CAN REACH
 · This workspace — projects, tasks, the team roster, the daily scrum, system memory, training.
 · The company's Google Drive, all of it under Eb-02-ODM — not only ${DRIVE_CHAIN}. list_folder opens any folder and shows what is in it, read_drive searches and reads the files. If you are asked what is somewhere, OPEN IT with list_folder rather than saying you cannot see it. File names in there are not standard: never expect a particular name, never say something is missing because it is not called what you expected. Look at what is actually there.
@@ -2753,7 +2756,7 @@ const PROJ_TABS = [
    the card below can ask, without either owning the answer. */
 const isOverdue = (t, nowMs) => !!(t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < (nowMs || Date.now()));
 const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
-  : isOverdue(t, nowMs) ? { Ic: Clock, label: "Overdue", color: "var(--red)" }
+  : isOverdue(t, nowMs) ? { Ic: Clock, label: `Overdue ${((d) => (d < 1 ? "today" : `${d}d`))(Math.floor(((nowMs || Date.now()) - hmToDate(t.date, t.endTime)) / 86400000))}`, color: "var(--red)" }
   : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
   : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
 
@@ -2763,8 +2766,22 @@ const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, lab
 function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
   const { Ic, label, color } = todoMeta(t, nowMs);
   const u = users.find((x) => x.id === t.assigneeId);
-  const { projects } = useCtx() || {};
+  const { projects, setTasks, me, toast } = useCtx() || {};
   const link = useMemo(() => taskOpenLink(t, projects), [t.id, t.title, t.stepNo, t.projectId, projects]);
+  /* The same doors the task has on My Projects & Tasks — edit and a manual
+     status — belong here too. Same guard, same history line. */
+  const my = users.find((x) => x.id === me);
+  const canAct = !!setTasks && (t.assigneeId === me || ["superadmin", "dept_head"].includes(my?.role) || t.createdBy === me);
+  const [editT, setEditT] = useState(false);
+  const changeStatus = (v) => {
+    if (!setTasks || v === t.status) return;
+    const at = new Date().toISOString();
+    const sLabel = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done" }[v] || v;
+    setTasks((ts) => ts.map((x) => (x.id === t.id
+      ? { ...x, status: v, ...(v === "done" ? { doneAt: at } : {}), history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `status → ${sLabel} (manual)` }] }
+      : x)));
+    toast?.(`Status → ${sLabel}`, v === "done" ? "green" : "acc");
+  };
   const [armDel, setArmDel] = useState(false);
   useEffect(() => { if (!armDel) return; const t2 = setTimeout(() => setArmDel(false), 4000); return () => clearTimeout(t2); }, [armDel]);
   return (
@@ -2792,12 +2809,22 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
         </select>
       )}
       <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+      {canAct && (
+        <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
+          title="Set the status by hand — the change is logged with your name"
+          style={{ width: 108, padding: "4px 6px", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+          {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+      )}
+      {canAct && <button onClick={() => setEditT(true)} title="Edit this task — title, person, dates, status; every edit is logged"
+        style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3, flexShrink: 0 }}><Pencil size={13} /></button>}
       {onDelete && (armDel ? (
         <Btn small kind="danger" icon={Trash2} onClick={() => { setArmDel(false); onDelete(); }}>Sure — delete</Btn>
       ) : (
         <button onClick={() => setArmDel(true)} title="Delete this to-do"
           style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3, flexShrink: 0 }}><Trash2 size={14} /></button>
       ))}
+      {editT && <TaskEditModal t={t} onClose={() => setEditT(false)} />}
     </div>
   );
 }
@@ -9678,7 +9705,10 @@ function SwimlaneBoard({ p, upd }) {
   /* every box's place on ONE shared canvas, so the flow can be drawn */
   const flat = used.flatMap((lane, li) => lane.boxes.map(({ b, col }) => ({ b, col, li })));
   flat.sort((a, b2) => a.col - b2.col);
-  const BX = 124, BW = 112, LH = 85, BH = 62, BT = 10;
+  /* BX − BW is the corridor between boxes: 24px, wide enough for a straight
+     vertical drop between lanes. The connectors are ELBOWS — horizontal,
+     down/up, horizontal — never curves. */
+  const BX = 136, BW = 112, LH = 85, BH = 62, BT = 10;
   const cx = (f) => f.col * BX + 8;
   const cy = (f) => f.li * LH + BT;
   const noteCount = (b) => {
@@ -9716,7 +9746,11 @@ function SwimlaneBoard({ p, upd }) {
                 const g = flat[i + 1];
                 const x1 = cx(f) + BW, y1 = cy(f) + BH / 2;
                 const x2 = cx(g), y2 = cy(g) + BH / 2;
-                return <path key={f.b.id} d={`M ${x1} ${y1} C ${x1 + 26} ${y1}, ${x2 - 26} ${y2}, ${x2 - 2} ${y2}`}
+                const xm = x1 + (x2 - x1) / 2;   // the middle of the corridor
+                const d = y1 === y2
+                  ? `M ${x1} ${y1} L ${x2 - 2} ${y2}`
+                  : `M ${x1} ${y1} L ${xm} ${y1} L ${xm} ${y2} L ${x2 - 2} ${y2}`;
+                return <path key={f.b.id} d={d}
                   fill="none" stroke="var(--txt3)" strokeWidth="1.4" opacity="0.65" markerEnd="url(#swimarrow)" />;
               })}
             </svg>
@@ -9897,6 +9931,7 @@ function PlanBoard({ p, upd, projTasks, users, busy, onBuild, onSheet, onAddTask
 /* An action line is only a success if it actually succeeded. Painting every
    one of them green with a tick made a run of failures read as a run of wins. */
 const sysColor = (m) => {
+  if (m.draft) return "var(--acc)";
   if (m.confirm) return "var(--amber)";
   if (m.ok === false) return "var(--red)";
   if (m.ok === true) return "var(--green)";
@@ -10123,6 +10158,41 @@ const findProject = (projects, pid) => {
     || null;
 };
 const PAGE_NAMES = { projects: "Create a Project", scrum: "Daily Scrum", tasks: "My Projects & Tasks", resources: "Resources", perf: "Performance & Training", memory: "System Memory", assistant: "Assistant" };
+
+/* ── THE DRAFT GATE ───────────────────────────────────────────────────────
+   The assistant no longer changes anything the moment the model asks. Reads
+   run live so the model can look things up; every WRITE is captured into a
+   draft the person sees under the reply — approve and it runs, answer back
+   and the model re-drafts, discard and nothing ever happened. */
+const ASSIST_LIVE = new Set(["list_projects", "read_drive", "list_folder", "read_file", "list_memory", "open_page"]);
+/* One plain-English line per drafted action — what the person reads before
+   pressing Approve. It must say everything the action will do. */
+const draftLine = (a) => {
+  const A = String(a.action || "").toLowerCase();
+  switch (A) {
+    case "create_project": return `Create project ${a.projectId || "(auto ID)"} — "${a.name || "unnamed"}"${(a.team || []).length ? `, with ${a.team.map((t) => t.name).join(", ")} on it` : ""}${a.deadline ? `, due ${a.deadline}` : ""}`;
+    case "update_project": return `Update ${a.projectId}${a.status ? ` — status → ${a.status}` : ""}${a.deadline ? `, deadline → ${a.deadline}` : ""}${a.name ? `, name → "${a.name}"` : ""}${a.knownStatus ? `, status note → "${String(a.knownStatus).slice(0, 70)}"` : ""}`;
+    case "delete_project": return `Delete project ${a.projectId} (its tasks stay)`;
+    case "delete_projects": return (a.all === true || !(a.projectIds || a.projects || []).length)
+      ? `Delete ALL projects${(a.except || a.keep || []).length ? ` except ${(a.except || a.keep).join(", ")}` : ""}`
+      : `Delete projects: ${(a.projectIds || a.projects || []).join(", ")}`;
+    case "assign_resource": return `Put ${a.name} on ${a.projectId}${a.slot ? ` as ${a.slot}` : ""}`;
+    case "unassign_resource": return `Take ${a.name} off ${a.projectId}`;
+    case "add_resource": return `Add ${a.name} to the team${a.title ? ` as ${a.title}` : ""}`;
+    case "add_task": return `Raise the task "${a.title}"${a.assignee ? ` for ${a.assignee}` : ""}${a.projectId ? ` on ${a.projectId}` : ""}${a.date ? `, ${a.date}` : ""}${a.endTime ? ` until ${a.endTime}` : ""}`;
+    case "update_task": return `Update the task "${a.match || a.title}"${a.status ? ` — ${a.status}` : ""}${a.assignee ? `, hand it to ${a.assignee}` : ""}${a.endTime ? `, due ${a.endTime}` : ""}`;
+    case "add_scrum_note": return `Write into ${a.date && a.date !== todayStr() ? `the ${a.date}` : "today's"} scrum: "${String(a.text || "").slice(0, 90)}"`;
+    case "add_memory": return `Remember the standing rule: "${a.title || String(a.content || "").slice(0, 70)}"`;
+    case "update_memory": return `Reword the standing rule "${a.match}"`;
+    case "delete_memory": return `Drop the standing rule "${a.match}"`;
+    case "assign_training": return `Assign the training "${a.title}" to ${a.name}${a.due ? `, due ${a.due}` : ""}`;
+    case "save_attachment": return `File the attachment "${a.name}" into ${a.projectId}'s Drive folder`;
+    case "write_drive_file": return `Write ${a.fileName || "a file"} into ${a.folderPath || a.projectId || "Drive"}`;
+    case "rename_drive_file": return `Rename "${a.fileName}" to "${a.newName}" in ${a.folderPath || a.projectId}`;
+    case "create_doc": return `Create the document ${a.fileName || a.title || "document.md"}${a.projectId || a.folderPath ? ` and file it in ${a.folderPath || a.projectId}` : ""}`;
+    default: return A.replace(/_/g, " ");
+  }
+};
 
 function AssistantModule() {
   const { users, me, projects, setProjects, tasks, setTasks, notes, setNotes, memory, setMemory, setTrainings, toast, sheetSync, setView, addUser, assistantLog, setAssistantLog } = useCtx();
@@ -10451,6 +10521,29 @@ function AssistantModule() {
       : `Deleted ${names.length} projects: ${names.join(", ")}.`, { ok: true });
   };
 
+  /* The Approve press: the drafted actions finally run, in order, against one
+     shared live state — so a drafted project exists by the time the drafted
+     task on it is raised. A delete inside an approved draft IS confirmed:
+     the person just read "Delete X" and pressed the button. */
+  const approveDraft = async (msgId, actions) => {
+    if (busy || !actions?.length) return;
+    setAssistantLog((x) => x.map((y) => (y.id === msgId ? { ...y, draft: null, text: "Approved — running it now…" } : y)));
+    setBusy(true); setStep("Running the approved draft");
+    const liveA = { projects: [...projects], tasks: [...tasks], attachments: lastAtts.current };
+    const lines = []; let failed = false;
+    for (const d of actions) {
+      try {
+        const r = await runAction(d, liveA);
+        if (r.confirm) { doDelete(r.confirm.ids); continue; }
+        if (r.doc) say("doc", "", { doc: r.doc });
+        if (r.line) { lines.push(r.line); if (r.ok === false) failed = true; }
+      } catch (e) { lines.push(`That step failed — ${String(e?.message || e).slice(0, 160)}`); failed = true; }
+    }
+    setAssistantLog((x) => x.map((y) => (y.id === msgId ? { ...y, ok: true, text: `Approved and run — ${actions.length} action${actions.length === 1 ? "" : "s"}.` } : y)));
+    if (lines.length) say("sys", lines.join("\n"), { ok: !failed });
+    setStep(""); setBusy(false);
+  };
+
   /* One turn, however many steps it takes. The model calls tools, sees what
      came back and decides what to do next, until the job is done. */
   const send = async (preset) => {
@@ -10461,10 +10554,16 @@ function AssistantModule() {
     if (sent.length) lastAtts.current = sent;
     const pool = sent.length ? sent : lastAtts.current;
     say("me", q || `Sent ${sent.map((a) => a.name).join(", ")}`, sent.length ? { files: sent.map((a) => ({ name: a.name, size: a.size })) } : null);
+    // A newer instruction replaces any draft still waiting — the model is
+    // about to produce a fresh one, and two live drafts of the same job is
+    // how something runs twice.
+    setAssistantLog((x) => x.map((y) => (y.draft
+      ? { ...y, draft: null, text: `${y.text}\n\nSuperseded — your newer message replaced this draft. Nothing in it was run.` }
+      : y)));
     setVal(""); setAtts([]); setBusy(true);
 
     const live = { projects: [...projects], tasks: [...tasks], attachments: pool };
-    const confirms = []; const docs = [];
+    const confirms = []; const docs = []; const drafts = [];
     // What actually changed, kept so the person sees a record and not only the
     // model's summary of itself. Reads are not changes and are left out.
     const changed = []; let anyFailed = false;
@@ -10479,6 +10578,13 @@ function AssistantModule() {
           client: p.clientName, linkedIds: p.linkedIds || [],
           team: (p.team || []).map((t) => `${users.find((u) => u.id === t.userId)?.name || "?"} (${t.slot})`),
         })));
+      }
+      /* THE GATE: a write does not run — it is drafted, shown, and waits for
+         the person's Approve. Reads pass through so the draft can be right. */
+      if (!ASSIST_LIVE.has(name)) {
+        const a = { action: name, ...input };
+        drafts.push(a);
+        return `DRAFTED, not executed: ${draftLine(a)}. Nothing has changed yet — the person sees the full draft under your reply with Approve and Discard buttons. Do not call this again for the same thing. In your reply, say briefly what the draft will do and that it waits for their approval; never claim it is done.`;
       }
       const r = await runAction({ action: name, ...input }, live);
       if (r.doc) docs.push(r.doc);
@@ -10532,9 +10638,12 @@ function AssistantModule() {
         onStep: (name, input) => setStep(stepLabel(name, input)),
         onText: (text) => { say("ai", text); spoke = true; },
       });
-      if (!spoke) say("ai", "Done.");
+      if (!spoke) say("ai", drafts.length ? "Here is the draft — approve it and I'll run it." : "Done.");
       for (const d of docs) say("doc", "", { doc: d });
       if (changed.length) say("sys", changed.join("\n"), { ok: !anyFailed });
+      if (drafts.length) {
+        say("sys", `Draft — nothing has been done yet. On your approval I will:\n${drafts.map((d, i) => `${i + 1}. ${draftLine(d)}`).join("\n")}\n\nApprove to run it, reply to have it changed, or discard it.`, { draft: drafts });
+      }
       if (confirms.length) {
         const ids = [...new Set(confirms.flatMap((c) => c.ids || []))];
         say("sys", confirms.length === 1
@@ -10582,11 +10691,19 @@ function AssistantModule() {
           )}
           {dayMsgs.map((m) => m.who === "sys" ? (
             <div key={m.id} className="fade" style={{ alignSelf: "flex-start", maxWidth: "88%", border: `1px solid ${sysColor(m)}`, background: `color-mix(in srgb, ${sysColor(m)} 8%, transparent)`, borderRadius: 11, padding: "10px 14px", fontSize: 12.5, lineHeight: 1.65, whiteSpace: "pre-wrap", display: "flex", gap: 9 }}>
-              {m.confirm || sysColor(m) !== "var(--green)"
+              {m.draft
+                ? <Sparkles size={15} style={{ color: "var(--acc)", flexShrink: 0, marginTop: 2 }} />
+                : m.confirm || sysColor(m) !== "var(--green)"
                 ? <AlertTriangle size={15} style={{ color: sysColor(m), flexShrink: 0, marginTop: 2 }} />
                 : <CheckCircle2 size={15} style={{ color: "var(--green)", flexShrink: 0, marginTop: 2 }} />}
               <div>
                 {m.text}
+                {m.draft && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+                    <Btn small kind="green" icon={CheckCircle2} disabled={busy} onClick={() => approveDraft(m.id, m.draft)}>Approve — do it</Btn>
+                    <Btn small kind="ghost" icon={Trash2} onClick={() => setAssistantLog((x) => x.map((y) => (y.id === m.id ? { ...y, draft: null, text: "Draft discarded — nothing was changed." } : y)))}>Discard</Btn>
+                  </div>
+                )}
                 {m.confirm && (
                   <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
                     <Btn small kind="danger" icon={Trash2} onClick={() => {
