@@ -1929,7 +1929,11 @@ const Countdown = ({ task, now }) => {
   const start = task.startTime ? hmToDate(task.date, task.startTime) : null;
   const diff = end - now;
   if (start && now < start) return <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt3)" }}>starts {task.startTime}</span>;
-  if (diff < 0) return <Pill color="var(--red)"><Clock size={11} /> OVERDUE {fmtDur(-diff)}</Pill>;
+  /* Days, not a ticking 215:01:22 — "how late is it" is a calendar question. */
+  if (diff < 0) {
+    const days = Math.floor(-diff / 86400000);
+    return <Pill color="var(--red)"><Clock size={11} /> OVERDUE {days < 1 ? "today" : `${days}d`}</Pill>;
+  }
   return <Pill color={diff < 15 * 60000 ? "var(--amber)" : "var(--blue)"}><Clock size={11} /> {fmtDur(diff)} left</Pill>;
 };
 const TypingDots = () => (
@@ -3304,6 +3308,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [momVal, setMomVal] = useState("");
   const [momWho, setMomWho] = useState("");
   const [momBusy, setMomBusy] = useState(false);
+  const [momAtts, setMomAtts] = useState([]);
+  const momFileRef = useRef(null);
   const [filing, setFiling] = useState(false);
   const [armClear, setArmClear] = useState(false);
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
@@ -3563,7 +3569,14 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
         id: uid(), date: todayStr(), time: nowHM(), by: me, byName: my?.name || "someone",
         attendees: momWho.trim(), raw, ai: ai || null, at,
         title: ai?.title || raw.split("\n")[0].slice(0, 60),
+        /* photos and documents from the room — kept on the session (small
+           images inline for the thumbnail) and pushed into the project's
+           Drive folder as they are */
+        files: momAtts.map((a) => ({ name: a.name, size: a.size, mime: a.mime,
+          dataUrl: a.b64 && /^image\//.test(a.mime || "") && a.b64.length < 400000 ? `data:${a.mime};base64,${a.b64}` : undefined })),
       };
+      for (const a of momAtts) { try { await saveAttachmentToDrive(a, p.projectId, driveScope(my?.role)); } catch { /* Drive optional */ } }
+      setMomAtts([]);
 
       // Actions become real tasks for real people.
       const raised = [];
@@ -4027,9 +4040,26 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               Type up what was discussed — a design argument, a supplier problem, a review that went badly. The AI pulls out what the challenge really was and how it was beaten, whose idea helped, what was decided, and what has to happen next. Actions become tasks, lessons go into system memory so the next project inherits them, and the write-up is filed in this project's folder.
             </div>
             <input className="inp" style={{ marginBottom: 8 }} placeholder="Who was in the room? (optional)" value={momWho} onChange={(e) => setMomWho(e.target.value)} />
-            <textarea className="inp" rows={5} placeholder="Ravi said the connector lead time is 6 weeks so the BoM freeze slips. Neha suggested the alternate from the approved list — same footprint, in stock. We agreed to switch and to check lead times before every freeze from now on…" value={momVal} onChange={(e) => setMomVal(e.target.value)} />
+            <textarea onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setMomAtts, toast); } }}
+              className="inp" rows={5} placeholder="Ravi said the connector lead time is 6 weeks so the BoM freeze slips. Neha suggested the alternate from the approved list — same footprint, in stock. We agreed to switch and to check lead times before every freeze from now on…" value={momVal} onChange={(e) => setMomVal(e.target.value)} />
+            {momAtts.length > 0 && (
+              <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+                {momAtts.map((a, i) => (
+                  <span key={i} style={{ display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid var(--bdr)", borderRadius: 8, padding: "3px 9px", fontSize: 11.5, background: "var(--s2)" }}>
+                    {/^image\//.test(a.mime || "") ? "🖼" : "📄"} {a.name}
+                    <button onClick={() => setMomAtts((x) => x.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", padding: 0 }}><X size={11} /></button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 9, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
               <Btn small icon={momBusy ? Loader2 : Sparkles} disabled={momBusy || !momVal.trim()} onClick={saveMom}>{momBusy ? "Writing it up…" : "Save and write it up"}</Btn>
+              <input ref={momFileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.xlsx,.csv,.txt,.md" style={{ display: "none" }}
+                onChange={(e) => { pickAttachments(e.target.files, setMomAtts, toast); e.target.value = ""; }} />
+              <Btn small kind="ghost" icon={Paperclip} onClick={() => momFileRef.current?.click()}
+                title="Attach photos or documents from the session — whiteboard shots, sketches, PDFs. They ride on the session and land in the project's Drive folder.">
+                Add photo / document
+              </Btn>
               <span style={{ fontSize: 11, color: "var(--txt3)" }}>{(p.moms || []).length} session{(p.moms || []).length === 1 ? "" : "s"} kept on this project</span>
             </div>
             {(p.moms || []).length > 0 && (
@@ -4834,7 +4864,9 @@ function ScrumModule() {
           <div className="fade" style={{ marginTop: 14, borderTop: "1px dashed var(--bdr2)", paddingTop: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
               <Pill color={preview.engine === "offline" ? "var(--amber)" : "var(--purple)"}>{preview.engine === "offline" ? "Offline parse — review carefully" : "AI organised"}</Pill>
-              <span style={{ fontSize: 12.5, color: "var(--txt2)" }}>{preview.summary}</span>
+              {/* the AI's read is a draft — fix its words before anything saves */}
+              <input className="inp" style={{ flex: 1, minWidth: 260, fontSize: 12.5, padding: "5px 9px" }} value={preview.summary || ""}
+                onChange={(e) => setPreview((pv) => ({ ...pv, summary: e.target.value }))} title="Edit the AI's summary — what you type here is what gets saved" />
             </div>
             <OrganisedTasks preview={preview} date={date} users={users} onPatch={updPrev} />
             <div style={{ display: "flex", gap: 10, marginTop: 13, flexWrap: "wrap" }}>
@@ -5048,7 +5080,8 @@ function ClientCallsModule() {
             <div className="fade" style={{ marginTop: 14, borderTop: "1px dashed var(--bdr2)", paddingTop: 14 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <Pill color="var(--purple)">AI organised</Pill>
-                <span style={{ fontSize: 12.5, color: "var(--txt2)" }}>{preview.summary}</span>
+                <input className="inp" style={{ flex: 1, minWidth: 260, fontSize: 12.5, padding: "5px 9px" }} value={preview.summary || ""}
+                  onChange={(e) => setPreview((pv) => ({ ...pv, summary: e.target.value }))} title="Edit the AI's summary — what you type here is what gets saved" />
               </div>
 
               {preview.decisions?.length > 0 && (
@@ -5449,12 +5482,14 @@ Rules:
 - targetFolder must be a folder path from the library above (the project-management side), never invented.
 Reply with JSON only: {"fits":"one|several|none","files":[{"id":"EB-T-…","name":"…","gives":"what this file contributes"}],"plan":"2-3 plain sentences on how the report gets built","targetFolder":"02-Project-Folder-R&D-PM/…/","reportName":"a short file name, no extension"}`;
 
-const reportBuildPrompt = (p, desc, advice, digest) => `You are the Elecbits ODM reporting brain. Write the report itself — the finished document, not a plan for one.
+const reportBuildPrompt = (p, desc, advice, digest, pmsCtx = "") => `You are the Elecbits ODM reporting brain. Write the report itself — the finished document, not a plan for one.
 PROJECT: ${p.projectId} — ${p.name || ""} | status ${p.status} | deadline ${p.deadline || "not set"}
 THE ASK: """${desc.slice(0, 1200)}"""
 THE FILES CHOSEN AND WHY: ${JSON.stringify(advice.files || []).slice(0, 1500)}
+WHAT THE PMS TOOL ITSELF KNOWS — the plan, tasks, timelines, files, and every comment people left in the tool. This is first-class source material; when Drive is quiet the whole report is written from THIS:
+"""${String(pmsCtx || "").slice(0, 8000)}"""
 WHAT DRIVE ACTUALLY HOLDS (folders, files, and text read from them):
-"""${String(digest || "Drive was quiet — write from the project facts above and say plainly which numbers are missing.").slice(0, 12000)}"""
+"""${String(digest || "Drive was quiet — write from the PMS context above and say plainly which file-borne numbers are missing.").slice(0, 12000)}"""
 Rules:
 - Markdown, with a title, a dated header line, and sections. Numbers over adjectives.
 - Never invent a figure. A number you do not have is written as "not on file" — a confident wrong number in a client report is the worst outcome this system can produce.
@@ -5651,7 +5686,8 @@ function BoardsCard({ p, upd }) {
 }
 
 function ReportsCard({ p, upd, users }) {
-  const { memory, toast } = useCtx();
+  const { memory, toast, tasks } = useCtx();
+  const projTasks = useMemo(() => (tasks || []).filter((t) => t.projectId === p.projectId), [tasks, p.projectId]);
   const [desc, setDesc] = useState(p.reportDraft || "");
   const [checking, setChecking] = useState(false);
   const [advice, setAdvice] = useState(null);
@@ -5677,7 +5713,18 @@ function ReportsCard({ p, upd, users }) {
       // read what the chosen files actually contain, then write from that
       const search = (advice.files || []).map((f) => f.name).join(" ").slice(0, 200) || desc.slice(0, 120);
       const { digest } = await driveReadDigest(p.projectId, p.linkedIds, { scope: "pm", search });
-      const r = await claude(reportBuildPrompt(p, desc, advice, digest), { maxTokens: 6000, model: POWER_MODEL });
+      /* everything the tool holds about this project rides along — plan
+         status, tasks, the gantt sheet, comments — so the report generates
+         even when Drive gives nothing back */
+      const open2 = projTasks.filter((t) => t.status !== "done");
+      const pmsCtx = [
+        projectDigest(p),
+        `KNOWN STATUS: ${(p.knownStatus || "—").slice(0, 600)}`,
+        `TASKS: ${projTasks.length} total, ${open2.length} open. Open: ${open2.slice(0, 20).map((t) => `${t.title} (${users.find((u) => u.id === t.assigneeId)?.name || "?"}, ${t.status}${t.date ? `, ${t.date}` : ""})`).join("; ") || "none"}`,
+        `DONE RECENTLY: ${projTasks.filter((t) => t.status === "done").slice(-15).map((t) => t.title).join("; ") || "—"}`,
+        `PLAN STAGES: ${(p.plan?.stages || []).map((s) => `${s.name} · ${s.status}`).join("; ").slice(0, 800) || "—"}`,
+      ].filter(Boolean).join("\n");
+      const r = await claude(reportBuildPrompt(p, desc, advice, digest, pmsCtx), { maxTokens: 6000, model: POWER_MODEL });
       if (!r?.markdown) { toast("The AI returned no report — try again", "amber"); return; }
       const name = `${p.projectId}_${(advice.reportName || "Report").replace(/[^\w-]+/g, "-")}_${todayStr()}.md`;
       const folder = String(advice.targetFolder || "02-Project-Folder-R&D-PM/").replace(/^\/+/, "");
@@ -5685,6 +5732,9 @@ function ReportsCard({ p, upd, users }) {
       const entry = { id: uid(), at: new Date().toISOString(), name, folder,
                       desc: desc.slice(0, 200), files: (advice.files || []).map((f) => f.name),
                       link: w?.fileId ? `https://drive.google.com/file/d/${w.fileId}/view` : "",
+                      /* the report itself stays IN the tool — readable and
+                         downloadable even when Drive refused the save */
+                      content: r.markdown,
                       error: typeof w === "string" ? w : "" };
       upd((cur) => ({ reports: [entry, ...(cur.reports || [])].slice(0, 50), reportDraft: "" }));
       setBuilt(entry);
@@ -5750,6 +5800,9 @@ function ReportsCard({ p, upd, users }) {
               <span style={{ fontFamily: MONO, fontSize: 10.5, color: "var(--acc)" }}>{r.name}</span>
               <span style={{ color: "var(--txt3)", fontSize: 10.5 }}>{fmtDate(r.at.slice(0, 10))} · from {r.files.join(", ").slice(0, 80) || "project data"}</span>
               {r.link && <a href={r.link} target="_blank" rel="noreferrer" style={{ fontSize: 10.5, color: "var(--acc)" }}>Open ↗</a>}
+              {r.content && <button onClick={() => downloadDoc({ fileName: r.name, content: r.content })}
+                style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 10.5, fontWeight: 700 }}
+                title="The report as generated — download it even if the Drive save failed">Download</button>}
             </div>
           ))}
         </div>
@@ -5824,9 +5877,23 @@ function inDayBucket(t, bucket, pickedDate) {
 const iso10 = (d) => new Date(d).toISOString().slice(0, 10);
 
 function TasksModule() {
-  const { tasks, setTasks, projects, users, me, now, setView } = useCtx();
+  const { tasks, setTasks, projects, users, me, now, setView, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
+  /* Admin multi-select: tick tasks anywhere in the list, act on all of them
+     at once. Every bulk change lands in each task's history. */
+  const [sel, setSel] = useState(() => new Set());
+  const toggleSel = (id) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const bulk = (fn, what, kind = "acc") => {
+    const at = new Date().toISOString();
+    setTasks((ts) => ts.flatMap((x) => {
+      if (!sel.has(x.id)) return [x];
+      const r = fn(x, at);
+      return r === null ? [] : [{ ...r, history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `${what} (bulk)` }] }];
+    }));
+    toast(`${sel.size} task(s): ${what}`, kind);
+    setSel(new Set());
+  };
   const isPM = my?.role === "pm";
   const myProjectIds = projects.filter((p) => (p.team || []).some((t) => t.userId === me)).map((p) => p.projectId);
   const amClient = isClient(my);
@@ -5927,6 +5994,23 @@ function TasksModule() {
           <Btn small kind="ghost" icon={Trash2} title="Delete every task currently shown — the filters above decide what that means"
             onClick={() => setArmAll(true)}>Delete all shown</Btn>
         ))}
+        {/* the bulk bar — appears the moment an admin ticks a task */}
+        {isAdmin && sel.size > 0 && (
+          <div className="fade" style={{ flexBasis: "100%", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "9px 12px", borderRadius: 10, border: "1px solid var(--acc)", background: "color-mix(in srgb, var(--acc) 7%, transparent)" }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: "var(--acc)" }}>{sel.size} selected</span>
+            <Btn small kind="green" icon={CheckCircle2} onClick={() => bulk((x, at) => ({ ...x, status: "done", doneAt: at }), "marked done", "green")}>Mark done</Btn>
+            <Btn small kind="ghost" icon={Play} onClick={() => bulk((x) => ({ ...x, status: "in-progress" }), "set in progress")}>In progress</Btn>
+            <select className="inp" style={{ width: 170, padding: "5px 8px", fontSize: 11.5 }} value=""
+              onChange={(e) => { const uid2 = e.target.value; if (!uid2) return; const nm = users.find((u) => u.id === uid2)?.name; bulk((x) => ({ ...x, assigneeId: uid2 }), `reassigned to ${nm}`); }}>
+              <option value="">Reassign to…</option>
+              {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <input type="date" className="inp" style={{ width: 145, padding: "5px 8px", fontSize: 11.5 }}
+              onChange={(e) => { if (e.target.value) bulk((x) => ({ ...x, date: e.target.value }), `moved to ${e.target.value}`); }} title="Move every selected task to this date" />
+            <Btn small kind="danger" icon={Trash2} onClick={() => bulk(() => null, "deleted", "amber")}>Delete</Btn>
+            <Btn small kind="ghost" onClick={() => setSel(new Set())}>Clear</Btn>
+          </div>
+        )}
         <div style={{ flexBasis: "100%", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <Calendar size={13} style={{ color: "var(--txt3)" }} />
           {DAY_BUCKETS.map(([k, label]) => (
@@ -5980,7 +6064,7 @@ function TasksModule() {
                 </div>
               </div>
               {ts.length ? (
-                <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+                <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} selectable={isAdmin} selected={sel.has(t.id)} onSelect={() => toggleSel(t.id)} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
               ) : (
                 <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--txt3)" }}>
                   You are on this project's team — no tasks raised for you yet. Open the project's plan to see where it stands.
@@ -5997,7 +6081,7 @@ function TasksModule() {
                          onClick={() => { PENDING_PROJECT_OPEN = mfgP.id; setView("projects"); }}>Open ↗</Btn>
                   </div>
                   {mfgTs.length > 0 && (
-                    <div>{mfgTs.map((t) => <TaskRow key={t.id} t={t} now={now} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+                    <div>{mfgTs.map((t) => <TaskRow key={t.id} t={t} now={now} selectable={isAdmin} selected={sel.has(t.id)} onSelect={() => toggleSel(t.id)} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
                   )}
                 </div>
               )}
@@ -6015,7 +6099,7 @@ function TasksModule() {
               </span>
               <Pill color="var(--txt2)" style={{ marginLeft: "auto" }}>{ts.length} task{ts.length === 1 ? "" : "s"}</Pill>
             </div>
-            <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showProject showAssignee={isAdmin} onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+            <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} selectable={isAdmin} selected={sel.has(t.id)} onSelect={() => toggleSel(t.id)} showProject showAssignee={isAdmin} onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
           </div>
         ))
       ) : (
@@ -6030,7 +6114,7 @@ function TasksModule() {
                 <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u?.title}</span>
                 <Pill color={open ? "var(--blue)" : "var(--green)"} style={{ marginLeft: "auto" }}>{open} open</Pill>
               </div>
-              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} showProject onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+              <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} selectable={isAdmin} selected={sel.has(t.id)} onSelect={() => toggleSel(t.id)} showProject onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
             </div>
           );
         })
@@ -6054,8 +6138,9 @@ function taskOpenLink(t, projects) {
   return href ? { href, name: fileTargetFor(st, t.projectId, board).name } : null;
 }
 
-function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplete, onDelete }) {
-  const { users, me, projects } = useCtx();
+function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplete, onDelete, selectable, selected, onSelect }) {
+  const { users, me, projects, setTasks, toast } = useCtx();
+  const [editT, setEditT] = useState(false);
   const link = useMemo(() => taskOpenLink(t, projects), [t.id, t.title, t.stepNo, t.projectId, projects]);
   const [open, setOpen] = useState(false);
   /* Deleting is deliberate: the first press arms, the second deletes, and
@@ -6066,9 +6151,21 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
   const my = users.find((u) => u.id === me);
   const canAct = t.assigneeId === me || ["superadmin", "dept_head"].includes(my?.role) || t.createdBy === me;
   const u = users.find((x) => x.id === t.assigneeId);
+  /* The manual door: status changed by hand, on the record — who and when. */
+  const changeStatus = (v) => {
+    if (!setTasks || v === t.status) return;
+    const at = new Date().toISOString();
+    const label = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done" }[v] || v;
+    setTasks((ts) => ts.map((x) => (x.id === t.id
+      ? { ...x, status: v, ...(v === "done" ? { doneAt: at } : {}), history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `status → ${label} (manual)` }] }
+      : x)));
+    toast?.(`Status → ${label}`, v === "done" ? "green" : "acc");
+  };
   return (
     <div style={{ borderBottom: "1px solid var(--bdr)" }}>
+      {editT && <TaskEditModal t={t} onClose={() => setEditT(false)} />}
       <div className="rowHover" style={{ padding: "11px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {selectable && <input type="checkbox" checked={!!selected} onChange={onSelect} onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }} />}
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: STATUS_DOT[t.status], flexShrink: 0 }} />
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1, minWidth: 180, textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt2)" : "var(--txt)" }}>{t.title}</span>
         {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
@@ -6082,7 +6179,16 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
         {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
         {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
         {t.status === "done" && t.aiVerification && <Pill color="var(--green)"><Bot size={10} /> {t.aiVerification.score}/10</Pill>}
-        <div style={{ display: "flex", gap: 7, marginLeft: "auto" }}>
+        <div style={{ display: "flex", gap: 7, marginLeft: "auto", alignItems: "center" }}>
+          {canAct && (
+            <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
+              title="Set the status by hand — the change is logged with your name"
+              style={{ width: 112, padding: "4px 6px", fontSize: 11, fontWeight: 600 }}>
+              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          )}
+          {canAct && <button onClick={() => setEditT(true)} title="Edit this task — title, person, dates, status; every edit is logged"
+            style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3 }}><Pencil size={13} /></button>}
           {canAct && t.status === "pending" && <Btn small icon={Play} onClick={onStart}>Start</Btn>}
           {canAct && (t.status === "in-progress" || t.status === "blocked") && (<>
             <Btn small kind="ghost" icon={FileText} onClick={onWork}>Work window</Btn>
@@ -6110,10 +6216,79 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
               <b style={{ color: "var(--amber)" }}>What waits on this:</b> {t.dependency}
             </div>
           )}
+          {(t.history || []).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <b style={{ color: "var(--txt)" }}>Change history:</b>
+              {(t.history || []).slice(-6).reverse().map((h, i) => (
+                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {String(h.at).slice(0, 16).replace("T", " ")} — {h.what}</div>
+              ))}
+            </div>
+          )}
           <TaskReviews t={t} />
         </div>
       )}
     </div>
+  );
+}
+
+/* Edit a task by hand — the option the AI path never replaces. Every field
+   change is written into the task's own history with who and when. */
+function TaskEditModal({ t, onClose }) {
+  const { users, setTasks, me, toast } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", status: t.status });
+  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
+  const save = () => {
+    const diffs = [];
+    if (f.title.trim() !== t.title) diffs.push(`title → "${f.title.trim().slice(0, 60)}"`);
+    if (f.assigneeId !== (t.assigneeId || "")) diffs.push(`assignee → ${users.find((u) => u.id === f.assigneeId)?.name || "unassigned"}`);
+    if (f.date !== (t.date || "")) diffs.push(`date → ${f.date || "—"}`);
+    if (f.startTime !== (t.startTime || "") || f.endTime !== (t.endTime || "")) diffs.push(`time → ${f.startTime || "…"}–${f.endTime || "…"}`);
+    if (f.status !== t.status) diffs.push(`status → ${f.status}`);
+    if (!diffs.length) { onClose(); return; }
+    const at = new Date().toISOString();
+    setTasks((ts) => ts.map((x) => (x.id === t.id
+      ? { ...x, title: f.title.trim() || x.title, assigneeId: f.assigneeId, date: f.date, startTime: f.startTime, endTime: f.endTime, status: f.status,
+          ...(f.status === "done" && x.status !== "done" ? { doneAt: at } : {}),
+          history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: diffs.join(", ") }] }
+      : x)));
+    toast("Task updated — the edit is on the record with your name", "green");
+    onClose();
+  };
+  return (
+    <Modal title="Edit task" sub="Changes are logged — who edited what, and when" onClose={onClose} width={540}
+      footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="green" icon={CheckCircle2} onClick={save}>Save changes</Btn></>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <Field label="Title" req><input className="inp" value={f.title} onChange={set("title")} /></Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Assignee">
+            <select className="inp" value={f.assigneeId} onChange={set("assigneeId")}>
+              <option value="">— unassigned —</option>
+              {users.filter((u) => u.id !== "u-admin").map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Status">
+            <select className="inp" value={f.status} onChange={set("status")}>
+              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <Field label="Date"><input type="date" className="inp" value={f.date} onChange={set("date")} /></Field>
+          <Field label="Start"><input type="time" className="inp" value={f.startTime} onChange={set("startTime")} /></Field>
+          <Field label="End"><input type="time" className="inp" value={f.endTime} onChange={set("endTime")} /></Field>
+        </div>
+        {(t.history || []).length > 0 && (
+          <Field label="Change history">
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 130, overflowY: "auto" }}>
+              {(t.history || []).slice().reverse().map((h, i) => (
+                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {String(h.at).slice(0, 16).replace("T", " ")} — {h.what}</div>
+              ))}
+            </div>
+          </Field>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -8098,6 +8273,22 @@ function MomCard({ m, showProject }) {
               ))}
             </div>
           )}
+          {(m.files || []).length > 0 && (
+            <div>
+              <CardLabel>From the room — photos and documents</CardLabel>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {m.files.map((f, i) => f.dataUrl ? (
+                  <a key={i} href={f.dataUrl} target="_blank" rel="noreferrer" title={f.name}>
+                    <img src={f.dataUrl} alt={f.name} style={{ height: 84, borderRadius: 8, border: "1px solid var(--bdr)", display: "block" }} />
+                  </a>
+                ) : (
+                  <span key={i} style={{ display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid var(--bdr)", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, background: "var(--s2)" }}>
+                    📄 {f.name} <span style={{ color: "var(--txt3)", fontSize: 10 }}>saved to the project's Drive folder</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {m.raw && (
             <details>
               <summary style={{ cursor: "pointer", fontSize: 11.5, color: "var(--txt3)", fontWeight: 600 }}>the notes as they were written</summary>
@@ -9331,12 +9522,32 @@ function GanttTab({ p, upd }) {
 /* ─── SOPs — the standard operating procedures this project runs on. Named
    links (Docs, Slides, Sheets), added one by one or pasted as a list, kept
    on the project for everyone including the client side. ───────────────── */
+/* Every kind of file a project ships on — the type is picked at upload so
+   the shelf reads like a BOM of documents, not a pile of links. */
+const FILE_TYPES = ["SOP", "Gerber", "BOM", "Schematic", "Layout", "Datasheet", "Firmware", "Enclosure / CAD", "Test Report", "Certificate", "PO / Invoice", "Other"];
+const guessFileType = (name) => {
+  const n = String(name || "").toLowerCase();
+  if (/gerber/.test(n)) return "Gerber";
+  if (/\bbom\b|bill of material/.test(n)) return "BOM";
+  if (/schematic/.test(n)) return "Schematic";
+  if (/layout/.test(n)) return "Layout";
+  if (/datasheet/.test(n)) return "Datasheet";
+  if (/firmware|\bfw\b|hex|bin\b/.test(n)) return "Firmware";
+  if (/enclosure|cad|step|3d/.test(n)) return "Enclosure / CAD";
+  if (/test report|report/.test(n)) return "Test Report";
+  if (/certificat|compliance/.test(n)) return "Certificate";
+  if (/invoice|\bpo\b|purchase order/.test(n)) return "PO / Invoice";
+  if (/sop|procedure/.test(n)) return "SOP";
+  return "Other";
+};
+
 function SopTab({ p, upd }) {
   const { users, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const readOnly = isClient(my);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
+  const [ftype, setFtype] = useState("SOP");
   const [bulk, setBulk] = useState("");
   const [renaming, setRenaming] = useState(null);   // {id, value}
   const [talk, setTalk] = useState(null);           // sop entry → comments modal
@@ -9349,11 +9560,11 @@ function SopTab({ p, upd }) {
     setRenaming(null);
   };
   const kindOf = (u) => /presentation/.test(u) ? "Slides" : /spreadsheets/.test(u) ? "Sheet" : /document/.test(u) ? "Doc" : "Link";
-  const addOne = (label, link, { silent = false } = {}) => {
+  const addOne = (label, link, { silent = false, type = "" } = {}) => {
     const clean = String(link || "").trim();
-    if (!/^https?:\/\//i.test(clean)) { if (!silent) toast("A SOP link starts with http(s)://", "amber"); return false; }
+    if (!/^https?:\/\//i.test(clean)) { if (!silent) toast("A file link starts with http(s)://", "amber"); return false; }
     const title = String(label || "").trim() || clean.replace(/^https?:\/\//, "").slice(0, 50);
-    upd((cur) => ({ sops: [...(cur.sops || []), { id: uid(), title, url: clean, by: me, byName: my?.name || "", at: new Date().toISOString() }] }));
+    upd((cur) => ({ sops: [...(cur.sops || []), { id: uid(), title, url: clean, ftype: type || guessFileType(title), by: me, byName: my?.name || "", at: new Date().toISOString() }] }));
     return true;
   };
   const addBulk = () => {
@@ -9378,8 +9589,12 @@ function SopTab({ p, upd }) {
       {sops.length === 0 ? (
         <div style={{ fontSize: 12.5, color: "var(--txt3)", marginBottom: 12 }}>No files pinned yet.</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
-          {sops.map((s) => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
+          {FILE_TYPES.filter((ty) => sops.some((s) => (s.ftype || guessFileType(s.title)) === ty)).map((ty) => (
+          <div key={ty}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: "var(--acc)", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 5 }}>{ty} · {sops.filter((s) => (s.ftype || guessFileType(s.title)) === ty).length}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {sops.filter((s) => (s.ftype || guessFileType(s.title)) === ty).map((s) => (
             <div key={s.id} style={{ display: "flex", alignItems: "baseline", gap: 9, border: "1px solid var(--bdr)", borderRadius: 10, padding: "9px 12px", background: "var(--s1)", flexWrap: "wrap" }}>
               <Pill color="var(--txt2)">{kindOf(s.url)}</Pill>
               {renaming?.id === s.id ? (
@@ -9404,15 +9619,21 @@ function SopTab({ p, upd }) {
               {!readOnly && <button onClick={() => upd((cur) => ({ sops: (cur.sops || []).filter((x) => x.id !== s.id) }))}
                 style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer" }}><X size={13} /></button>}
             </div>
+            ))}
+            </div>
+          </div>
           ))}
         </div>
       )}
       {!readOnly && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
-            <input className="inp" style={{ flex: 1, minWidth: 150 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Name · e.g. Code flashing SOP" />
-            <input className="inp" style={{ flex: 2, minWidth: 200, fontFamily: MONO }} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://docs.google.com/…" />
-            <Btn small icon={Plus} onClick={() => { if (addOne(name, url)) { setName(""); setUrl(""); } }}>Add SOP</Btn>
+            <select className="inp" style={{ width: 150 }} value={ftype} onChange={(e) => setFtype(e.target.value)} title="What kind of file this is — Gerber, BOM, schematic…">
+              {FILE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <input className="inp" style={{ flex: 1, minWidth: 150 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Name · e.g. Rev C Gerbers" />
+            <input className="inp" style={{ flex: 2, minWidth: 200, fontFamily: MONO }} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://docs.google.com/… or drive.google.com/…" />
+            <Btn small icon={Plus} onClick={() => { if (addOne(name, url, { type: ftype })) { setName(""); setUrl(""); } }}>Add file</Btn>
           </div>
           <div>
             <textarea className="inp" rows={3} value={bulk} onChange={(e) => setBulk(e.target.value)}
@@ -9454,6 +9675,12 @@ function SwimlaneBoard({ p, upd }) {
     lane.boxes.push({ b, col: i });
   });
   const used = lanes.filter((l) => l.boxes.length);
+  /* every box's place on ONE shared canvas, so the flow can be drawn */
+  const flat = used.flatMap((lane, li) => lane.boxes.map(({ b, col }) => ({ b, col, li })));
+  flat.sort((a, b2) => a.col - b2.col);
+  const BX = 124, BW = 112, LH = 85, BH = 62, BT = 10;
+  const cx = (f) => f.col * BX + 8;
+  const cy = (f) => f.li * LH + BT;
   const noteCount = (b) => {
     const n = (p.swimNotes || {})[b.id];
     return { c: n?.comments?.length || 0, l: n?.links?.length || 0 };
@@ -9468,30 +9695,49 @@ function SwimlaneBoard({ p, upd }) {
         <span style={{ fontSize: 11.5, color: "var(--txt2)" }}>Click a box: comment, pin links, or hand the AI a task for that block.</span>
       </div>
       <div style={{ overflowX: "auto", paddingBottom: 6 }}>
-        <div style={{ minWidth: Math.max(700, blocks.length * 128) }}>
-          {used.map((lane) => (
-            <div key={lane.name} style={{ display: "flex", alignItems: "stretch", borderBottom: "1px dashed var(--bdr2)" }}>
-              <div style={{ width: 118, flexShrink: 0, padding: "12px 8px", fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".05em", display: "flex", alignItems: "center", borderRight: "1px solid var(--bdr2)" }}>{lane.name}</div>
-              <div style={{ position: "relative", flex: 1, height: 84 }}>
-                {lane.boxes.map(({ b, col }) => {
-                  const st = statusOf(b);
-                  const n = noteCount(b);
-                  return (
-                    <button key={b.id} onClick={() => setOpen(b)} title={`${b.label || b.name} — click to comment, link, or raise a task`}
-                      style={{ position: "absolute", left: col * 124 + 8, top: 10, width: 112, height: 62,
-                        border: `1.5px solid ${planColor(st)}`, borderRadius: 9, background: "var(--s1)", cursor: "pointer",
-                        display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, padding: "6px 8px", textAlign: "left" }}>
-                      <span style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 800, color: planColor(st) }}>{b.id}</span>
-                      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt)", lineHeight: 1.25, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{b.name}</span>
-                      <span style={{ display: "flex", gap: 6, fontSize: 8.5, color: "var(--txt3)", fontWeight: 700 }}>
-                        {n.c > 0 && <span>💬 {n.c}</span>}{n.l > 0 && <span>🔗 {n.l}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+        <div style={{ display: "flex", minWidth: Math.max(700, blocks.length * BX + 140) }}>
+          <div style={{ width: 118, flexShrink: 0 }}>
+            {used.map((lane) => (
+              <div key={lane.name} style={{ height: LH, padding: "0 8px", fontSize: 10, fontWeight: 800, color: "var(--txt3)", textTransform: "uppercase", letterSpacing: ".05em", display: "flex", alignItems: "center", borderRight: "1px solid var(--bdr2)", borderBottom: "1px dashed var(--bdr2)" }}>{lane.name}</div>
+            ))}
+          </div>
+          <div style={{ position: "relative", flex: 1, height: used.length * LH }}>
+            {used.map((_, i) => (
+              <div key={i} style={{ position: "absolute", left: 0, right: 0, top: (i + 1) * LH - 1, borderBottom: "1px dashed var(--bdr2)" }} />
+            ))}
+            {/* THE FLOW — each block hands over to the next, across lanes */}
+            <svg width={blocks.length * BX + 24} height={used.length * LH} style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "visible" }}>
+              <defs>
+                <marker id="swimarrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                  <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--txt3)" />
+                </marker>
+              </defs>
+              {flat.slice(0, -1).map((f, i) => {
+                const g = flat[i + 1];
+                const x1 = cx(f) + BW, y1 = cy(f) + BH / 2;
+                const x2 = cx(g), y2 = cy(g) + BH / 2;
+                return <path key={f.b.id} d={`M ${x1} ${y1} C ${x1 + 26} ${y1}, ${x2 - 26} ${y2}, ${x2 - 2} ${y2}`}
+                  fill="none" stroke="var(--txt3)" strokeWidth="1.4" opacity="0.65" markerEnd="url(#swimarrow)" />;
+              })}
+            </svg>
+            {flat.map((f) => {
+              const { b } = f;
+              const st = statusOf(b);
+              const n = noteCount(b);
+              return (
+                <button key={b.id} onClick={() => setOpen(b)} title={`${b.label || b.name} — click to comment, link, or raise a task`}
+                  style={{ position: "absolute", left: cx(f), top: cy(f), width: BW, height: BH,
+                    border: `1.5px solid ${planColor(st)}`, borderRadius: 9, background: "var(--s1)", cursor: "pointer",
+                    display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, padding: "6px 8px", textAlign: "left" }}>
+                  <span style={{ fontFamily: MONO, fontSize: 9.5, fontWeight: 800, color: planColor(st) }}>{b.id}</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "var(--txt)", lineHeight: 1.25, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{b.name}</span>
+                  <span style={{ display: "flex", gap: 6, fontSize: 8.5, color: "var(--txt3)", fontWeight: 700 }}>
+                    {n.c > 0 && <span>💬 {n.c}</span>}{n.l > 0 && <span>🔗 {n.l}</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
       <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10.5, color: "var(--txt3)", flexWrap: "wrap" }}>
