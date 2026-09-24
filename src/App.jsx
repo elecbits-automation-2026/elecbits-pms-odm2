@@ -2755,7 +2755,11 @@ const PROJ_TABS = [
 /* Is this to-do past its own clock? Module scope so both the project page and
    the card below can ask, without either owning the answer. */
 const isOverdue = (t, nowMs) => !!(t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < (nowMs || Date.now()));
-const todoMeta = (t, nowMs) => t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
+/* Every task can be filed under one discipline — the same list everywhere:
+   the row on My Projects & Tasks, the card inside the project, the editor. */
+const TASK_CATS = ["Hardware", "Firmware", "Customer", "Vendors & Partnership", "Testing", "Documentation", "Industrial Design/Mechanical"];
+const todoMeta = (t, nowMs) => t.status === "done" ? { Ic: CheckCircle2, label: "Done", color: "var(--green)" }
+  : t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
   : isOverdue(t, nowMs) ? { Ic: Clock, label: `Overdue ${((d) => (d < 1 ? "today" : `${d}d`))(Math.floor(((nowMs || Date.now()) - hmToDate(t.date, t.endTime)) / 86400000))}`, color: "var(--red)" }
   : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
   : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
@@ -2782,13 +2786,21 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
       : x)));
     toast?.(`Status → ${sLabel}`, v === "done" ? "green" : "acc");
   };
+  const changeCat = (v) => {
+    if (!setTasks || v === (t.category || "")) return;
+    const at = new Date().toISOString();
+    setTasks((ts) => ts.map((x) => (x.id === t.id
+      ? { ...x, category: v, history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `category → ${v || "—"}` }] }
+      : x)));
+    toast?.(v ? `Filed under ${v}` : "Category cleared", "acc");
+  };
   const [armDel, setArmDel] = useState(false);
   useEffect(() => { if (!armDel) return; const t2 = setTimeout(() => setArmDel(false), 4000); return () => clearTimeout(t2); }, [armDel]);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", border: "1px solid var(--bdr)", borderRadius: 10, background: "var(--s1)" }}>
       <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt2)" : "var(--txt)" }}>{t.title}</div>
         <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
           {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
                       onClick={(e) => e.stopPropagation()}
@@ -2809,6 +2821,14 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
         </select>
       )}
       <Pill color={color} style={{ flexShrink: 0 }}>{label}</Pill>
+      {canAct ? (
+        <select className="inp" value={t.category || ""} onChange={(e) => changeCat(e.target.value)}
+          title="Classify this task — the change is logged with your name"
+          style={{ width: 122, padding: "4px 6px", fontSize: 11, fontWeight: 600, flexShrink: 0, color: t.category ? "var(--txt)" : "var(--txt3)" }}>
+          <option value="">— category —</option>
+          {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      ) : t.category ? <Pill color="var(--purple)" style={{ flexShrink: 0 }}>{t.category}</Pill> : null}
       {canAct && (
         <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
           title="Set the status by hand — the change is logged with your name"
@@ -3342,6 +3362,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
   const [closedStages, setClosedStages] = useState([]);
+  const [showDone, setShowDone] = useState(true);   // the Completed section on the To-dos tab
   const [tab, setTab] = useState(() => { const t = PENDING_PROJECT_TAB; PENDING_PROJECT_TAB = null; return t || "overview"; });
   const [chatAtts, setChatAtts] = useState([]);
   const chatFileRef = useRef(null);
@@ -4002,6 +4023,26 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
                     See all {todos.length} to-dos →
                   </button>
+                )}
+              </div>
+            )}
+            {/* The closed work, listed separately — the record of what this
+               project has already finished, newest first. Only on the To-dos
+               tab; the overview stays about what is open. */}
+            {tab === "tasks" && done.length > 0 && (
+              <div style={{ marginTop: 16, borderTop: "1px solid var(--bdr)", paddingTop: 12 }}>
+                <button onClick={() => setShowDone(!showDone)}
+                  style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", cursor: "pointer", padding: "2px 0", marginBottom: showDone ? 10 : 0 }}>
+                  <ChevronDown size={14} style={{ color: "var(--txt3)", transform: showDone ? "none" : "rotate(-90deg)", transition: "transform .15s" }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>Completed</span>
+                  <Pill color="var(--green)">{done.length} done</Pill>
+                </button>
+                {showDone && (
+                  <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[...done].sort((a, b) => String(b.doneAt || b.completedAt || "").localeCompare(String(a.doneAt || a.completedAt || "")))
+                      .map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
+                        onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
+                  </div>
                 )}
               </div>
             )}
@@ -5949,8 +5990,14 @@ function TasksModule() {
   const [armAll, setArmAll] = useState(false);
   useEffect(() => { if (!armAll) return; const t = setTimeout(() => setArmAll(false), 5000); return () => clearTimeout(t); }, [armAll]);
   const [pickedDate, setPickedDate] = useState(todayStr());
+  const [catF, setCatF] = useState("all");
+  /* This page lists the OPEN work only. Closed tasks still count in each
+     project's progress bar, and live in full inside the project's To-dos tab
+     under Completed. */
   const filtered = visible
+    .filter((t) => t.status !== "done")
     .filter((t) => (personF === "all" || t.assigneeId === personF) && (projF === "all" || t.projectId === projF))
+    .filter((t) => catF === "all" || (catF === "__none__" ? !t.category : t.category === catF))
     .filter((t) => inDayBucket(t, dayF, pickedDate))
     .sort(processOrder);
   const newProjects = projects.filter((p) => Date.now() - new Date(p.createdAt).getTime() < 7 * 86400000 && (isAdmin || (p.team || []).some((t) => t.userId === me)));
@@ -6009,6 +6056,11 @@ function TasksModule() {
         <select className="inp" style={{ width: 200, fontFamily: MONO, fontSize: 12 }} value={projF} onChange={(e) => setProjF(e.target.value)}>
           <option value="all">All projects</option>
           {projects.map((p) => <option key={p.id} value={p.projectId}>{p.projectId}</option>)}
+        </select>
+        <select className="inp" style={{ width: 165 }} value={catF} onChange={(e) => setCatF(e.target.value)} title="Only tasks filed under one category">
+          <option value="all">All categories</option>
+          {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+          <option value="__none__">No category yet</option>
         </select>
         <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)" }}>{filtered.length} task(s){!isAdmin && " · your view"}</span>
         {filtered.length > 0 && (armAll ? (
@@ -6070,7 +6122,10 @@ function TasksModule() {
           }
           return projGroups.filter(([pid]) => !folded.has(pid)).map(([pid, ts]) => {
           const p = projects.find((x) => x.projectId === pid);
-          const done = ts.filter((t) => t.status === "done").length;
+          // the rows below are open work only — the progress bar still counts
+          // everything, or "4/13 done" would read 0/9 the moment done was hidden
+          const allTs = visible.filter((t) => (t.projectId || "__unlinked__") === pid);
+          const done = allTs.filter((t) => t.status === "done").length;
           const mfgPid = subOf.get(pid);
           const mfgP = mfgPid ? projects.find((x) => x.projectId === mfgPid) : null;
           const mfgTs = mfgPid ? (projGroups.find(([k]) => k === mfgPid)?.[1] || []) : [];
@@ -6086,12 +6141,16 @@ function TasksModule() {
                        onClick={() => { PENDING_PROJECT_OPEN = p.id; setView("projects"); }}>Open ↗</Btn>
                 </>) : <Pill color="var(--amber)"><AlertTriangle size={11} /> Unlinked tasks</Pill>}
                 <div style={{ display: "flex", alignItems: "center", gap: 9, marginLeft: "auto", minWidth: 200, flex: 1, maxWidth: 320 }}>
-                  <Progress pct={ts.length ? (done / ts.length) * 100 : 0} color="var(--green)" />
-                  <span style={{ fontSize: 11.5, fontFamily: MONO, color: "var(--txt2)", whiteSpace: "nowrap" }}>{ts.length ? `${done}/${ts.length} done` : "no tasks yet"}</span>
+                  <Progress pct={allTs.length ? (done / allTs.length) * 100 : 0} color="var(--green)" />
+                  <span style={{ fontSize: 11.5, fontFamily: MONO, color: "var(--txt2)", whiteSpace: "nowrap" }}>{allTs.length ? `${done}/${allTs.length} done` : "no tasks yet"}</span>
                 </div>
               </div>
               {ts.length ? (
                 <div>{ts.map((t) => <TaskRow key={t.id} t={t} now={now} selectable={isAdmin} selected={sel.has(t.id)} onSelect={() => toggleSel(t.id)} showAssignee onStart={() => startTask(t)} onWork={() => setWorkT(t)} onComplete={() => setCompT(t)} onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); }} />)}</div>
+              ) : done > 0 ? (
+                <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--txt3)" }}>
+                  All {done} task{done === 1 ? "" : "s"} done — nothing open. The finished ones are inside the project, under Completed.
+                </div>
               ) : (
                 <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--txt3)" }}>
                   You are on this project's team — no tasks raised for you yet. Open the project's plan to see where it stands.
@@ -6188,6 +6247,14 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
       : x)));
     toast?.(`Status → ${label}`, v === "done" ? "green" : "acc");
   };
+  const changeCat = (v) => {
+    if (!setTasks || v === (t.category || "")) return;
+    const at = new Date().toISOString();
+    setTasks((ts) => ts.map((x) => (x.id === t.id
+      ? { ...x, category: v, history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `category → ${v || "—"}` }] }
+      : x)));
+    toast?.(v ? `Filed under ${v}` : "Category cleared", "acc");
+  };
   return (
     <div style={{ borderBottom: "1px solid var(--bdr)" }}>
       {editT && <TaskEditModal t={t} onClose={() => setEditT(false)} />}
@@ -6207,6 +6274,14 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
         {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
         {t.status === "done" && t.aiVerification && <Pill color="var(--green)"><Bot size={10} /> {t.aiVerification.score}/10</Pill>}
         <div style={{ display: "flex", gap: 7, marginLeft: "auto", alignItems: "center" }}>
+          {canAct ? (
+            <select className="inp" value={t.category || ""} onChange={(e) => changeCat(e.target.value)}
+              title="Classify this task — the change is logged with your name"
+              style={{ width: 122, padding: "4px 6px", fontSize: 11, fontWeight: 600, color: t.category ? "var(--txt)" : "var(--txt3)" }}>
+              <option value="">— category —</option>
+              {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          ) : t.category ? <Pill color="var(--purple)">{t.category}</Pill> : null}
           {canAct && (
             <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
               title="Set the status by hand — the change is logged with your name"
@@ -6263,7 +6338,7 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
 function TaskEditModal({ t, onClose }) {
   const { users, setTasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
-  const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", status: t.status });
+  const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", status: t.status, category: t.category || "" });
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
   const save = () => {
     const diffs = [];
@@ -6272,10 +6347,11 @@ function TaskEditModal({ t, onClose }) {
     if (f.date !== (t.date || "")) diffs.push(`date → ${f.date || "—"}`);
     if (f.startTime !== (t.startTime || "") || f.endTime !== (t.endTime || "")) diffs.push(`time → ${f.startTime || "…"}–${f.endTime || "…"}`);
     if (f.status !== t.status) diffs.push(`status → ${f.status}`);
+    if (f.category !== (t.category || "")) diffs.push(`category → ${f.category || "—"}`);
     if (!diffs.length) { onClose(); return; }
     const at = new Date().toISOString();
     setTasks((ts) => ts.map((x) => (x.id === t.id
-      ? { ...x, title: f.title.trim() || x.title, assigneeId: f.assigneeId, date: f.date, startTime: f.startTime, endTime: f.endTime, status: f.status,
+      ? { ...x, title: f.title.trim() || x.title, assigneeId: f.assigneeId, date: f.date, startTime: f.startTime, endTime: f.endTime, status: f.status, category: f.category,
           ...(f.status === "done" && x.status !== "done" ? { doneAt: at } : {}),
           history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: diffs.join(", ") }] }
       : x)));
@@ -6300,6 +6376,12 @@ function TaskEditModal({ t, onClose }) {
             </select>
           </Field>
         </div>
+        <Field label="Category">
+          <select className="inp" value={f.category} onChange={set("category")}>
+            <option value="">— no category —</option>
+            {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <Field label="Date"><input type="date" className="inp" value={f.date} onChange={set("date")} /></Field>
           <Field label="Start"><input type="time" className="inp" value={f.startTime} onChange={set("startTime")} /></Field>
