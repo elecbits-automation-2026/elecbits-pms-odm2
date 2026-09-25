@@ -3376,49 +3376,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [chatVal, setChatVal] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [planBusy, setPlanBusy] = useState(false);
-  const [momVal, setMomVal] = useState("");
-  const [momWho, setMomWho] = useState("");
-  const [momBusy, setMomBusy] = useState(false);
-  const [momAtts, setMomAtts] = useState([]);
-  /* Voice typing for the room with no Meet link: the mic listens, speech
-     becomes text in the note below, and "Save and write it up" turns it into
-     the MOM exactly as if it had been typed. Browser speech recognition —
-     Chrome and Edge carry it; nothing is sent anywhere except to transcribe. */
-  const [micOn, setMicOn] = useState(false);
-  const [micInterim, setMicInterim] = useState("");
-  const recRef = useRef(null);
-  const micWanted = useRef(false);
-  useEffect(() => () => { micWanted.current = false; try { recRef.current?.stop(); } catch { /* gone already */ } }, []);
-  const toggleMic = () => {
-    if (micOn) { micWanted.current = false; try { recRef.current?.stop(); } catch { /* fine */ } setMicOn(false); setMicInterim(""); return; }
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { toast("This browser has no speech recognition — Chrome and Edge do", "amber"); return; }
-    const rec = new SR();
-    rec.continuous = true; rec.interimResults = true; rec.lang = "en-IN";
-    rec.onresult = (e) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) {
-          const said = String(r[0]?.transcript || "").trim();
-          if (said) setMomVal((v) => (v ? v.replace(/\s+$/, "") + " " : "") + said + (/[.?!]$/.test(said) ? " " : ". "));
-        } else interim += r[0]?.transcript || "";
-      }
-      setMicInterim(interim);
-    };
-    rec.onerror = (e) => {
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        toast("Microphone blocked — allow it in the browser's site settings and try again", "amber");
-        micWanted.current = false; setMicOn(false);
-      }
-    };
-    // Chrome stops itself after a silence; keep listening until told to stop.
-    rec.onend = () => { if (micWanted.current) { try { rec.start(); } catch { setMicOn(false); } } else setMicOn(false); };
-    recRef.current = rec; micWanted.current = true;
-    try { rec.start(); setMicOn(true); toast("Listening — speak, and it types into the note below", "acc"); }
-    catch { toast("The microphone could not start", "amber"); micWanted.current = false; }
-  };
-  const momFileRef = useRef(null);
   const [filing, setFiling] = useState(false);
   const [armClear, setArmClear] = useState(false);
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
@@ -3654,92 +3611,6 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
     if (!att.tooBig && !att.failed) {
       const r = await saveAttachmentToDrive(att, p.projectId, driveScope(my?.role));
       if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${file.name} uploaded with the plan`);
-    }
-  };
-
-  /* Write up a brainstorm: the AI pulls out the challenges, whose ideas
-     helped, the decisions, the actions and the lessons — then the actions
-     become tasks, the lessons become memory, and the note goes to Drive. */
-  const saveMom = async () => {
-    const raw = momVal.trim();
-    if (!raw || momBusy) return;
-    setMomBusy(true);
-    try {
-      let ai = null;
-      try { ai = await claude(momPrompt(p, raw, momWho.trim(), users, memory), { maxTokens: 4000 }); } catch { ai = null; }
-      // Credit is only worth keeping if it points at a real person. The AI
-      // writes whatever name was said in the room ("Neha", "neha r"), so pin
-      // each one to the roster — that is what links an idea to its author's
-      // Performance page and keeps the leaderboard from splitting one person
-      // across three spellings.
-      if (ai?.ideas) ai.ideas = ai.ideas.map((i) => ({ ...i, by: findPerson(users, i.by)?.name || String(i.by || "").trim() }));
-      if (ai?.decisions) ai.decisions = ai.decisions.map((d) => ({ ...d, owner: findPerson(users, d.owner)?.name || d.owner || "" }));
-      const at = new Date().toISOString();
-      const entry = {
-        id: uid(), date: todayStr(), time: nowHM(), by: me, byName: my?.name || "someone",
-        attendees: momWho.trim(), raw, ai: ai || null, at,
-        title: ai?.title || raw.split("\n")[0].slice(0, 60),
-        /* photos and documents from the room — kept on the session (small
-           images inline for the thumbnail) and pushed into the project's
-           Drive folder as they are */
-        files: momAtts.map((a) => ({ name: a.name, size: a.size, mime: a.mime,
-          dataUrl: a.b64 && /^image\//.test(a.mime || "") && a.b64.length < 400000 ? `data:${a.mime};base64,${a.b64}` : undefined })),
-      };
-      for (const a of momAtts) { try { await saveAttachmentToDrive(a, p.projectId, driveScope(my?.role)); } catch { /* Drive optional */ } }
-      setMomAtts([]);
-
-      // Actions become real tasks for real people.
-      const raised = [];
-      for (const a of (ai?.actions || []).slice(0, 10)) {
-        if (!a.title) continue;
-        const u = findPerson(users, a.assignee);
-        raised.push({
-          id: uid(), projectId: p.projectId, linked: true, title: a.title, assigneeId: u?.id || "",
-          date: a.due || todayStr(), startTime: nowHM(),
-          endTime: new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
-          steps: [], conditions: [], status: "pending", origin: "mom", momId: entry.id, createdBy: me, createdAt: at, work: {},
-          stageId: guessStageId(pRef.current.plan?.stages || [], { title: a.title, date: a.due || todayStr() }),
-        });
-      }
-      if (raised.length) setTasks((ts) => [...raised, ...ts]);
-
-      // Lessons become memory, so the next project inherits them.
-      const lessons = (ai?.lessons || []).filter(Boolean).slice(0, 6);
-      if (lessons.length) {
-        setMemory((mm) => [{
-          id: uid(), type: "instruction",
-          title: `Lessons — ${entry.title}`,
-          content: `From the ${fmtDate(entry.date)} discussion on ${p.projectId}:\n${lessons.map((l) => `- ${l}`).join("\n")}`,
-          createdAt: at,
-        }, ...mm]);
-      }
-
-      // And the write-up itself into the project's Internal MoM folder.
-      const fileName = `Internal MoM - ${entry.date} - ${String(entry.title).replace(/[^\w\- ]/g, "").trim().slice(0, 50) || "discussion"}.md`;
-      const body = [
-        `# ${entry.title}`, ``, `${p.projectId} · ${fmtDate(entry.date)} ${entry.time} · written up by ${entry.byName}`,
-        entry.attendees ? `In the room: ${entry.attendees}` : "", ``,
-        ai?.summary ? `${ai.summary}\n` : "",
-        (ai?.challenges || []).length ? `## Challenges\n${ai.challenges.map((c) => `- ${c.problem}\n  ${c.status === "solved" ? "Overcome" : c.status === "open" ? "Still open" : "Watching"}: ${c.solution || "—"}`).join("\n")}\n` : "",
-        (ai?.ideas || []).length ? `## Who moved it forward\n${ai.ideas.map((i) => `- ${i.by}: ${i.idea} (${impactOf(i.impact).label}, ${i.value}/5)${i.why ? ` — ${i.why}` : ""}`).join("\n")}\n` : "",
-        (ai?.decisions || []).length ? `## Decided\n${ai.decisions.map((d) => `- ${d.what}${d.owner ? ` — ${d.owner}` : ""}`).join("\n")}\n` : "",
-        (ai?.actions || []).length ? `## Actions\n${ai.actions.map((a) => `- ${a.title} — ${a.assignee || "unassigned"}${a.due ? ` by ${a.due}` : ""}`).join("\n")}\n` : "",
-        lessons.length ? `## Lessons\n${lessons.map((l) => `- ${l}`).join("\n")}\n` : "",
-        `## Notes as written\n${raw}`,
-      ].filter(Boolean).join("\n");
-      const r = await driveWriteFile(p.projectId, fileName, body, { scope: driveScope(my?.role) });
-      if (r === true) { entry.savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} filed from Internal MoM`); }
-
-      upd((cur) => ({ moms: [entry, ...(cur.moms || [])] }));
-      setMomVal(""); setMomWho("");
-      const bits = [];
-      if (raised.length) bits.push(`${raised.length} task${raised.length === 1 ? "" : "s"} raised`);
-      if (lessons.length) bits.push(`${lessons.length} lesson${lessons.length === 1 ? "" : "s"} remembered`);
-      if (r === true) bits.push("filed in Drive");
-      toast(ai ? `Written up${bits.length ? ` — ${bits.join(", ")}` : ""}` : "Saved — the AI was unreachable, so it's kept as written", ai ? "green" : "amber");
-      if (r !== true && DRIVE_READ_URL) toast(tidyReason(r), "amber");
-    } finally {
-      setMomBusy(false);
     }
   };
 
@@ -4169,39 +4040,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 10 }}>
               Type up what was discussed — a design argument, a supplier problem, a review that went badly. The AI pulls out what the challenge really was and how it was beaten, whose idea helped, what was decided, and what has to happen next. Actions become tasks, lessons go into system memory so the next project inherits them, and the write-up is filed in this project's folder.
             </div>
-            <input className="inp" style={{ marginBottom: 8 }} placeholder="Who was in the room? (optional)" value={momWho} onChange={(e) => setMomWho(e.target.value)} />
-            <textarea onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setMomAtts, toast); } }}
-              className="inp" rows={5} placeholder="Ravi said the connector lead time is 6 weeks so the BoM freeze slips. Neha suggested the alternate from the approved list — same footprint, in stock. We agreed to switch and to check lead times before every freeze from now on…" value={momVal} onChange={(e) => setMomVal(e.target.value)} />
-            {momAtts.length > 0 && (
-              <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
-                {momAtts.map((a, i) => (
-                  <span key={i} style={{ display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid var(--bdr)", borderRadius: 8, padding: "3px 9px", fontSize: 11.5, background: "var(--s2)" }}>
-                    {/^image\//.test(a.mime || "") ? "🖼" : "📄"} {a.name}
-                    <button onClick={() => setMomAtts((x) => x.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", padding: 0 }}><X size={11} /></button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 9, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
-              <Btn small icon={momBusy ? Loader2 : Sparkles} disabled={momBusy || !momVal.trim()} onClick={saveMom}>{momBusy ? "Writing it up…" : "Save and write it up"}</Btn>
-              <input ref={momFileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.xlsx,.csv,.txt,.md" style={{ display: "none" }}
-                onChange={(e) => { pickAttachments(e.target.files, setMomAtts, toast); e.target.value = ""; }} />
-              <Btn small kind="ghost" icon={Paperclip} onClick={() => momFileRef.current?.click()}
-                title="Attach photos or documents from the session — whiteboard shots, sketches, PDFs. They ride on the session and land in the project's Drive folder.">
-                Add photo / document
-              </Btn>
-              <Btn small kind={micOn ? "danger" : "ghost"} icon={Mic} onClick={toggleMic}
-                title="Offline meeting? Turn the mic on — everything said is typed into the note above, then Save and write it up makes the MOM.">
-                {micOn ? "Stop the mic" : "Voice typing"}
-              </Btn>
-              {micOn && (
-                <span style={{ fontSize: 11.5, color: "var(--red)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--red)", animation: "pulseDot 1.2s infinite" }} />
-                  {micInterim ? `…${micInterim.slice(-70)}` : "listening…"}
-                </span>
-              )}
-              <span style={{ fontSize: 11, color: "var(--txt3)" }}>{(p.moms || []).length} session{(p.moms || []).length === 1 ? "" : "s"} kept on this project</span>
-            </div>
+            <MomComposer p={p} upd={upd} />
             {(p.moms || []).length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 9, marginTop: 13 }}>
                 {(p.moms || []).slice(0, 4).map((m) => <MomCard key={m.id} m={m} />)}
@@ -11035,11 +10874,188 @@ function AssistantModule() {
   );
 }
 
+/* ═══ THE BRAINSTORM COMPOSER ═════════════════════════════════════════════
+   The room's note, its photos, the mic, and the AI write-up — one component,
+   at module scope (see the note above Section), mounted by BOTH the
+   project's Brainstorming tab and the main Brainstorming Sessions page, so
+   the two can never drift apart. The AI pulls out the challenges, whose
+   ideas helped, the decisions, the actions and the lessons — actions become
+   tasks, lessons become memory, and the write-up is filed in Drive. */
+function MomComposer({ p, upd }) {
+  const { users, me, memory, setTasks, setMemory, toast, sheetSync } = useCtx();
+  const my = users.find((u) => u.id === me);
+  const [momVal, setMomVal] = useState("");
+  const [momWho, setMomWho] = useState("");
+  const [momBusy, setMomBusy] = useState(false);
+  const [momAtts, setMomAtts] = useState([]);
+  const momFileRef = useRef(null);
+  /* Voice typing for the room with no Meet link: the mic listens, speech
+     becomes text in the note below, and "Save and write it up" turns it into
+     the MOM exactly as if it had been typed. Browser speech recognition —
+     Chrome and Edge carry it; nothing is sent anywhere except to transcribe. */
+  const [micOn, setMicOn] = useState(false);
+  const [micInterim, setMicInterim] = useState("");
+  const recRef = useRef(null);
+  const micWanted = useRef(false);
+  useEffect(() => () => { micWanted.current = false; try { recRef.current?.stop(); } catch { /* gone already */ } }, []);
+  const toggleMic = () => {
+    if (micOn) { micWanted.current = false; try { recRef.current?.stop(); } catch { /* fine */ } setMicOn(false); setMicInterim(""); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { toast("This browser has no speech recognition — Chrome and Edge do", "amber"); return; }
+    const rec = new SR();
+    rec.continuous = true; rec.interimResults = true; rec.lang = "en-IN";
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) {
+          const said = String(r[0]?.transcript || "").trim();
+          if (said) setMomVal((v) => (v ? v.replace(/\s+$/, "") + " " : "") + said + (/[.?!]$/.test(said) ? " " : ". "));
+        } else interim += r[0]?.transcript || "";
+      }
+      setMicInterim(interim);
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        toast("Microphone blocked — allow it in the browser's site settings and try again", "amber");
+        micWanted.current = false; setMicOn(false);
+      }
+    };
+    // Chrome stops itself after a silence; keep listening until told to stop.
+    rec.onend = () => { if (micWanted.current) { try { rec.start(); } catch { setMicOn(false); } } else setMicOn(false); };
+    recRef.current = rec; micWanted.current = true;
+    try { rec.start(); setMicOn(true); toast("Listening — speak, and it types into the note below", "acc"); }
+    catch { toast("The microphone could not start", "amber"); micWanted.current = false; }
+  };
+  const saveMom = async () => {
+    const raw = momVal.trim();
+    if (!raw || momBusy) return;
+    setMomBusy(true);
+    try {
+      let ai = null;
+      try { ai = await claude(momPrompt(p, raw, momWho.trim(), users, memory), { maxTokens: 4000 }); } catch { ai = null; }
+      // Credit is only worth keeping if it points at a real person. The AI
+      // writes whatever name was said in the room ("Neha", "neha r"), so pin
+      // each one to the roster — that is what links an idea to its author's
+      // Performance page and keeps the leaderboard from splitting one person
+      // across three spellings.
+      if (ai?.ideas) ai.ideas = ai.ideas.map((i) => ({ ...i, by: findPerson(users, i.by)?.name || String(i.by || "").trim() }));
+      if (ai?.decisions) ai.decisions = ai.decisions.map((d) => ({ ...d, owner: findPerson(users, d.owner)?.name || d.owner || "" }));
+      const at = new Date().toISOString();
+      const entry = {
+        id: uid(), date: todayStr(), time: nowHM(), by: me, byName: my?.name || "someone",
+        attendees: momWho.trim(), raw, ai: ai || null, at,
+        title: ai?.title || raw.split("\n")[0].slice(0, 60),
+        /* photos and documents from the room — kept on the session (small
+           images inline for the thumbnail) and pushed into the project's
+           Drive folder as they are */
+        files: momAtts.map((a) => ({ name: a.name, size: a.size, mime: a.mime,
+          dataUrl: a.b64 && /^image\//.test(a.mime || "") && a.b64.length < 400000 ? `data:${a.mime};base64,${a.b64}` : undefined })),
+      };
+      for (const a of momAtts) { try { await saveAttachmentToDrive(a, p.projectId, driveScope(my?.role)); } catch { /* Drive optional */ } }
+      setMomAtts([]);
+
+      // Actions become real tasks for real people.
+      const raised = [];
+      for (const a of (ai?.actions || []).slice(0, 10)) {
+        if (!a.title) continue;
+        const u = findPerson(users, a.assignee);
+        raised.push({
+          id: uid(), projectId: p.projectId, linked: true, title: a.title, assigneeId: u?.id || "",
+          date: a.due || todayStr(), startTime: nowHM(),
+          endTime: new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
+          steps: [], conditions: [], status: "pending", origin: "mom", momId: entry.id, createdBy: me, createdAt: at, work: {},
+          stageId: guessStageId(p.plan?.stages || [], { title: a.title, date: a.due || todayStr() }),
+        });
+      }
+      if (raised.length) setTasks((ts) => [...raised, ...ts]);
+
+      // Lessons become memory, so the next project inherits them.
+      const lessons = (ai?.lessons || []).filter(Boolean).slice(0, 6);
+      if (lessons.length) {
+        setMemory((mm) => [{
+          id: uid(), type: "instruction",
+          title: `Lessons — ${entry.title}`,
+          content: `From the ${fmtDate(entry.date)} discussion on ${p.projectId}:\n${lessons.map((l) => `- ${l}`).join("\n")}`,
+          createdAt: at,
+        }, ...mm]);
+      }
+
+      // And the write-up itself into the project's Internal MoM folder.
+      const fileName = `Internal MoM - ${entry.date} - ${String(entry.title).replace(/[^\w\- ]/g, "").trim().slice(0, 50) || "discussion"}.md`;
+      const body = [
+        `# ${entry.title}`, ``, `${p.projectId} · ${fmtDate(entry.date)} ${entry.time} · written up by ${entry.byName}`,
+        entry.attendees ? `In the room: ${entry.attendees}` : "", ``,
+        ai?.summary ? `${ai.summary}\n` : "",
+        (ai?.challenges || []).length ? `## Challenges\n${ai.challenges.map((c) => `- ${c.problem}\n  ${c.status === "solved" ? "Overcome" : c.status === "open" ? "Still open" : "Watching"}: ${c.solution || "—"}`).join("\n")}\n` : "",
+        (ai?.ideas || []).length ? `## Who moved it forward\n${ai.ideas.map((i) => `- ${i.by}: ${i.idea} (${impactOf(i.impact).label}, ${i.value}/5)${i.why ? ` — ${i.why}` : ""}`).join("\n")}\n` : "",
+        (ai?.decisions || []).length ? `## Decided\n${ai.decisions.map((d) => `- ${d.what}${d.owner ? ` — ${d.owner}` : ""}`).join("\n")}\n` : "",
+        (ai?.actions || []).length ? `## Actions\n${ai.actions.map((a) => `- ${a.title} — ${a.assignee || "unassigned"}${a.due ? ` by ${a.due}` : ""}`).join("\n")}\n` : "",
+        lessons.length ? `## Lessons\n${lessons.map((l) => `- ${l}`).join("\n")}\n` : "",
+        `## Notes as written\n${raw}`,
+      ].filter(Boolean).join("\n");
+      const r = await driveWriteFile(p.projectId, fileName, body, { scope: driveScope(my?.role) });
+      if (r === true) { entry.savedTo = p.projectId; sheetSync(`${pmPath(p.projectId)}`, `${fileName} filed from Internal MoM`); }
+
+      upd((cur) => ({ moms: [entry, ...(cur.moms || [])] }));
+      setMomVal(""); setMomWho("");
+      const bits = [];
+      if (raised.length) bits.push(`${raised.length} task${raised.length === 1 ? "" : "s"} raised`);
+      if (lessons.length) bits.push(`${lessons.length} lesson${lessons.length === 1 ? "" : "s"} remembered`);
+      if (r === true) bits.push("filed in Drive");
+      toast(ai ? `Written up${bits.length ? ` — ${bits.join(", ")}` : ""}` : "Saved — the AI was unreachable, so it's kept as written", ai ? "green" : "amber");
+      if (r !== true && DRIVE_READ_URL) toast(tidyReason(r), "amber");
+    } finally {
+      setMomBusy(false);
+    }
+  };
+  return (<>
+    <input className="inp" style={{ marginBottom: 8 }} placeholder="Who was in the room? (optional)" value={momWho} onChange={(e) => setMomWho(e.target.value)} />
+    <textarea onPaste={(e) => { const fs = filesFromPaste(e); if (fs.length) { e.preventDefault(); pickAttachments(fs, setMomAtts, toast); } }}
+      className="inp" rows={5} placeholder="Ravi said the connector lead time is 6 weeks so the BoM freeze slips. Neha suggested the alternate from the approved list — same footprint, in stock. We agreed to switch and to check lead times before every freeze from now on…" value={momVal} onChange={(e) => setMomVal(e.target.value)} />
+    {momAtts.length > 0 && (
+      <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+        {momAtts.map((a, i) => (
+          <span key={i} style={{ display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid var(--bdr)", borderRadius: 8, padding: "3px 9px", fontSize: 11.5, background: "var(--s2)" }}>
+            {/^image\//.test(a.mime || "") ? "🖼" : "📄"} {a.name}
+            <button onClick={() => setMomAtts((x) => x.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", padding: 0 }}><X size={11} /></button>
+          </span>
+        ))}
+      </div>
+    )}
+    <div style={{ display: "flex", gap: 9, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
+      <Btn small icon={momBusy ? Loader2 : Sparkles} disabled={momBusy || !momVal.trim()} onClick={saveMom}>{momBusy ? "Writing it up…" : "Save and write it up"}</Btn>
+      <input ref={momFileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.xlsx,.csv,.txt,.md" style={{ display: "none" }}
+        onChange={(e) => { pickAttachments(e.target.files, setMomAtts, toast); e.target.value = ""; }} />
+      <Btn small kind="ghost" icon={Paperclip} onClick={() => momFileRef.current?.click()}
+        title="Attach photos or documents from the session — whiteboard shots, sketches, PDFs. They ride on the session and land in the project's Drive folder.">
+        Add photo / document
+      </Btn>
+      <Btn small kind={micOn ? "danger" : "ghost"} icon={Mic} onClick={toggleMic}
+        title="Offline meeting? Turn the mic on — everything said is typed into the note above, then Save and write it up makes the MOM.">
+        {micOn ? "Stop the mic" : "Voice typing"}
+      </Btn>
+      {micOn && (
+        <span style={{ fontSize: 11.5, color: "var(--red)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--red)", animation: "pulseDot 1.2s infinite" }} />
+          {micInterim ? `…${micInterim.slice(-70)}` : "listening…"}
+        </span>
+      )}
+      <span style={{ fontSize: 11, color: "var(--txt3)" }}>{(p.moms || []).length} session{(p.moms || []).length === 1 ? "" : "s"} kept on this project</span>
+    </div>
+  </>);
+}
+
 /* ═══ INTERNAL MoM — every session, and who has been contributing ════════ */
 function MomModule() {
-  const { projects, setView } = useCtx();
+  const { projects, setProjects, setView } = useCtx();
   const [q, setQ] = useState("");
   const [proj, setProj] = useState("");
+  /* Write a session up from HERE too — pick the project the room was talking
+     about and the same composer appears, mic and all. */
+  const [writeIn, setWriteIn] = useState("");
+  const target = projects.find((x) => x.projectId === writeIn);
+  const updTarget = (patch) => setProjects((ps) => ps.map((x) => (x.id === target?.id ? { ...x, ...(typeof patch === "function" ? patch(x) : patch) } : x)));
   const sessions = allMoms(projects);
   const credit = momCredit(projects);
   const needle = normId(q);
@@ -11054,6 +11070,19 @@ function MomModule() {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,320px)", gap: 16, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Section>
+            <CardLabel right={<Pill color="var(--purple)"><Lightbulb size={11} /> ideas · challenges · lessons</Pill>}>New session</CardLabel>
+            <div style={{ fontSize: 12, color: "var(--txt2)", lineHeight: 1.6, marginBottom: 10 }}>
+              Write up a session without opening the project — pick which project the room was talking about, type or use <b>Voice typing</b> for an offline meeting, and the MOM is generated the same way: actions become tasks, lessons go to memory, the write-up is filed.
+            </div>
+            <select className="inp" style={{ marginBottom: 8, maxWidth: 420 }} value={writeIn} onChange={(e) => setWriteIn(e.target.value)}
+              title="Which project was the room talking about?">
+              <option value="">— which project was this about? —</option>
+              {projects.map((p2) => <option key={p2.id} value={p2.projectId}>{p2.projectId} · {p2.name}</option>)}
+            </select>
+            {target ? <MomComposer key={target.id} p={target} upd={updTarget} />
+              : <div style={{ fontSize: 12, color: "var(--txt3)" }}>Pick a project above and the composer opens — the session, its tasks and its write-up all land on that project.</div>}
+          </Section>
           <Section>
             <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
               <input className="inp" style={{ flex: 1, minWidth: 200 }} placeholder="Search every discussion — a part, a supplier, a person, a problem…" value={q} onChange={(e) => setQ(e.target.value)} />
