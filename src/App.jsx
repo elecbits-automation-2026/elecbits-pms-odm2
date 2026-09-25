@@ -68,6 +68,11 @@ const daysLeft = (d) => Math.ceil((new Date(d + "T23:59:59") - new Date()) / 864
 const initials = (n) => (n || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 const MONO = "'IBM Plex Mono',monospace";
 const hmToDate = (dateStr, hm) => new Date(`${dateStr}T${hm || "23:59"}:00`);
+/* A task's real deadline: its end DATE (multi-day work) + end time. A task
+   with neither has no clock, and a closed or not-required task has no
+   deadline left to miss. */
+const taskEnd = (t) => ((t.endDate || t.endTime) ? hmToDate(t.endDate || t.date, t.endTime || "23:59") : null);
+const CLOSED_STATUSES = ["done", "not-required"];
 const fmtDur = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60; return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(ss).padStart(2, "0"); };
 const normId = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 /* ─── THE REAL DRIVE ADDRESS ──────────────────────────────────────────────
@@ -1928,8 +1933,8 @@ const Progress = ({ pct, color = "var(--acc)", h = 6 }) => (
   </div>
 );
 const Countdown = ({ task, now }) => {
-  if (!task.endTime || task.status === "done") return null;
-  const end = hmToDate(task.date, task.endTime);
+  if ((!task.endTime && !task.endDate) || CLOSED_STATUSES.includes(task.status)) return null;
+  const end = taskEnd(task);
   const start = task.startTime ? hmToDate(task.date, task.startTime) : null;
   const diff = end - now;
   if (start && now < start) return <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt3)" }}>starts {task.startTime}</span>;
@@ -2755,7 +2760,11 @@ const PROJ_TABS = [
 ];
 /* Is this to-do past its own clock? Module scope so both the project page and
    the card below can ask, without either owning the answer. */
-const isOverdue = (t, nowMs) => !!(t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < (nowMs || Date.now()));
+const isOverdue = (t, nowMs) => {
+  if (CLOSED_STATUSES.includes(t.status)) return false;
+  const e = taskEnd(t);
+  return !!(e && e < (nowMs || Date.now()));
+};
 /* Every task can be filed under one discipline — the same list everywhere:
    the row on My Projects & Tasks, the card inside the project, the editor. */
 const TASK_CATS = ["Hardware", "Firmware", "Customer", "Vendors & Partnership", "Testing", "Documentation", "Industrial Design/Mechanical", "PM"];
@@ -2770,8 +2779,9 @@ const canEditTask = (t, me, my, projects) => !!me && (
 /* The closure gate: a task that names a document will not close without it. */
 const needsDocToClose = (t) => !!(t.docName && String(t.docName).trim() && !t.docFile);
 const todoMeta = (t, nowMs) => t.status === "done" ? { Ic: CheckCircle2, label: "Done", color: "var(--green)" }
+  : t.status === "not-required" ? { Ic: X, label: "Not required", color: "var(--txt3)" }
   : t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
-  : isOverdue(t, nowMs) ? { Ic: Clock, label: `Overdue ${((d) => (d < 1 ? "today" : `${d}d`))(Math.floor(((nowMs || Date.now()) - hmToDate(t.date, t.endTime)) / 86400000))}`, color: "var(--red)" }
+  : isOverdue(t, nowMs) ? { Ic: Clock, label: `Overdue ${((d) => (d < 1 ? "today" : `${d}d`))(Math.floor(((nowMs || Date.now()) - taskEnd(t)) / 86400000))}`, color: "var(--red)" }
   : t.status === "in-progress" ? { Ic: Play, label: "In progress", color: "var(--blue)" }
   : { Ic: ListChecks, label: "To start", color: "var(--txt2)" };
 
@@ -2794,7 +2804,7 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
     if (!setTasks || v === t.status) return;
     if (v === "done" && needsDocToClose(t)) { setDocT(true); return; }
     const at = new Date().toISOString();
-    const sLabel = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done" }[v] || v;
+    const sLabel = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done", "not-required": "Not required" }[v] || v;
     setTasks((ts) => ts.map((x) => (x.id === t.id
       ? { ...x, status: v, ...(v === "done" ? { doneAt: at } : {}), history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `status → ${sLabel} (manual)` }] }
       : x)));
@@ -2815,14 +2825,14 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px" }}>
       <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt2)" : "var(--txt)" }}>{t.title}</div>
+        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: CLOSED_STATUSES.includes(t.status) ? "line-through" : "none", color: CLOSED_STATUSES.includes(t.status) ? "var(--txt2)" : "var(--txt)" }}>{t.title}</div>
         <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
           {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
                       onClick={(e) => e.stopPropagation()}
                       style={{ fontWeight: 800, fontSize: 11, color: "var(--acc)", textDecoration: "none" }}>Open ↗</a>}
           {u ? <span style={{ display: "flex", alignItems: "center", gap: 5 }}><AvatarDot user={u} size={18} /><span style={{ fontSize: 11.5, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>}
           {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
-          <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}</span>
+          <span style={{ fontSize: 11, color: "var(--txt3)" }}>{fmtDate(t.date)}{t.endDate && t.endDate !== t.date ? ` → ${fmtDate(t.endDate)}` : ""}</span>
           {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length} if/else</Pill>}
           {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
           {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
@@ -2851,7 +2861,7 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
         <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
           title="Set the status by hand — the change is logged with your name"
           style={{ width: 108, padding: "4px 6px", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
-          {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"], ["not-required", "Not required"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
         </select>
       )}
       {canAct && <button onClick={() => setEditT(true)} title="Edit this task — title, person, dates, status; every edit is logged"
@@ -2997,14 +3007,19 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
       const laneName = (b) => lanes.find((s) => s.name === b)?.name || String(b || "");
       const rows = (Array.isArray(r?.tasks) && r.tasks.length ? r.tasks : [{ title: desc.trim() }])
         .slice(0, 6)
-        .map((t) => ({
-          title: String(t.title || desc.trim()).slice(0, 200),
-          assigneeId: nameToId(t.assignee),
-          date: /^\d{4}-\d{2}-\d{2}$/.test(t.date || "") ? t.date : (due || todayStr()),
-          hours: clamp(t.hours),
-          block: laneName(t.block ?? r?.block),
-          board: boardRefs.find((b) => b.ref.toLowerCase() === String(t.board || "").trim().toLowerCase())?.ref || "",
-        }));
+        .map((t) => {
+          const date = /^\d{4}-\d{2}-\d{2}$/.test(t.date || "") ? t.date : (due || todayStr());
+          return {
+            use: true,   // every proposed piece starts ticked; untick to discard it
+            title: String(t.title || desc.trim()).slice(0, 200),
+            assigneeId: nameToId(t.assignee),
+            date,
+            endDate: due && due > date ? due : date,
+            endTime: `${String(Math.min(18, 10 + clamp(t.hours))).padStart(2, "0")}:00`,
+            block: laneName(t.block ?? r?.block),
+            board: boardRefs.find((b) => b.ref.toLowerCase() === String(t.board || "").trim().toLowerCase())?.ref || "",
+          };
+        });
       setProp({ why: String(r?.why || ""), rows });
     } catch {
       /* AI unreachable — the task still gets raised, just without the
@@ -3012,7 +3027,7 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
          pass picks it up later. */
       setProp({
         why: "The AI could not be reached — placed as raised in the scrum; the plan will file it once it can.",
-        rows: [{ title: desc.trim().slice(0, 200), assigneeId: me, date: due || todayStr(), hours: 4, block: "", board: "" }],
+        rows: [{ use: true, title: desc.trim().slice(0, 200), assigneeId: me, date: due || todayStr(), endDate: due || todayStr(), endTime: "18:00", block: "", board: "" }],
       });
     }
     setBusy(false);
@@ -3021,9 +3036,11 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
   const create = () => {
     if (!prop) return;
     const at = new Date().toISOString();
-    const made = prop.rows.filter((r) => r.title.trim()).map((r) => {
-      const h = clamp(r.hours);
-      const endTime = `${String(Math.min(18, 10 + h)).padStart(2, "0")}:00`;
+    /* Only the TICKED rows land — unticking is how a proposed piece that
+       does not belong to this project gets discarded before it exists. */
+    const made = prop.rows.filter((r) => r.use && r.title.trim()).map((r) => {
+      const date = r.date || todayStr();
+      const endDate = r.endDate && r.endDate >= date ? r.endDate : date;
       /* The board rides IN the title — that is how filing, the step lights
          and the lanes read board scope everywhere else. */
       const withBoard = r.board && !r.title.toLowerCase().includes(r.board.toLowerCase())
@@ -3031,22 +3048,24 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
       const sn = matchStep({ title: withBoard })?.no;
       return {
         id: uid(), projectId: p.projectId, linked: true, title: withBoard,
-        assigneeId: r.assigneeId, date: r.date || todayStr(), startTime: "10:00", endTime,
+        assigneeId: r.assigneeId, date, startTime: "10:00", endTime: r.endTime || "18:00",
+        ...(endDate !== date ? { endDate } : {}),
         steps: [], conditions: [], status: "pending", origin: "plan-add",
         ...(sn ? { stepNo: sn } : {}), ...(r.block ? { block: r.block } : {}),
         ...(r.board ? { board: r.board } : {}),
         createdBy: me, createdAt: at, work: {},
       };
     });
-    if (!made.length) return;
+    if (!made.length) { toast("Nothing is ticked — tick at least one piece, or press Back", "amber"); return; }
+    const dropped = prop.rows.filter((r) => !r.use).length;
     setTasks((ts) => [...made, ...ts]);
-    toast(made.length === 1 ? "Task added to the board" : `Split into ${made.length} subtasks — all on the board`, "green");
+    toast(`${made.length === 1 ? "Task added to the board" : `${made.length} subtasks added to the board`}${dropped ? ` · ${dropped} discarded` : ""}`, "green");
     onClose();
   };
   return (
     <Modal title="Add a task" sub={`${p.projectId} · describe it — the AI works out the block, the date and the person`} onClose={onClose} width={640}
       footer={prop
-        ? <><Btn kind="ghost" onClick={() => setProp(null)}>Back</Btn><Btn kind="green" icon={CheckCircle2} disabled={!prop.rows.some((r) => r.title.trim())} onClick={create}>{prop.rows.length === 1 ? "Add the task" : `Add all ${prop.rows.length}`}</Btn></>
+        ? <><Btn kind="ghost" onClick={() => setProp(null)}>Back</Btn><Btn kind="green" icon={CheckCircle2} disabled={!prop.rows.some((r) => r.use && r.title.trim())} onClick={create}>{(() => { const n = prop.rows.filter((r) => r.use && r.title.trim()).length; return n === 1 ? "Add the task" : `Add selected ${n}`; })()}</Btn></>
         : <><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn icon={busy ? Loader2 : Sparkles} disabled={busy || !desc.trim()} onClick={propose}>{busy ? "Placing it…" : "Place it in the plan"}</Btn></>}>
       {!prop ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
@@ -3072,16 +3091,22 @@ One entry in "tasks" means no split was needed; several entries ARE the split.`,
           {prop.why && <div style={{ fontSize: 12.5, color: "var(--txt2)", lineHeight: 1.55 }}>{prop.why}</div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
             {prop.rows.map((r, i) => (
-              <div key={i} style={{ border: "1px solid var(--bdr)", borderRadius: 10, padding: 11, display: "flex", flexDirection: "column", gap: 8, background: "var(--s1)" }}>
-                <input className="inp" value={r.title} onChange={(e) => setRow(i, { title: e.target.value })} />
+              <div key={i} style={{ border: `1px solid ${r.use ? "var(--bdr)" : "var(--bdr2)"}`, borderRadius: 10, padding: 11, display: "flex", flexDirection: "column", gap: 8, background: "var(--s1)", opacity: r.use ? 1 : 0.45 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 11.5, fontWeight: 700, color: r.use ? "var(--green)" : "var(--txt3)" }}>
+                  <input type="checkbox" checked={!!r.use} onChange={(e) => setRow(i, { use: e.target.checked })} />
+                  {r.use ? "Will be added" : "Discarded — will NOT be added"}
+                </label>
+                <input className="inp" value={r.title} disabled={!r.use} onChange={(e) => setRow(i, { title: e.target.value })} />
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <select className="inp" style={{ flex: 1, minWidth: 150 }} value={r.assigneeId} onChange={(e) => setRow(i, { assigneeId: e.target.value })}>
+                  <select className="inp" style={{ flex: 1, minWidth: 150 }} disabled={!r.use} value={r.assigneeId} onChange={(e) => setRow(i, { assigneeId: e.target.value })}>
                     {candidates.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                   </select>
-                  <input type="date" className="inp" style={{ width: 150 }} value={r.date} onChange={(e) => setRow(i, { date: e.target.value })} />
-                  <select className="inp" style={{ width: 92 }} value={clamp(r.hours)} onChange={(e) => setRow(i, { hours: Number(e.target.value) })}>
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((h) => <option key={h} value={h}>{h} h</option>)}
-                  </select>
+                  <input type="date" className="inp" style={{ width: 140 }} title="Start date" disabled={!r.use} value={r.date}
+                    onChange={(e) => setRow(i, { date: e.target.value, endDate: r.endDate && r.endDate < e.target.value ? e.target.value : r.endDate })} />
+                  <input type="date" className="inp" style={{ width: 140 }} title="End date — the deadline; overdue counts from this" disabled={!r.use} value={r.endDate || r.date} min={r.date || undefined}
+                    onChange={(e) => setRow(i, { endDate: e.target.value })} />
+                  <input type="time" className="inp" style={{ width: 96 }} title="End time on the deadline day" disabled={!r.use} value={r.endTime || "18:00"}
+                    onChange={(e) => setRow(i, { endTime: e.target.value })} />
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <select className="inp" title="Which block of the process this piece belongs to" style={{ flex: 2, minWidth: 170 }} value={r.block} onChange={(e) => setRow(i, { block: e.target.value })}>
@@ -3398,13 +3423,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const pm = p.team?.find((t) => t.slot.startsWith("PM"));
   const projTasks = tasks.filter((t) => t.projectId === p.projectId);
   const done = projTasks.filter((t) => t.status === "done");
-  const openTasks = projTasks.filter((t) => t.status !== "done");
-  const pct = projTasks.length ? Math.round((done.length / projTasks.length) * 100) : 0;
+  const notReq = projTasks.filter((t) => t.status === "not-required");
+  const openTasks = projTasks.filter((t) => !CLOSED_STATUSES.includes(t.status));
+  /* not-required work is out of scope, so it counts toward nothing */
+  const pct = projTasks.length - notReq.length ? Math.round((done.length / (projTasks.length - notReq.length)) * 100) : 0;
   const counts = [
     ["Pending", projTasks.filter((t) => t.status === "pending").length, "var(--txt3)"],
     ["In progress", projTasks.filter((t) => t.status === "in-progress").length, "var(--blue)"],
     ["Blocked", projTasks.filter((t) => t.status === "blocked").length, "var(--amber)"],
     ["Done", done.length, "var(--green)"],
+    ...(notReq.length ? [["Not required", notReq.length, "var(--txt3)"]] : []),
   ];
   const dl = daysLeft(p.deadline);
   const overdue = (t) => isOverdue(t, nowMs);
@@ -3960,20 +3988,21 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                 )}
               </div>
             )}
-            {/* The closed work, listed separately — the record of what this
-               project has already finished, newest first. Only on the To-dos
-               tab; the overview stays about what is open. */}
-            {tab === "tasks" && done.length > 0 && (
+            {/* The closed work, listed separately — done AND not-required,
+               newest first. Only on the To-dos tab; the overview stays about
+               what is open. */}
+            {tab === "tasks" && done.length + notReq.length > 0 && (
               <div style={{ marginTop: 16, borderTop: "1px solid var(--bdr)", paddingTop: 12 }}>
                 <button onClick={() => setShowDone(!showDone)}
                   style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", cursor: "pointer", padding: "2px 0", marginBottom: showDone ? 10 : 0 }}>
                   <ChevronDown size={14} style={{ color: "var(--txt3)", transform: showDone ? "none" : "rotate(-90deg)", transition: "transform .15s" }} />
                   <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt2)", textTransform: "uppercase", letterSpacing: ".06em" }}>Completed</span>
-                  <Pill color="var(--green)">{done.length} done</Pill>
+                  {done.length > 0 && <Pill color="var(--green)">{done.length} done</Pill>}
+                  {notReq.length > 0 && <Pill color="var(--txt3)">{notReq.length} not required</Pill>}
                 </button>
                 {showDone && (
                   <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {[...done].sort((a, b) => String(b.doneAt || b.completedAt || "").localeCompare(String(a.doneAt || a.completedAt || "")))
+                    {[...done, ...notReq].sort((a, b) => String(b.doneAt || b.completedAt || "").localeCompare(String(a.doneAt || a.completedAt || "")))
                       .map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
                         onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                   </div>
@@ -5440,7 +5469,7 @@ function NoteCard({ n }) {
 }
 
 /* ═══ MODULE 3 — MY PROJECTS & TASKS ═════════════════════════════════════ */
-const STATUS_DOT = { pending: "var(--txt3)", "in-progress": "var(--blue)", blocked: "var(--amber)", done: "var(--green)" };
+const STATUS_DOT = { pending: "var(--txt3)", "in-progress": "var(--blue)", blocked: "var(--amber)", done: "var(--green)", "not-required": "var(--bdr2)" };
 const DEFAULT_QS = ["What exactly did you produce, and what is the file called?", "Where exactly is it stored — full Drive path?", "How did you verify it actually meets the task's scope?"];
 
 /* ═══ REPORTS ═══════════════════════════════════════════════════════════════
@@ -5905,11 +5934,11 @@ function TasksModule() {
   useEffect(() => { if (!armAll) return; const t = setTimeout(() => setArmAll(false), 5000); return () => clearTimeout(t); }, [armAll]);
   const [pickedDate, setPickedDate] = useState(todayStr());
   const [catF, setCatF] = useState("all");
-  /* This page lists the OPEN work only. Closed tasks still count in each
-     project's progress bar, and live in full inside the project's To-dos tab
-     under Completed. */
+  /* This page lists the OPEN work only. Closed and not-required tasks still
+     count in each project's progress bar, and live in full inside the
+     project's To-dos tab under Completed. */
   const filtered = visible
-    .filter((t) => t.status !== "done")
+    .filter((t) => !CLOSED_STATUSES.includes(t.status))
     .filter((t) => (personF === "all" || t.assigneeId === personF) && (projF === "all" || t.projectId === projF))
     .filter((t) => catF === "all" || (catF === "__none__" ? !t.category : t.category === catF))
     .filter((t) => inDayBucket(t, dayF, pickedDate))
@@ -5997,6 +6026,8 @@ function TasksModule() {
               bulk((x, at) => (needsDocToClose(x) ? undefined : { ...x, status: "done", doneAt: at }), "marked done", "green");
             }}>Mark done</Btn>
             <Btn small kind="ghost" icon={Play} onClick={() => bulk((x) => ({ ...x, status: "in-progress" }), "set in progress")}>In progress</Btn>
+            <Btn small kind="ghost" icon={X} title="Skip these — not relevant for the project. They leave the open list and sit under the project's Completed section."
+              onClick={() => bulk((x) => ({ ...x, status: "not-required" }), "marked not required")}>Not required</Btn>
             <select className="inp" style={{ width: 170, padding: "5px 8px", fontSize: 11.5 }} value=""
               onChange={(e) => { const uid2 = e.target.value; if (!uid2) return; const nm = users.find((u) => u.id === uid2)?.name; bulk((x) => ({ ...x, assigneeId: uid2 }), `reassigned to ${nm}`); }}>
               <option value="">Reassign to…</option>
@@ -6042,7 +6073,7 @@ function TasksModule() {
           const p = projects.find((x) => x.projectId === pid);
           // the rows below are open work only — the progress bar still counts
           // everything, or "4/13 done" would read 0/9 the moment done was hidden
-          const allTs = visible.filter((t) => (t.projectId || "__unlinked__") === pid);
+          const allTs = visible.filter((t) => (t.projectId || "__unlinked__") === pid && t.status !== "not-required");
           const done = allTs.filter((t) => t.status === "done").length;
           const mfgPid = subOf.get(pid);
           const mfgP = mfgPid ? projects.find((x) => x.projectId === mfgPid) : null;
@@ -6161,7 +6192,7 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
     if (!setTasks || v === t.status) return;
     if (v === "done" && needsDocToClose(t)) { setDocT(true); return; }
     const at = new Date().toISOString();
-    const label = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done" }[v] || v;
+    const label = { pending: "To start", "in-progress": "In progress", blocked: "Blocked", done: "Done", "not-required": "Not required" }[v] || v;
     setTasks((ts) => ts.map((x) => (x.id === t.id
       ? { ...x, status: v, ...(v === "done" ? { doneAt: at } : {}), history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: `status → ${label} (manual)` }] }
       : x)));
@@ -6181,13 +6212,13 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
       <div className="rowHover" style={{ padding: "11px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         {selectable && <input type="checkbox" checked={!!selected} onChange={onSelect} onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }} />}
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: STATUS_DOT[t.status], flexShrink: 0 }} />
-        <span style={{ fontWeight: 600, fontSize: 13, flex: 1, minWidth: 180, textDecoration: t.status === "done" ? "line-through" : "none", color: t.status === "done" ? "var(--txt2)" : "var(--txt)" }}>{t.title}</span>
+        <span style={{ fontWeight: 600, fontSize: 13, flex: 1, minWidth: 180, textDecoration: CLOSED_STATUSES.includes(t.status) ? "line-through" : "none", color: CLOSED_STATUSES.includes(t.status) ? "var(--txt2)" : "var(--txt)" }}>{t.title}</span>
         {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
                     onClick={(e) => e.stopPropagation()}
                     style={{ fontWeight: 800, fontSize: 11.5, color: "var(--acc)", textDecoration: "none", flexShrink: 0 }}>Open ↗</a>}
         {showProject && t.projectId && <Pill color="var(--blue)" style={{ fontFamily: MONO }}>{t.projectId}</Pill>}
         {showAssignee && (u ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}><AvatarDot user={u} size={21} /><span style={{ fontSize: 12, color: "var(--txt2)" }}>{u.name}</span></span> : <Pill color="var(--amber)">unassigned</Pill>)}
-        {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}</span>}
+        {(t.startTime || t.endTime) && <span style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--txt2)" }}>{t.startTime || "…"}–{t.endTime || "…"}{t.endDate && t.endDate !== t.date ? ` · due ${fmtDate(t.endDate)}` : ""}</span>}
         <Countdown task={t} now={now} />
         {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length}</Pill>}
         {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
@@ -6210,7 +6241,7 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
             <select className="inp" value={t.status} onChange={(e) => changeStatus(e.target.value)}
               title="Set the status by hand — the change is logged with your name"
               style={{ width: 112, padding: "4px 6px", fontSize: 11, fontWeight: 600 }}>
-              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"], ["not-required", "Not required"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
             </select>
           )}
           {canAct && <button onClick={() => setEditT(true)} title="Edit this task — title, person, dates, status; every edit is logged"
@@ -6266,7 +6297,7 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
 function TaskEditModal({ t, onClose }) {
   const { users, setTasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
-  const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", status: t.status, category: t.category || "", docName: t.docName || "" });
+  const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", endDate: t.endDate || "", status: t.status, category: t.category || "", docName: t.docName || "" });
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
   const save = () => {
     const diffs = [];
@@ -6274,6 +6305,7 @@ function TaskEditModal({ t, onClose }) {
     if (f.assigneeId !== (t.assigneeId || "")) diffs.push(`assignee → ${users.find((u) => u.id === f.assigneeId)?.name || "unassigned"}`);
     if (f.date !== (t.date || "")) diffs.push(`date → ${f.date || "—"}`);
     if (f.startTime !== (t.startTime || "") || f.endTime !== (t.endTime || "")) diffs.push(`time → ${f.startTime || "…"}–${f.endTime || "…"}`);
+    if (f.endDate !== (t.endDate || "")) diffs.push(`deadline → ${f.endDate || "same day"}`);
     if (f.status !== t.status) diffs.push(`status → ${f.status}`);
     if (f.category !== (t.category || "")) diffs.push(`category → ${f.category || "—"}`);
     if (f.docName.trim() !== (t.docName || "")) diffs.push(`closure document → ${f.docName.trim() || "—"}`);
@@ -6285,7 +6317,7 @@ function TaskEditModal({ t, onClose }) {
     }
     const at = new Date().toISOString();
     setTasks((ts) => ts.map((x) => (x.id === t.id
-      ? { ...x, title: f.title.trim() || x.title, assigneeId: f.assigneeId, date: f.date, startTime: f.startTime, endTime: f.endTime, status: f.status, category: f.category, docName: f.docName.trim(),
+      ? { ...x, title: f.title.trim() || x.title, assigneeId: f.assigneeId, date: f.date, startTime: f.startTime, endTime: f.endTime, endDate: f.endDate, status: f.status, category: f.category, docName: f.docName.trim(),
           ...(f.status === "done" && x.status !== "done" ? { doneAt: at } : {}),
           history: [...(x.history || []), { by: me, byName: my?.name || "", at, what: diffs.join(", ") }] }
       : x)));
@@ -6306,7 +6338,7 @@ function TaskEditModal({ t, onClose }) {
           </Field>
           <Field label="Status">
             <select className="inp" value={f.status} onChange={set("status")}>
-              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              {[["pending", "To start"], ["in-progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"], ["not-required", "Not required"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}
             </select>
           </Field>
         </div>
@@ -6321,10 +6353,11 @@ function TaskEditModal({ t, onClose }) {
             placeholder='e.g. "DRC report", "Signed test sheet" — the task will not close without it' />
           {t.docFile && <div style={{ fontSize: 11.5, color: "var(--green)", marginTop: 4 }}>Attached: <a href={t.docFile.url} target="_blank" rel="noreferrer" style={{ color: "var(--green)" }}>{t.docFile.name}</a> · {t.docFile.byName}</div>}
         </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-          <Field label="Date"><input type="date" className="inp" value={f.date} onChange={set("date")} /></Field>
-          <Field label="Start"><input type="time" className="inp" value={f.startTime} onChange={set("startTime")} /></Field>
-          <Field label="End"><input type="time" className="inp" value={f.endTime} onChange={set("endTime")} /></Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Start date"><input type="date" className="inp" value={f.date} onChange={set("date")} /></Field>
+          <Field label="Start time"><input type="time" className="inp" value={f.startTime} onChange={set("startTime")} /></Field>
+          <Field label="End date — the deadline (empty = same day)"><input type="date" className="inp" value={f.endDate} min={f.date || undefined} onChange={set("endDate")} /></Field>
+          <Field label="End time"><input type="time" className="inp" value={f.endTime} onChange={set("endTime")} /></Field>
         </div>
         {(t.history || []).length > 0 && (
           <Field label="Change history">
@@ -10457,6 +10490,7 @@ function AssistantModule() {
         const p = proj(a.projectId);
         const t = { id: uid(), projectId: p?.projectId || "", linked: !!p, title: a.title, assigneeId: u?.id || "",
           date: a.date || todayStr(), startTime: a.startTime || nowHM(),
+          ...(/^\d{4}-\d{2}-\d{2}$/.test(a.endDate || "") && a.endDate > (a.date || todayStr()) ? { endDate: a.endDate } : {}),
           endTime: a.endTime || new Date(Date.now() + 60 * 60000).toTimeString().slice(0, 5),
           steps: [], conditions: [], status: "pending", origin: "assistant", createdBy: me, createdAt: new Date().toISOString(), work: {},
           stageId: guessStageId(p?.plan?.stages || [], { title: a.title, date: a.date || todayStr(), assigneeName: u?.name || "" }) };
@@ -10473,7 +10507,7 @@ function AssistantModule() {
           return { ok: false, line: `"${t.title}" closes only with its document ("${t.docName}") — it has to be attached on the task itself before anyone, me included, can mark it done.` };
         }
         const patch = {};
-        if (["pending", "in-progress", "blocked", "done"].includes(a.status)) patch.status = a.status;
+        if (["pending", "in-progress", "blocked", "done", "not-required"].includes(a.status)) patch.status = a.status;
         if (a.status === "done") patch.completedAt = new Date().toISOString();
         const u = findPerson(users, a.assignee);
         if (u) patch.assigneeId = u.id;
