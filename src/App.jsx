@@ -271,6 +271,7 @@ const _TEAM = [
   ["da82cf31-85bc-479f-ad0f-8b8321cd55c6", "Nethravathi GK", "nethravathi.gk@elecbits.in", "engineer", "jr_fw"],
   ["52546bb1-89f3-4a59-aa5e-b3badb3f2376", "Harshal Vaishampayan", "harshal.vaishampayan@elecbits.in", "engineer", "sc"],
   ["db9654f0-0b7e-4d3f-b6ed-3fd69ab781db", "Anwer Suhail", "anwer.suhail@elecbits.in", "engineer", "ind_design"],
+  ["c307a049-bc8a-48c7-b9b6-7eda839e3dc7", "Godson V", "godson.v@elecbits.in", "engineer", "soldering", "Soldering Engineer"],
 ];
 const SEED_USERS = _TEAM.map(([id, name, email, role, rr, titleOverride], i) => ({ id, name, email, role, title: titleOverride || ROLE_TITLE[rr] || "Team", resourceRole: rr, color: _PALETTE[i % _PALETTE.length] }));
 const SHREYA_ID = "3d6cfb19-1c1c-4d81-b25c-a0631458d955";
@@ -2757,7 +2758,7 @@ const PROJ_TABS = [
 const isOverdue = (t, nowMs) => !!(t.endTime && t.status !== "done" && hmToDate(t.date, t.endTime) < (nowMs || Date.now()));
 /* Every task can be filed under one discipline — the same list everywhere:
    the row on My Projects & Tasks, the card inside the project, the editor. */
-const TASK_CATS = ["Hardware", "Firmware", "Customer", "Vendors & Partnership", "Testing", "Documentation", "Industrial Design/Mechanical"];
+const TASK_CATS = ["Hardware", "Firmware", "Customer", "Vendors & Partnership", "Testing", "Documentation", "Industrial Design/Mechanical", "PM"];
 /* Who may change a task — ONE rule, used everywhere a task can be touched:
    an admin (superadmin / dept head), the PM of the task's own project, or the
    person it is assigned to. Nobody else — not even whoever created it. */
