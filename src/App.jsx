@@ -3464,6 +3464,8 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [planBusy, setPlanBusy] = useState(false);
   const [filing, setFiling] = useState(false);
   const trackerRef = useRef(null);   // the Date·Milestones·Responsibility tracker upload
+  const [armImp, setArmImp] = useState(false);   // two presses to undo an import
+  useEffect(() => { if (!armImp) return; const t2 = setTimeout(() => setArmImp(false), 5000); return () => clearTimeout(t2); }, [armImp]);
   const [armClear, setArmClear] = useState(false);
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
@@ -4060,6 +4062,23 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                 <Btn small kind="ghost" icon={Upload}
                   title="Upload the project tracker sheet (Date · Milestones · Responsibility · Dependencies) — every milestone becomes a to-do with its due date, its person and its dependency. Safe to upload again: rows already on the board are skipped."
                   onClick={() => trackerRef.current?.click()}>Import tracker</Btn>
+                {(() => {
+                  /* the undo for an import: removes EXACTLY what the tracker
+                     brought in — hand-made tasks are never touched */
+                  const imp = tasks.filter((t) => t.projectId === p.projectId && t.origin === "tracker");
+                  if (!imp.length) return null;
+                  return armImp ? (
+                    <Btn small kind="danger" icon={Trash2} onClick={() => {
+                      setTasks((ts) => ts.filter((x) => !(x.projectId === p.projectId && x.origin === "tracker")));
+                      toast(`${imp.length} imported to-do${imp.length === 1 ? "" : "s"} removed — everything added by hand stays`, "amber");
+                      setArmImp(false);
+                    }}>Sure — remove all {imp.length}</Btn>
+                  ) : (
+                    <Btn small kind="ghost" icon={Trash2}
+                      title="Delete every to-do the tracker import created on this project — tasks added by hand or by the AI stay"
+                      onClick={() => setArmImp(true)}>Remove imported ({imp.length})</Btn>
+                  );
+                })()}
               </>)}
               {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
