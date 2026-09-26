@@ -3464,6 +3464,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [armClear, setArmClear] = useState(false);
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
+  const [sortByDate, setSortByDate] = useState(false);   // due-date order for the To-dos list
   const [closedStages, setClosedStages] = useState([]);
   const [showDone, setShowDone] = useState(true);   // the Completed section on the To-dos tab
   const [tab, setTab] = useState(() => { const t = PENDING_PROJECT_TAB; PENDING_PROJECT_TAB = null; return t || "overview"; });
@@ -3495,7 +3496,9 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const dl = daysLeft(p.deadline);
   const overdue = (t) => isOverdue(t, nowMs);
   const rank = (t) => (t.status === "blocked" ? 0 : overdue(t) ? 1 : t.status === "in-progress" ? 2 : 3);
-  const todos = [...openTasks].sort((a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
+  const todos = [...openTasks].sort(sortByDate
+    ? (a, b) => String(a.date || "9999").localeCompare(String(b.date || "9999")) || String(a.startTime || "").localeCompare(String(b.startTime || ""))
+    : (a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
   const planStages = p.plan?.stages || [];
   const unfiled = needsFiling(planStages, todos);
   /* A project with a plan should never show a flat list of to-dos. The first
@@ -4003,6 +4006,13 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>{tab === "tasks" ? "Every open to-do" : "Next to-dos"}</span>
               {todos.length > 0 && <Pill color="var(--purple)">{todos.length} open</Pill>}
+              {tab === "tasks" && todos.length > 1 && (
+                <button onClick={() => { const next = !sortByDate; setSortByDate(next); if (next) setGrouped(false); }}
+                  title="Order every open to-do by its due date, day by day"
+                  style={{ background: "none", border: `1px solid ${sortByDate ? "var(--acc)" : "var(--bdr)"}`, borderRadius: 7, padding: "3px 10px", color: sortByDate ? "var(--acc)" : "var(--txt2)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>
+                  {sortByDate ? "✓ By date" : "Sort by date"}
+                </button>
+              )}
               {tab === "tasks" && planStages.length > 0 && (
                 <span style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
                   <button onClick={() => setGrouped((g) => !g)} style={{ background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{grouped ? "Show as a flat list" : "Group under the plan"}</button>
@@ -4083,7 +4093,23 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
+                {tab === "tasks" && sortByDate ? (() => {
+                  /* day-by-day: one small header per due date, the day's
+                     to-dos under it — past days read red at a glance */
+                  const byDay = new Map();
+                  for (const t of todos) { const k = t.date || "__none__"; if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(t); }
+                  return [...byDay.entries()].map(([dt, list]) => (
+                    <div key={dt} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                        <Calendar size={13} style={{ color: dt !== "__none__" && dt < todayStr() ? "var(--red)" : "var(--acc)" }} />
+                        <span style={{ fontWeight: 700, fontSize: 12.5 }}>{dt === "__none__" ? "No date set" : `${fmtDate(dt)}${dt === todayStr() ? " · today" : ""}`}</span>
+                        <Pill color={dt !== "__none__" && dt < todayStr() ? "var(--red)" : "var(--txt2)"}>{list.length}</Pill>
+                      </div>
+                      {list.map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
+                        onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
+                    </div>
+                  ));
+                })() : (tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
                   onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                 {tab === "overview" && todos.length > 5 && (
                   <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
