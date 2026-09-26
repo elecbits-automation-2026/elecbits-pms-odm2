@@ -2945,6 +2945,63 @@ function AskClientModal({ p, onClose }) {
    proposal and confirms; what lands on the board is the exact same task shape
    the Elecbits team's own to-dos have, so it files, groups and closes like
    any of them. */
+/* ─── THE PROJECT TRACKER, IMPORTED ─────────────────────────────────────────
+   PMs keep a day-wise tracker sheet: Date · Milestones · Responsibility ·
+   Dependencies, the date written once and carried down its block of rows.
+   Uploading it turns every milestone into a to-do on this project — the date
+   becomes the due date, the responsibility the assignee (matched against the
+   roster), the dependency rides on the task. */
+const TRACKER_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const parseTrackerDate = (s) => {
+  const str = String(s || "").trim().toLowerCase();
+  if (!str) return "";
+  let m = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/);   // 17/09/2026
+  if (m) { const y = m[3].length === 2 ? `20${m[3]}` : m[3]; return `${y}-${String(+m[2]).padStart(2, "0")}-${String(+m[1]).padStart(2, "0")}`; }
+  m = str.match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s*([a-z]{3,})/) || str.match(/([a-z]{3,})\s*(\d{1,2})/);   // "26 sept", "1 octo"
+  if (m) {
+    const dayFirst = /^\d/.test(m[1]);
+    const day = +(dayFirst ? m[1] : m[2]);
+    const mon = TRACKER_MONTHS[(dayFirst ? m[2] : m[1]).slice(0, 3)];
+    if (mon && day >= 1 && day <= 31) {
+      const now = new Date(); let y = now.getFullYear();
+      // a bare "12 jan" written in November means NEXT January, not last
+      if (new Date(`${y}-${String(mon).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00`) - now < -180 * 86400000) y += 1;
+      return `${y}-${String(mon).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+  return "";
+};
+const parseTrackerWorkbook = (wb, X) => {
+  const found = [];
+  for (const sn of wb.SheetNames) {
+    const rows = X.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: false, defval: "" });
+    let hi = -1, cols = null;
+    for (let i = 0; i < Math.min(6, rows.length); i++) {
+      const r = (rows[i] || []).map((c) => String(c || "").trim().toLowerCase());
+      const title = r.findIndex((c) => /milestone/.test(c));
+      if (title >= 0) {
+        cols = { title, date: r.findIndex((c) => /^date/.test(c)), who: r.findIndex((c) => /responsib/.test(c)), dep: r.findIndex((c) => /depend/.test(c)) };
+        hi = i; break;
+      }
+    }
+    if (hi < 0) continue;   // not a milestones sheet — e.g. the status tab
+    let curDate = "";
+    for (let i = hi + 1; i < rows.length; i++) {
+      const r = rows[i] || [];
+      const dRaw = cols.date >= 0 ? String(r[cols.date] || "").trim() : "";
+      if (dRaw) curDate = parseTrackerDate(dRaw) || curDate;
+      const title = String(r[cols.title] || "").replace(/\s+/g, " ").trim();
+      if (!title) continue;   // a weekend, a holiday, a bare date row
+      found.push({
+        title: title.slice(0, 220), date: curDate,
+        who: cols.who >= 0 ? String(r[cols.who] || "").trim() : "",
+        dep: cols.dep >= 0 ? String(r[cols.dep] || "").replace(/\s+/g, " ").trim() : "",
+      });
+    }
+  }
+  return found;
+};
+
 function PlanAddTaskModal({ p, onClose, seed }) {
   const { users, tasks, setTasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
@@ -3403,6 +3460,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [chatBusy, setChatBusy] = useState(false);
   const [planBusy, setPlanBusy] = useState(false);
   const [filing, setFiling] = useState(false);
+  const trackerRef = useRef(null);   // the Date·Milestones·Responsibility tracker upload
   const [armClear, setArmClear] = useState(false);
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
@@ -3641,6 +3699,45 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
       const r = await saveAttachmentToDrive(att, p.projectId, driveScope(my?.role));
       if (r === true) sheetSync(`${pmPath(p.projectId)}`, `${file.name} uploaded with the plan`);
     }
+  };
+
+  /* The tracker upload: every milestone row becomes a to-do here — due date
+     from the sheet's Date column, assignee matched from Responsibility,
+     Dependencies carried on the task. Re-uploading the same sheet is safe:
+     a milestone already on the board (same title, same day) is skipped. */
+  const importTracker = async (file) => {
+    try {
+      const X = await import("xlsx");
+      const wb = X.read(await file.arrayBuffer(), { type: "array" });
+      const rows = parseTrackerWorkbook(wb, X);
+      if (!rows.length) { toast("No milestones found — expected a sheet with Date · Milestones · Responsibility · Dependencies columns", "amber"); return; }
+      const at = new Date().toISOString();
+      const existing = new Set(tasks.filter((t) => t.projectId === p.projectId).map((t) => `${normId(t.title)}|${t.date || ""}`));
+      let dup = 0; const unmatched = new Set(); const made = [];
+      for (const r of rows) {
+        const date = r.date || todayStr();
+        const key = `${normId(r.title)}|${date}`;
+        if (existing.has(key)) { dup++; continue; }
+        existing.add(key);
+        const u = findPerson(users, r.who);
+        if (r.who && !u) unmatched.add(r.who);
+        made.push({
+          id: uid(), projectId: p.projectId, linked: true, title: r.title,
+          assigneeId: u?.id || "", date, startTime: "10:00", endTime: "18:00",
+          steps: [], conditions: [], status: "pending", origin: "tracker",
+          ...(r.dep ? { dependency: r.dep } : {}),
+          stageId: guessStageId(p.plan?.stages || [], { title: r.title, date }),
+          createdBy: me, createdAt: at, work: {},
+          history: [{ by: me, byName: my?.name || "", at, what: `imported from ${file.name}${r.who && !u ? ` — "${r.who}" is not on the roster, left unassigned` : ""}` }],
+        });
+      }
+      if (made.length) setTasks((ts) => [...made, ...ts]);
+      toast(
+        `${made.length} to-do${made.length === 1 ? "" : "s"} imported from the tracker`
+        + (dup ? ` · ${dup} already on the board, skipped` : "")
+        + (unmatched.size ? ` · not on the roster, left unassigned: ${[...unmatched].join(", ")}` : ""),
+        made.length ? "green" : "amber");
+    } catch (e) { toast(`Couldn't read that tracker: ${String(e?.message || e).slice(0, 140)}`, "amber"); }
   };
 
   const sendChat = async () => {
@@ -3944,6 +4041,13 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   title="Describe a task — the AI works out which block it belongs to, the timeline, the person, and splits it into subtasks when it is too big."
                   onClick={() => setAddTask(true)}>Add a task</Btn>
               )}
+              {tab === "tasks" && !isClient(my) && (<>
+                <input ref={trackerRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) importTracker(f); }} />
+                <Btn small kind="ghost" icon={Upload}
+                  title="Upload the project tracker sheet (Date · Milestones · Responsibility · Dependencies) — every milestone becomes a to-do with its due date, its person and its dependency. Safe to upload again: rows already on the board are skipped."
+                  onClick={() => trackerRef.current?.click()}>Import tracker</Btn>
+              </>)}
               {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
             {todos.length === 0 ? (
