@@ -265,7 +265,7 @@ const _TEAM = [
   ["c8cda154-e0f9-4d62-86db-03a0851f8a37", "Ankit Ashok Mishra", "ankit.ashokmishra@elecbits.in", "engineer", "jr_hw"],
   ["cda383fc-b4fd-475d-9153-966a77511108", "Jeena George", "jeena.george@elecbits.in", "engineer", "jr_hw"],
   ["92db0288-7def-4051-8354-2cfb14670a09", "Arun Mohan", "arun.mohan@elecbits.in", "engineer", "sr_hw"],
-  ["2b470c12-1377-4f70-b4d3-5b54e4438d64", "Amitabh Gogoi", "amitabh.gogoi@elecbits.in", "engineer", "sr_fw"],
+  ["2b470c12-1377-4f70-b4d3-5b54e4438d64", "Amitabh Gogoi", "amitabh.gogoi@elecbits.in", "superadmin", "sr_fw"],
   ["22632c31-57b3-4da1-8611-19f3f4ba3944", "Aneesh Madhavan", "aneesh.madhavan@elecbits.in", "engineer", "jr_fw"],
   ["2c30777b-ea66-4469-9e3a-3d697f259ca7", "Vishnu Vardhan", "vishnu.vardhan@elecbits.in", "engineer", "jr_fw"],
   ["2ed42335-7f17-4f41-a8a0-d29544902d64", "Swati Saxena", "swati.saxena@elecbits.in", "engineer", "jr_fw"],
@@ -277,6 +277,7 @@ const _TEAM = [
   ["52546bb1-89f3-4a59-aa5e-b3badb3f2376", "Harshal Vaishampayan", "harshal.vaishampayan@elecbits.in", "engineer", "sc"],
   ["db9654f0-0b7e-4d3f-b6ed-3fd69ab781db", "Anwer Suhail", "anwer.suhail@elecbits.in", "engineer", "ind_design"],
   ["c307a049-bc8a-48c7-b9b6-7eda839e3dc7", "Godson V", "godson.v@elecbits.in", "engineer", "soldering", "Soldering Engineer"],
+  ["53212c3c-453b-405e-a560-d1d952184ab0", "Mahesh", "mahesh@elecbits.in", "superadmin", "sr_pm", "Super Admin"],
 ];
 const SEED_USERS = _TEAM.map(([id, name, email, role, rr, titleOverride], i) => ({ id, name, email, role, title: titleOverride || ROLE_TITLE[rr] || "Team", resourceRole: rr, color: _PALETTE[i % _PALETTE.length] }));
 const SHREYA_ID = "3d6cfb19-1c1c-4d81-b25c-a0631458d955";
@@ -2825,7 +2826,9 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px" }}>
       <div style={{ width: 34, height: 34, borderRadius: 9, background: "color-mix(in srgb," + color + " 14%,transparent)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={16} style={{ color }} /></div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: CLOSED_STATUSES.includes(t.status) ? "line-through" : "none", color: CLOSED_STATUSES.includes(t.status) ? "var(--txt2)" : "var(--txt)" }}>{t.title}</div>
+        {/* the FULL title, wrapping onto as many lines as it needs — a long
+           milestone must never be readable only to its first half */}
+        <div style={{ fontWeight: 600, fontSize: 13, lineHeight: 1.45, overflowWrap: "anywhere", textDecoration: CLOSED_STATUSES.includes(t.status) ? "line-through" : "none", color: CLOSED_STATUSES.includes(t.status) ? "var(--txt2)" : "var(--txt)" }}>{t.title}</div>
         <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center", flexWrap: "wrap" }}>
           {link && <a href={link.href} target="_blank" rel="noreferrer" title={link.name}
                       onClick={(e) => e.stopPropagation()}
