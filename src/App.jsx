@@ -4057,7 +4057,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   onClick={() => setAddTask(true)}>Add a task</Btn>
               )}
               {tab === "tasks" && !isClient(my) && (<>
-                <input ref={trackerRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+                <input ref={trackerRef} type="file" accept=".xlsx,.xls,.numbers" style={{ display: "none" }}
                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) importTracker(f); }} />
                 <Btn small kind="ghost" icon={Upload}
                   title="Upload the project tracker sheet (Date · Milestones · Responsibility · Dependencies) — every milestone becomes a to-do with its due date, its person and its dependency. Safe to upload again: rows already on the board are skipped."
