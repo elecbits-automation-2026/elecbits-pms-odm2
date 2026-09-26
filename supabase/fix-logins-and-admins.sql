@@ -1,32 +1,51 @@
 -- ═══════════════════════════════════════════════════════════════════════════
--- FIX THE BROKEN LOGINS + MAKE THE TWO ADMINS — 26 Sep 2026, as asked by Saurav.
+-- FIX THE BROKEN LOGINS + MAKE THE TWO ADMINS — v2, layout-aware.
 --
--- WHY SIGN-IN WAS FAILING: logins created by create-all-logins.sql (and
--- reset-all-logins.sql) inserted auth.users rows with the GoTrue "token"
--- columns left NULL. GoTrue cannot read a NULL there, so every such account
--- fails at sign-in with a schema error the app can only show as
--- "Sign-in failed". Accounts made through the dashboard or the app were fine.
+-- v1 of this script wrote to public.profiles. On this database the roster has
+-- MOVED to core.people (the schema reorganisation), so v1 either stopped at
+-- the first statement or updated a table the app no longer reads. This
+-- version finds the roster wherever it lives — core.people first,
+-- public.profiles as the fallback — and does everything against that.
 --
--- This script, in one run:
---   1. REPAIRS every auth user with NULL token columns (sets them to '' —
---      exactly what Supabase itself stores). No password is changed by this.
+-- What it does, in one run:
+--   1. REPAIRS every auth user whose GoTrue token columns are NULL (the
+--      reason "Sign-in failed" hits accounts made by the bulk login scripts).
+--      Sets them to '' — exactly what Supabase itself stores. No password
+--      is changed by this.
 --   2. GUARANTEES akshay.tm@elecbits.in signs in with Eb-marble-8467:
 --      creates the login if missing, otherwise resets its password to that,
---      confirms the email, and links it to his roster profile.
---   3. Makes amitabh.gogoi@elecbits.in and mahesh@elecbits.in SUPERADMINS
---      (same access as the admin account). Missing profiles/logins are
---      created; the printed report shows any NEW password. Existing
---      passwords are never touched.
+--      confirms the email, and links it to his roster row.
+--   3. Makes amitabh.gogoi@elecbits.in and mahesh@elecbits.in SUPERADMINS —
+--      full access to every project, same as the admin account. Missing
+--      roster rows / logins are created; the report prints any NEW password
+--      exactly once. Existing passwords are never touched.
 --
 -- Idempotent: a second run changes nothing and prints the same report.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 create extension if not exists pgcrypto;
-alter table public.profiles add column if not exists auth_id uuid;  -- no-op if migrated
+
+-- ── 0 · find the roster and reach it through one name ───────────────────────
+do $$
+declare
+  roster text;
+begin
+  if exists (select 1 from information_schema.tables where table_schema = 'core' and table_name = 'people') then
+    roster := 'core.people';
+  elsif exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = 'profiles') then
+    roster := 'public.profiles';
+  else
+    raise exception 'No roster table found — neither core.people nor public.profiles exists.';
+  end if;
+  execute format('alter table %s add column if not exists auth_id uuid', roster);
+  -- a simple single-table temp view is auto-updatable: inserts and updates
+  -- below pass straight through to the real roster
+  execute 'drop view if exists _roster';
+  execute format('create temp view _roster as select * from %s', roster);
+  raise notice 'Roster: %', roster;
+end $$;
 
 -- ── 1 · repair the NULL token columns on EVERY auth user ────────────────────
--- Column names vary a little across GoTrue versions, so only the ones that
--- actually exist are touched.
 do $$
 declare
   col text;
@@ -46,12 +65,13 @@ begin
 end $$;
 
 -- ── 2 + 3 · the named accounts ───────────────────────────────────────────────
+drop table if exists _handout;
 create temp table _handout (name text, email text, password text, note text) on commit preserve rows;
 
 do $$
 declare
   spec record;
-  pid  uuid;   -- profile id
+  pid  uuid;   -- roster row id
   aid  uuid;   -- auth user id
   pw   text;
 begin
@@ -63,34 +83,34 @@ begin
       ('mahesh@elecbits.in',         'Mahesh',          true,       null)
     ) as t(email, name, make_admin, fixed_password)
   loop
-    -- the roster profile: match by email first, then by name; create if absent
-    select id into pid from public.profiles where lower(coalesce(email,'')) = spec.email limit 1;
+    -- the roster row: match by email first, then by name; create if absent
+    select id into pid from _roster where lower(coalesce(email,'')) = spec.email limit 1;
     if pid is null then
-      select id into pid from public.profiles
+      select id into pid from _roster
       where lower(name) like lower(split_part(spec.name, ' ', 1)) || '%'
         and role is distinct from 'superadmin'
       limit 1;
     end if;
     if pid is null then
       pid := gen_random_uuid();
-      insert into public.profiles (id, name, email, role, title, dept, skills, project_tags, max_projects, color)
+      insert into _roster (id, name, email, role, title, dept, skills, project_tags, max_projects, color)
       values (pid, spec.name, spec.email,
               case when spec.make_admin then 'superadmin' else 'engineer' end,
               case when spec.make_admin then 'Super Admin' else 'Engineer' end,
               'ODM', '[]'::jsonb, '["engineering"]'::jsonb, 3, '#4f46e5');
     else
-      update public.profiles set email = spec.email where id = pid;
+      update _roster set email = spec.email where id = pid;
     end if;
     if spec.make_admin then
-      update public.profiles set role = 'superadmin',
+      update _roster set role = 'superadmin',
         title = case when coalesce(title,'') in ('', 'Engineer') then 'Super Admin' else title end
       where id = pid;
     end if;
 
-    -- the login: by email, else by the profile link
+    -- the login: by email, else through the roster link
     select id into aid from auth.users where lower(email) = spec.email limit 1;
     if aid is null then
-      select auth_id into aid from public.profiles where id = pid and auth_id is not null;
+      select auth_id into aid from _roster where id = pid and auth_id is not null;
     end if;
 
     if aid is null then
@@ -141,7 +161,7 @@ begin
         case when spec.fixed_password is not null then 'password reset to the known one' else 'login already existed' end);
     end if;
 
-    update public.profiles set auth_id = aid where id = pid;
+    update _roster set auth_id = aid where id = pid;
   end loop;
 end $$;
 
@@ -162,9 +182,9 @@ begin
 end $$;
 
 -- ── The report ───────────────────────────────────────────────────────────────
-select h.name, h.email, h.password, h.note, p.role
+select h.name, h.email, h.password, h.note, r.role
 from _handout h
-left join public.profiles p on lower(coalesce(p.email,'')) = h.email
+left join _roster r on lower(coalesce(r.email,'')) = h.email
 order by h.name;
 
 drop table if exists _handout;
