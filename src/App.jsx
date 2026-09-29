@@ -28,7 +28,7 @@ import {
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
-  Video, Mic, MessagesSquare, Building2, UserPlus
+  Video, Mic, MessagesSquare, Building2, UserPlus, Undo2
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 import schneiderTracker from "./data/schneider-tracker.json";
@@ -61,8 +61,18 @@ const uuid = () => (globalThis.crypto?.randomUUID
       return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
     }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const todayStr = () => new Date().toISOString().slice(0, 10);
-const nowHM = () => new Date().toTimeString().slice(0, 5);
+/* THE CLOCK IS INDIAN STANDARD TIME — explicitly, not whatever the device
+   claims. todayStr() used to be UTC (toISOString), so between midnight and
+   05:30 IST the whole tool lived on yesterday's date: scrums filed wrong,
+   "today" filters missed, overdue fired early or late. Every date and time
+   the tool writes or shows now goes through Asia/Kolkata. */
+const IST_DATE = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
+const IST_TIME = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const IST_STAMP = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const todayStr = () => IST_DATE.format(new Date());
+const nowHM = () => IST_TIME.format(new Date());
+/* An ISO stamp (stored in UTC) shown as IST — history lines, remarks. */
+const fmtStamp = (iso) => { try { return iso ? IST_STAMP.format(new Date(iso)) : ""; } catch { return String(iso || "").slice(0, 16).replace("T", " "); } };
 const fmtDate = (d) => (d ? new Date(d.length === 10 ? d + "T00:00:00" : d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 const daysLeft = (d) => Math.ceil((new Date(d + "T23:59:59") - new Date()) / 86400000);
 const initials = (n) => (n || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
@@ -73,6 +83,14 @@ const hmToDate = (dateStr, hm) => new Date(`${dateStr}T${hm || "23:59"}:00`);
    deadline left to miss. */
 const taskEnd = (t) => ((t.endDate || t.endTime) ? hmToDate(t.endDate || t.date, t.endTime || "23:59") : null);
 const CLOSED_STATUSES = ["done", "not-required"];
+/* Where a task came from — shown on the task, so a batch that appears on the
+   board is never a mystery. Everything that raises tasks stamps an origin. */
+const ORIGIN_LABEL = {
+  assistant: "the AI assistant (approved draft)", "plan-add": "Add a task",
+  tracker: "the tracker import", process: "the process plan (Generate/raise block)",
+  mom: "a brainstorm write-up", branch: "the split of a blocked task",
+  scrum: "the Daily Scrum", client: "a client review ask", email: "the email desk",
+};
 const fmtDur = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60; return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(ss).padStart(2, "0"); };
 const normId = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 /* ─── THE REAL DRIVE ADDRESS ──────────────────────────────────────────────
@@ -2395,7 +2413,10 @@ function ProjectsModule() {
      projects — the ones they are staffed on, created, or carry tasks for.
      Being assigned work on a project and unable to open its plan was how
      people ended up working blind. */
-  const seesAll = ["superadmin", "dept_head"].includes(my?.role);
+  /* PMs run projects across the board — they see every project (and, per the
+     one edit rule, may act on any task in them). Engineers still see only
+     their own; clients only their company's. */
+  const seesAll = ["superadmin", "dept_head", "pm"].includes(my?.role);
   const myProjIds = useMemo(() => new Set(tasks.filter((t) => t.assigneeId === me && t.projectId).map((t) => t.projectId)), [tasks, me]);
   /* A client sees their own company's projects: the ones they are named on,
      and any project belonging to their organisation. Never anything else —
@@ -2770,15 +2791,29 @@ const isOverdue = (t, nowMs) => {
    the row on My Projects & Tasks, the card inside the project, the editor. */
 const TASK_CATS = ["Hardware", "Firmware", "Customer", "Vendors & Partnership", "Testing", "Documentation", "Industrial Design/Mechanical", "PM"];
 /* Who may change a task — ONE rule, used everywhere a task can be touched:
-   an admin (superadmin / dept head), the PM of the task's own project, or the
-   person it is assigned to. Nobody else — not even whoever created it. */
+   an admin (superadmin / dept head), anyone whose ROLE is PM (a PM runs
+   projects — they edit any task, whoever created or carries it), or the
+   person it is assigned to. Engineers touch only their own; clients none. */
 const canEditTask = (t, me, my, projects) => !!me && (
-  ["superadmin", "dept_head"].includes(my?.role)
+  ["superadmin", "dept_head", "pm"].includes(my?.role)
   || t.assigneeId === me
   || (projects || []).some((p) => p.projectId === t.projectId
       && (p.team || []).some((s) => s.userId === me && String(s.slot || "").startsWith("PM"))));
 /* The closure gate: a task that names a document will not close without it. */
 const needsDocToClose = (t) => !!(t.docName && String(t.docName).trim() && !t.docFile);
+/* The required documents, as a LIST — entered one per line, and old
+   comma-separated link pastes are split too, so nothing renders as one
+   endless line running off the screen. */
+const docParts = (s) => String(s || "").split(/\n+|,\s*(?=https?:\/\/)/).map((x) => x.trim()).filter(Boolean);
+const DocsPill = ({ t }) => {
+  const ds = docParts(t.docName);
+  if (!ds.length) return null;
+  return (
+    <span title={ds.join("\n")} style={{ maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "bottom" }}>
+      <Pill color="var(--amber)"><FileText size={10} /> {ds.length > 1 ? `closes with ${ds.length} documents` : `closes with: ${ds[0]}`}</Pill>
+    </span>
+  );
+};
 const todoMeta = (t, nowMs) => t.status === "done" ? { Ic: CheckCircle2, label: "Done", color: "var(--green)" }
   : t.status === "not-required" ? { Ic: X, label: "Not required", color: "var(--txt3)" }
   : t.status === "blocked" ? { Ic: AlertTriangle, label: "Blocked", color: "var(--red)" }
@@ -2839,7 +2874,7 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
           {t.conditions?.length > 0 && <Pill color="var(--amber)"><GitBranch size={10} /> {t.conditions.length} if/else</Pill>}
           {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
           {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
-          {needsDocToClose(t) && <Pill color="var(--amber)"><FileText size={10} /> closes with: {t.docName}</Pill>}
+          {needsDocToClose(t) && <DocsPill t={t} />}
           {t.docFile && <a href={t.docFile.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }} title={t.docFile.name}>
             <Pill color="var(--green)"><FileText size={10} /> {t.docFile.name}</Pill></a>}
         </div>
@@ -2870,8 +2905,8 @@ function TodoCard({ t, users, stages, onMove, nowMs, onDelete }) {
       {canAct && <button onClick={() => setEditT(true)} title="Edit this task — title, person, dates, status; every edit is logged"
         style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", display: "flex", padding: 3, flexShrink: 0 }}><Pencil size={13} /></button>}
       <button onClick={() => setShowRem(!showRem)} title="Remarks on this task — anyone can add one"
-        style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: (t.remarks || []).length ? "var(--acc)" : "var(--txt3)", cursor: "pointer", fontSize: 11, fontWeight: 700, padding: "2px 8px", flexShrink: 0 }}>
-        💬 {(t.remarks || []).length || ""}
+        style={{ background: "none", border: "1px solid var(--bdr)", borderRadius: 7, color: (t.remarks || []).filter((r) => !r.gone).length ? "var(--acc)" : "var(--txt3)", cursor: "pointer", fontSize: 11, fontWeight: 700, padding: "2px 8px", flexShrink: 0 }}>
+        💬 {(t.remarks || []).filter((r) => !r.gone).length || ""}
       </button>
       {onDelete && canAct && (armDel ? (
         <Btn small kind="danger" icon={Trash2} onClick={() => { setArmDel(false); onDelete(); }}>Sure — delete</Btn>
@@ -3440,7 +3475,7 @@ function MfgRunTree({ mfg, compact = false }) {
 }
 
 function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
-  const { tasks, setTasks, users, notes, me, now, projects, setProjects, memory, setMemory, toast, sheetSync } = useCtx();
+  const { tasks, setTasks, users, notes, me, now, projects, setProjects, memory, setMemory, toast, sheetSync, undoTasks, undoN } = useCtx();
   const [confirmDel, setConfirmDel] = useState(false);
   const my = users.find((u) => u.id === me);
   const amClient = isClient(my);
@@ -3470,6 +3505,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   useEffect(() => { if (!armClear) return; const t = setTimeout(() => setArmClear(false), 5000); return () => clearTimeout(t); }, [armClear]);
   const [grouped, setGrouped] = useState(true);
   const [sortByDate, setSortByDate] = useState(false);   // due-date order for the To-dos list
+  const [todoQ, setTodoQ] = useState("");                // the To-dos search box
   const [closedStages, setClosedStages] = useState([]);
   const [showDone, setShowDone] = useState(true);   // the Completed section on the To-dos tab
   const [tab, setTab] = useState(() => { const t = PENDING_PROJECT_TAB; PENDING_PROJECT_TAB = null; return t || "overview"; });
@@ -3504,6 +3540,14 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const todos = [...openTasks].sort(sortByDate
     ? (a, b) => String(a.date || "9999").localeCompare(String(b.date || "9999")) || String(a.startTime || "").localeCompare(String(b.startTime || ""))
     : (a, b) => rank(a) - rank(b) || (a.date + (a.startTime || "")).localeCompare(b.date + (b.startTime || "")));
+  /* The search box on the To-dos tab: title, person, category, block,
+     dependency and remark text all count. Filing and counts elsewhere keep
+     using the FULL list — the search narrows only what is on screen. */
+  const qNeedle = normId(todoQ);
+  const matchesQ = (t) => !qNeedle || normId([t.title, t.category || "", t.dependency || "", t.block || "",
+    users.find((u) => u.id === t.assigneeId)?.name || "",
+    ...(t.remarks || []).filter((r) => !r.gone).map((r) => r.text)].join(" ")).includes(qNeedle);
+  const todosShown = qNeedle && tab === "tasks" ? todos.filter(matchesQ) : todos;
   const planStages = p.plan?.stages || [];
   const unfiled = needsFiling(planStages, todos);
   /* A project with a plan should never show a flat list of to-dos. The first
@@ -4010,7 +4054,16 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           <Section>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: "var(--txt)", textTransform: "uppercase", letterSpacing: ".06em" }}>{tab === "tasks" ? "Every open to-do" : "Next to-dos"}</span>
-              {todos.length > 0 && <Pill color="var(--purple)">{todos.length} open</Pill>}
+              {todos.length > 0 && <Pill color="var(--purple)">{qNeedle && tab === "tasks" ? `${todosShown.length} of ${todos.length}` : todos.length} open</Pill>}
+              {tab === "tasks" && (
+                <input className="inp" style={{ width: 210, padding: "5px 10px", fontSize: 12 }}
+                  placeholder="🔍 Search these to-dos…" value={todoQ} onChange={(e) => setTodoQ(e.target.value)}
+                  title="Searches titles, people, categories, blocks, dependencies and remark text — open and completed alike" />
+              )}
+              {tab === "tasks" && undoN > 0 && (
+                <Btn small kind="ghost" icon={Undo2} title="Take back the last change made to tasks in this session — an edit, a status, a delete, an import"
+                  onClick={() => { if (undoTasks()) toast("Undone — the tasks are back the way they were", "green"); }}>Undo</Btn>
+              )}
               {tab === "tasks" && todos.length > 1 && (
                 <button onClick={() => { const next = !sortByDate; setSortByDate(next); if (next) setGrouped(false); }}
                   title="Order every open to-do by its due date, day by day"
@@ -4082,13 +4135,17 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
               </>)}
               {(tab !== "tasks" || !planStages.length) && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--txt3)" }}>from Daily Scrum</span>}
             </div>
-            {todos.length === 0 ? (
-              <Empty icon={ListChecks} title="No open to-dos" sub="Every open task for this project shows here, most urgent first. Add them in Daily Scrum — organise a note and push the tasks." />
+            {(tab === "tasks" ? todosShown : todos).length === 0 ? (
+              <Empty icon={ListChecks}
+                title={qNeedle && tab === "tasks" && todos.length ? "Nothing matches that search" : "No open to-dos"}
+                sub={qNeedle && tab === "tasks" && todos.length
+                  ? "Try another word — it looks through titles, people, categories, blocks, dependencies and remarks."
+                  : "Every open task for this project shows here, most urgent first. Add them in Daily Scrum — organise a note and push the tasks."} />
             ) : tab === "tasks" && grouped && planStages.length > 0 ? (
               /* Nested under the plan: a stage, then the work that belongs to
                  it. Click a stage to open or shut it. */
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                {groupTasksByStage(planStages, todos).map(([stage, list]) => {
+                {groupTasksByStage(planStages, todosShown).map(([stage, list]) => {
                   const key = stage?.id || "__loose__";
                   const shut = closedStages.includes(key);
                   return (
@@ -4119,7 +4176,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   /* day-by-day: one small header per due date, the day's
                      to-dos under it — past days read red at a glance */
                   const byDay = new Map();
-                  for (const t of todos) { const k = t.date || "__none__"; if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(t); }
+                  for (const t of todosShown) { const k = t.date || "__none__"; if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(t); }
                   return [...byDay.entries()].map(([dt, list]) => (
                     <div key={dt} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
@@ -4131,7 +4188,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                         onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                     </div>
                   ));
-                })() : (tab === "tasks" ? todos : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
+                })() : (tab === "tasks" ? todosShown : todos.slice(0, 5)).map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
                   onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                 {tab === "overview" && todos.length > 5 && (
                   <button onClick={() => setTab("tasks")} style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: "4px 2px" }}>
@@ -4154,7 +4211,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                 </button>
                 {showDone && (
                   <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {[...done, ...notReq].sort((a, b) => String(b.doneAt || b.completedAt || "").localeCompare(String(a.doneAt || a.completedAt || "")))
+                    {[...done, ...notReq].filter(matchesQ).sort((a, b) => String(b.doneAt || b.completedAt || "").localeCompare(String(a.doneAt || a.completedAt || "")))
                       .map((t) => <TodoCard key={t.id} t={t} users={users} nowMs={nowMs}
                         onDelete={() => { setTasks((ts) => ts.filter((x) => x.id !== t.id)); toast("To-do deleted", "amber"); }} />)}
                   </div>
@@ -6038,7 +6095,7 @@ function inDayBucket(t, bucket, pickedDate) {
 const iso10 = (d) => new Date(d).toISOString().slice(0, 10);
 
 function TasksModule() {
-  const { tasks, setTasks, projects, users, me, now, setView, toast } = useCtx();
+  const { tasks, setTasks, projects, users, me, now, setView, toast, undoTasks, undoN } = useCtx();
   const my = users.find((u) => u.id === me);
   const isAdmin = ["superadmin", "dept_head"].includes(my?.role);
   /* Admin multi-select: tick tasks anywhere in the list, act on all of them
@@ -6157,6 +6214,10 @@ function TasksModule() {
           {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
           <option value="__none__">No category yet</option>
         </select>
+        {undoN > 0 && (
+          <Btn small kind="ghost" icon={Undo2} title="Take back the last change made to tasks in this session — an edit, a status, a delete, a bulk action"
+            onClick={() => { if (undoTasks()) toast("Undone — the tasks are back the way they were", "green"); }}>Undo</Btn>
+        )}
         <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--txt2)" }}>{filtered.length} task(s){!isAdmin && " · your view"}</span>
         {filtered.length > 0 && (armAll ? (
           <Btn small kind="danger" icon={Trash2} onClick={() => {
@@ -6376,10 +6437,10 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
         {t.origin === "branch" && <Pill color="var(--purple)"><GitBranch size={10} /> branch</Pill>}
         {t.escalated && <Pill color="var(--red)"><Shield size={10} /> Shreya</Pill>}
         {t.status === "done" && t.aiVerification && <Pill color="var(--green)"><Bot size={10} /> {t.aiVerification.score}/10</Pill>}
-        {needsDocToClose(t) && <Pill color="var(--amber)"><FileText size={10} /> closes with: {t.docName}</Pill>}
+        {needsDocToClose(t) && <DocsPill t={t} />}
         {t.docFile && <a href={t.docFile.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }} title={t.docFile.name}>
           <Pill color="var(--green)"><FileText size={10} /> {t.docFile.name}</Pill></a>}
-        {(t.remarks || []).length > 0 && <Pill color="var(--txt2)">💬 {(t.remarks || []).length}</Pill>}
+        {(t.remarks || []).filter((r) => !r.gone).length > 0 && <Pill color="var(--txt2)">💬 {(t.remarks || []).filter((r) => !r.gone).length}</Pill>}
         <div style={{ display: "flex", gap: 7, marginLeft: "auto", alignItems: "center" }}>
           {canAct ? (
             <select className="inp" value={t.category || ""} onChange={(e) => changeCat(e.target.value)}
@@ -6427,11 +6488,16 @@ function TaskRow({ t, now, showAssignee, showProject, onStart, onWork, onComplet
               <b style={{ color: "var(--amber)" }}>What waits on this:</b> {t.dependency}
             </div>
           )}
+          <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--txt3)" }}>
+            Raised by {ORIGIN_LABEL[t.origin] || "hand, in the Daily Scrum"}
+            {(() => { const c = users.find((u) => u.id === t.createdBy); return c ? ` · ${c.name}` : ""; })()}
+            {t.createdAt ? ` · ${fmtStamp(t.createdAt)}` : ""}
+          </div>
           {(t.history || []).length > 0 && (
             <div style={{ marginTop: 8 }}>
               <b style={{ color: "var(--txt)" }}>Change history:</b>
               {(t.history || []).slice(-6).reverse().map((h, i) => (
-                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {String(h.at).slice(0, 16).replace("T", " ")} — {h.what}</div>
+                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {fmtStamp(h.at)} — {h.what}</div>
               ))}
             </div>
           )}
@@ -6450,6 +6516,8 @@ function TaskEditModal({ t, onClose }) {
   const { users, setTasks, me, toast } = useCtx();
   const my = users.find((u) => u.id === me);
   const [f, setF] = useState({ title: t.title || "", assigneeId: t.assigneeId || "", date: t.date || "", startTime: t.startTime || "", endTime: t.endTime || "", endDate: t.endDate || "", status: t.status, category: t.category || "", docName: t.docName || "" });
+  const [docAdd, setDocAdd] = useState("");
+  const addDoc = () => { setF((x) => ({ ...x, docName: [...docParts(x.docName), docAdd.trim()].join("\n") })); setDocAdd(""); };
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
   const save = () => {
     const diffs = [];
@@ -6460,11 +6528,11 @@ function TaskEditModal({ t, onClose }) {
     if (f.endDate !== (t.endDate || "")) diffs.push(`deadline → ${f.endDate || "same day"}`);
     if (f.status !== t.status) diffs.push(`status → ${f.status}`);
     if (f.category !== (t.category || "")) diffs.push(`category → ${f.category || "—"}`);
-    if (f.docName.trim() !== (t.docName || "")) diffs.push(`closure document → ${f.docName.trim() || "—"}`);
+    if (f.docName.trim() !== (t.docName || "")) diffs.push(`closure documents → ${docParts(f.docName).join(" · ").slice(0, 140) || "—"}`);
     if (!diffs.length) { onClose(); return; }
     /* the closure gate holds here too — Done is not a word, it is the document */
     if (f.status === "done" && t.status !== "done" && (f.docName.trim() || t.docName) && !t.docFile) {
-      toast(`This task closes only with "${f.docName.trim() || t.docName}" — set it Done on the task itself and you'll be asked for the document`, "amber");
+      toast(`This task closes only with ${docParts(f.docName || t.docName).length > 1 ? "its documents" : `"${docParts(f.docName || t.docName)[0]}"`} — set it Done on the task itself and you'll be asked for them`, "amber");
       return;
     }
     const at = new Date().toISOString();
@@ -6500,10 +6568,25 @@ function TaskEditModal({ t, onClose }) {
             {TASK_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        <Field label="Document required to close (leave empty if none)">
-          <input className="inp" value={f.docName} onChange={set("docName")}
-            placeholder='e.g. "DRC report", "Signed test sheet" — the task will not close without it' />
-          {t.docFile && <div style={{ fontSize: 11.5, color: "var(--green)", marginTop: 4 }}>Attached: <a href={t.docFile.url} target="_blank" rel="noreferrer" style={{ color: "var(--green)" }}>{t.docFile.name}</a> · {t.docFile.byName}</div>}
+        <Field label="Documents required to close — one at a time (leave empty if none)">
+          {docParts(f.docName).length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 7 }}>
+              {docParts(f.docName).map((d, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 7, fontSize: 12, border: "1px solid var(--bdr)", borderRadius: 8, padding: "5px 9px", background: "var(--s2)" }}>
+                  <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", fontFamily: /^https?:\/\//.test(d) ? MONO : undefined }}>{d}</span>
+                  <button onClick={() => setF((x) => ({ ...x, docName: docParts(x.docName).filter((_, j) => j !== i).join("\n") }))}
+                    title="Remove this one" style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", flexShrink: 0 }}><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 7 }}>
+            <input className="inp" style={{ flex: 1 }} value={docAdd} onChange={(e) => setDocAdd(e.target.value)}
+              placeholder='"DRC report", or paste one link — press Add, then the next one'
+              onKeyDown={(e) => { if (e.key === "Enter" && docAdd.trim()) addDoc(); }} />
+            <Btn small kind="ghost" icon={Plus} disabled={!docAdd.trim()} onClick={addDoc}>Add</Btn>
+          </div>
+          {t.docFile && <div style={{ fontSize: 11.5, color: "var(--green)", marginTop: 6, overflowWrap: "anywhere" }}>Attached: <a href={t.docFile.url} target="_blank" rel="noreferrer" style={{ color: "var(--green)" }}>{t.docFile.name}</a> · {t.docFile.byName}</div>}
         </Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Start date"><input type="date" className="inp" value={f.date} onChange={set("date")} /></Field>
@@ -6515,7 +6598,7 @@ function TaskEditModal({ t, onClose }) {
           <Field label="Change history">
             <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 130, overflowY: "auto" }}>
               {(t.history || []).slice().reverse().map((h, i) => (
-                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {String(h.at).slice(0, 16).replace("T", " ")} — {h.what}</div>
+                <div key={i} style={{ fontSize: 11.5, color: "var(--txt3)" }}>{h.byName || "someone"} · {fmtStamp(h.at)} — {h.what}</div>
               ))}
             </div>
           </Field>
@@ -6527,11 +6610,19 @@ function TaskEditModal({ t, onClose }) {
 
 /* Remarks — the running conversation on one task. Anyone signed in can add
    one; each carries a name and a time and lives on the task itself, so the
-   context is still there when the task is looked at a month later. */
+   context is still there when the task is looked at a month later. The
+   author (or an admin) can rewrite or withdraw their own remark later — a
+   withdrawal is a tombstone ({gone:true}), never a plain removal, or the
+   merge that unions everyone's remarks would resurrect it. */
 function TaskRemarks({ t }) {
   const { users, me, setTasks } = useCtx();
   const my = users.find((u) => u.id === me);
   const [val, setVal] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const patchRemark = (id, patch) => setTasks((ts) => ts.map((x) => (x.id === t.id
+    ? { ...x, remarks: (x.remarks || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) }
+    : x)));
   const post = () => {
     const text = val.trim();
     if (!text || !setTasks) return;
@@ -6539,15 +6630,40 @@ function TaskRemarks({ t }) {
     setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, remarks: [...(x.remarks || []), r] } : x)));
     setVal("");
   };
+  const saveEdit = () => {
+    const text = editVal.trim();
+    if (text) patchRemark(editId, { text, editedAt: new Date().toISOString() });
+    setEditId(null); setEditVal("");
+  };
+  const shown = (t.remarks || []).filter((r) => !r.gone);
   return (
     <div style={{ marginTop: 8 }}>
       <b style={{ color: "var(--txt)", fontSize: 12.5 }}>Remarks</b>
-      {(t.remarks || []).map((r) => (
-        <div key={r.id} style={{ fontSize: 12, color: "var(--txt2)", marginTop: 4, lineHeight: 1.5 }}>
-          <span style={{ fontWeight: 700, color: "var(--txt)" }}>{r.byName || "someone"}</span>
-          <span style={{ fontSize: 10.5, color: "var(--txt3)" }}> · {String(r.at).slice(0, 16).replace("T", " ")}</span> — {r.text}
-        </div>
-      ))}
+      {shown.map((r) => {
+        const mine = r.by === me || ["superadmin", "dept_head"].includes(my?.role);
+        if (editId === r.id) return (
+          <div key={r.id} style={{ display: "flex", gap: 7, marginTop: 5 }}>
+            <input className="inp" autoFocus style={{ flex: 1, fontSize: 12 }} value={editVal}
+              onChange={(e) => setEditVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+            <Btn small kind="green" onClick={saveEdit}>Save</Btn>
+            <Btn small kind="ghost" onClick={() => { setEditId(null); setEditVal(""); }}>Cancel</Btn>
+          </div>
+        );
+        return (
+          <div key={r.id} style={{ fontSize: 12, color: "var(--txt2)", marginTop: 4, lineHeight: 1.5, display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ fontWeight: 700, color: "var(--txt)" }}>{r.byName || "someone"}</span>
+              <span style={{ fontSize: 10.5, color: "var(--txt3)" }}> · {fmtStamp(r.at)}{r.editedAt ? " · edited" : ""}</span> — {r.text}
+            </span>
+            {mine && (<>
+              <button onClick={() => { setEditId(r.id); setEditVal(r.text); }} title="Edit this remark"
+                style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", padding: 1, display: "inline-flex" }}><Pencil size={11} /></button>
+              <button onClick={() => patchRemark(r.id, { gone: true, at: r.at })} title="Delete this remark"
+                style={{ background: "none", border: "none", color: "var(--txt3)", cursor: "pointer", padding: 1, display: "inline-flex" }}><Trash2 size={11} /></button>
+            </>)}
+          </div>
+        );
+      })}
       <div style={{ display: "flex", gap: 7, marginTop: 6 }}>
         <input className="inp" style={{ flex: 1, fontSize: 12 }} placeholder="Add a remark — context, a blocker, a decision…"
           value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && post()} />
@@ -6579,7 +6695,7 @@ function TaskDocModal({ t, onClose }) {
     const url = file ? file.url : link.trim();
     if (!url) { setErr("Attach the document or paste its link — the task closes only with it."); return; }
     if (!file && !/^https?:\/\//i.test(url)) { setErr("A link starts with http(s)://"); return; }
-    const name = file ? file.name : (t.docName || "Closure document");
+    const name = file ? file.name : (docParts(t.docName)[0] || "Closure document");
     const at = new Date().toISOString();
     setTasks((ts) => ts.map((x) => (x.id === t.id
       ? { ...x, docFile: { name, url, at, by: me, byName: my?.name || "" }, status: "done", doneAt: at,
@@ -6588,18 +6704,27 @@ function TaskDocModal({ t, onClose }) {
             { by: me, byName: my?.name || "", at, what: "status → Done (closed with its document)" }] }
       : x)));
     if (t.projectId) {
-      const entry = { id: uid(), title: `${t.docName || name} — ${String(t.title || "").slice(0, 48)}`, url,
-        ftype: guessFileType(t.docName || name), by: me, byName: my?.name || "", at, fromTask: t.id };
+      const entry = { id: uid(), title: `${docParts(t.docName)[0] || name} — ${String(t.title || "").slice(0, 48)}`, url,
+        ftype: guessFileType(docParts(t.docName)[0] || name), by: me, byName: my?.name || "", at, fromTask: t.id };
       setProjects((ps) => ps.map((p) => (p.projectId === t.projectId ? { ...p, sops: [...(p.sops || []), entry] } : p)));
     }
     toast(`Closed with "${name}" — it is pinned under SOPs & Files`, "green");
     onClose();
   };
   return (
-    <Modal title="This task closes with a document" sub={`"${t.title}" needs ${t.docName ? `"${t.docName}"` : "its document"} before it can be marked done`} onClose={onClose} width={540}
+    <Modal title="This task closes with a document" sub={`"${t.title}" needs ${docParts(t.docName).length > 1 ? `these ${docParts(t.docName).length} documents` : docParts(t.docName)[0] ? `"${docParts(t.docName)[0]}"` : "its document"} before it can be marked done`} onClose={onClose} width={540}
       footer={<><Btn kind="ghost" onClick={onClose}>Not yet</Btn><Btn kind="green" icon={CheckCircle2} onClick={closeWithDoc}>Attach &amp; close the task</Btn></>}>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <Field label={`The document${t.docName ? ` — ${t.docName}` : ""}`}>
+        {docParts(t.docName).length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {docParts(t.docName).map((d, i) => (
+              <div key={i} style={{ fontSize: 12, color: "var(--txt2)", overflowWrap: "anywhere", lineHeight: 1.5 }}>
+                {i + 1}. {/^https?:\/\//.test(d) ? <a href={d} target="_blank" rel="noreferrer" style={{ color: "var(--acc)", fontFamily: MONO }}>{d}</a> : d}
+              </div>
+            ))}
+          </div>
+        )}
+        <Field label="The signed-off document (one file or link closes the task)">
           <input ref={fRef} type="file" style={{ display: "none" }} onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
           {file ? (
             <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
@@ -12118,6 +12243,29 @@ export default function App() {
   const [accounts, setAccounts] = useState(SEED_ACCOUNTS);
   const [notes, setNotes] = useState([]);
   const [tasks, setTasks] = useState([]);
+  /* UNDO for tasks: every change a person makes through the UI stacks the
+     previous array here; Undo pops one. Boot loads and background merges use
+     the raw setter, so they never pollute the stack — undo only ever takes
+     back something somebody DID. */
+  const taskHist = useRef([]);
+  const [undoN, setUndoN] = useState(0);
+  const setTasksTracked = useCallback((fn) => {
+    setTasks((prev) => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      if (next !== prev) {
+        taskHist.current.push(prev);
+        if (taskHist.current.length > 30) taskHist.current.shift();
+        setUndoN(taskHist.current.length);
+      }
+      return next;
+    });
+  }, []);
+  const undoTasks = useCallback(() => {
+    const prev = taskHist.current.pop();
+    setUndoN(taskHist.current.length);
+    if (prev) setTasks(prev);
+    return !!prev;
+  }, []);
   const [kpiLog, setKpiLog] = useState([]);
   const [workUpdates, setWorkUpdates] = useState([]);
   const [trainings, setTrainings] = useState([]);
@@ -12427,7 +12575,7 @@ export default function App() {
     toast(`${nameLabel || "Resource"} removed — unassigned from all projects`, "amber");
   }, [applyRoster, toast]);
 
-  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin, saveProcessWb };
+  const ctx = { users, me, setMe, view, setView, projects, setProjects, clients, setClients, accounts, setAccounts, notes, setNotes, tasks, setTasks: setTasksTracked, undoTasks, undoN, kpiLog, setKpiLog, workUpdates, setWorkUpdates, trainings, setTrainings, memory, setMemory, syncLog, setSyncLog, assistantLog, setAssistantLog, toast, sheetSync, now, resetAll, addUser, updateUser, removeUser, provisionLogin, saveProcessWb };
   const visGroups = NAV_GROUPS
     // A role-gated item stays HIDDEN until the roster has answered who this
     // is — showing it to an engineer for the first slow seconds is how

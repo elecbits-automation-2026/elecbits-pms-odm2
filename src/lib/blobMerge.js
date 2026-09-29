@@ -38,10 +38,34 @@
 
 const keyOf = (x) => (x && (x.id ?? x.projectId)) || null;
 
+/* Remarks and history are APPEND-ONLY conversations. When two browsers edited
+   the same task in one window, picking one whole copy silently threw away the
+   other person's remark — "comments are not visible to one another". So for
+   tasks the loser's remarks/history are UNIONED into the winner: field edits
+   still go to whoever edited, but nobody's words ever vanish. A deleted
+   remark is a tombstone ({gone:true}), not an absence — an absence would be
+   resurrected by this very union. */
+const unionByKey = (a, b, key) => {
+  const A = Array.isArray(a) ? a : [], B = Array.isArray(b) ? b : [];
+  const seen = new Set(A.map(key));
+  const extra = B.filter((x) => !seen.has(key(x)));
+  if (!extra.length) return A;
+  return [...A, ...extra].sort((x, y) => String(x.at || "").localeCompare(String(y.at || "")));
+};
+export const combineTask = (win, lose) => {
+  const remarks = unionByKey(win.remarks, lose.remarks, (r) => r.id || `${r.at}|${r.by}`);
+  const history = unionByKey(win.history, lose.history, (h) => `${h.at}|${h.by}|${h.what}`);
+  const out = { ...win };
+  if (remarks.length) out.remarks = remarks;
+  if (history.length) out.history = history;
+  return out;
+};
+
 /* Merge one collection. `known` is a Set of ids confirmed on the server.
    Returns { merged, changed } — `changed` is true when the result differs
-   from `local` (so the caller knows to update React state). */
-export function mergeCollection(local, server, known, base) {
+   from `local` (so the caller knows to update React state). `combine`, when
+   given, folds the losing copy into the winning one on a conflict. */
+export function mergeCollection(local, server, known, base, combine) {
   const L = Array.isArray(local) ? local : [];
   const S = Array.isArray(server) ? server : [];
   const k = known instanceof Set ? known : new Set();
@@ -64,8 +88,11 @@ export function mergeCollection(local, server, known, base) {
     const serverJson = JSON.stringify(sItem);
     if (localJson === serverJson) { merged.push(item); continue; }
     // Differs. Did WE change it since the last sync, or did they?
-    if (b.get(id) === localJson) { merged.push(sItem); changed = true; } // untouched here → their edit wins
-    else merged.push(item);                              // we are mid-edit → ours stands
+    const theirs = b.get(id) === localJson;   // untouched here → their edit wins
+    const win = theirs ? sItem : item;
+    const final = combine ? combine(win, theirs ? item : sItem) : win;
+    if (JSON.stringify(final) !== localJson) changed = true;
+    merged.push(final);
   }
   for (const item of S) {
     const id = keyOf(item);
@@ -103,7 +130,8 @@ export function mergeWorkspace(local, serverA, serverB, knownMap, baseMap) {
   const bm = baseMap || {};
 
   const one = (name, serverList) => {
-    const { merged, changed: c } = mergeCollection(local[name], serverList, km[name], bm[name]);
+    const { merged, changed: c } = mergeCollection(local[name], serverList, km[name], bm[name],
+      name === "tasks" ? combineTask : undefined);
     let final = merged;
     if (name === "workUpdates") final = dedupeWorkUpdates(merged);
     if (name === "syncLog") final = merged.slice(0, 60);          // the app caps these,
