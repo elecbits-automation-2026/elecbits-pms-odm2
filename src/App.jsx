@@ -28,7 +28,9 @@ import {
   FileText, Send, Sparkles, ChevronDown, Sun, Moon, Bot, GraduationCap,
   RefreshCw, Zap, Users, FolderPlus, NotebookPen, ListChecks, Gauge,
   Database, Calendar, Loader2, Trash2, Shield, ArrowRight, Pencil, Paperclip, Download, Lightbulb, Award, Eye, EyeOff, Search,
-  Video, Mic, MessagesSquare, Building2, UserPlus, Undo2
+  Video, Mic, MessagesSquare, Building2, UserPlus, Undo2,
+  Bold, Italic, Underline, Strikethrough, AlignLeft, AlignCenter, AlignRight,
+  List, ListOrdered, ListTodo, Link2, Table2
 } from "lucide-react";
 import elecbitsLogo from "./assets/elecbits-logo.jpg";
 import schneiderTracker from "./data/schneider-tracker.json";
@@ -1857,6 +1859,13 @@ html,body,#root{height:100%}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulseDot{50%{opacity:.25}}
+.wu-doc table{border-collapse:collapse;width:100%;margin:8px 0}
+.wu-doc td,.wu-doc th{border:1px solid var(--bdr);padding:5px 9px;min-width:44px}
+.wu-doc a{color:var(--acc);text-decoration:underline;overflow-wrap:anywhere}
+.wu-doc ul,.wu-doc ol{padding-left:24px;margin:4px 0}
+.wu-doc .wu-check{display:flex;gap:8px;align-items:baseline}
+.wu-doc .wu-check input[type=checkbox]{accent-color:var(--acc)}
+.wu-doc input[type=checkbox]:checked+span,.wu-doc .wu-check input[type=checkbox]:checked~span{text-decoration:line-through;color:var(--txt3)}
 .fade{animation:fadeUp .25s ease both}
 .spin{animation:spin 1s linear infinite}
 .inp{width:100%;background:var(--s1);border:1px solid var(--bdr);border-radius:8px;padding:9px 12px;outline:none;transition:border-color .15s,box-shadow .15s}
@@ -2413,10 +2422,11 @@ function ProjectsModule() {
      projects — the ones they are staffed on, created, or carry tasks for.
      Being assigned work on a project and unable to open its plan was how
      people ended up working blind. */
-  /* PMs run projects across the board — they see every project (and, per the
-     one edit rule, may act on any task in them). Engineers still see only
-     their own; clients only their company's. */
-  const seesAll = ["superadmin", "dept_head", "pm"].includes(my?.role);
+  /* Privacy on the project list: people see ONLY their own projects — the
+     ones they are staffed on, created, or carry tasks for. Admins see all;
+     clients only their company's. (PMs keep the right to edit any task on
+     any project they are part of — but they don't browse other teams'.) */
+  const seesAll = ["superadmin", "dept_head"].includes(my?.role);
   const myProjIds = useMemo(() => new Set(tasks.filter((t) => t.assigneeId === me && t.projectId).map((t) => t.projectId)), [tasks, me]);
   /* A client sees their own company's projects: the ones they are named on,
      and any project belonging to their organisation. Never anything else —
@@ -8130,7 +8140,14 @@ function ResourceModal({ mode, user, onClose }) {
    Side-to-side tab menu (KPI · Work update sheet · Training) in the
    Eb Sales OS style, daily calendar tracking on both KPI and work updates,
    and a Google-Docs-like open-ended page for the daily work update.     */
-const wuDays = (n = 7) => [...Array(n)].map((_, i) => { const dd = new Date(Date.now() - (n - 1 - i) * 86400000); return { date: dd.toISOString().slice(0, 10), dow: dd.getDay(), label: dd.toLocaleDateString("en-IN", { weekday: "short" }), dnum: dd.getDate() }; });
+/* The 7-day strip in IST — it used to be UTC while the page's "today" was
+   IST, so around midnight the strip and the sheet disagreed about which day
+   was editable, and an entry could land under the wrong date. */
+const wuDays = (n = 7) => [...Array(n)].map((_, i) => {
+  const date = IST_DATE.format(new Date(Date.now() - (n - 1 - i) * 86400000));
+  const noon = new Date(`${date}T12:00:00`);
+  return { date, dow: noon.getDay(), label: noon.toLocaleDateString("en-IN", { weekday: "short" }), dnum: noon.getDate() };
+});
 const noteOf = (w) => w?.note ?? [w?.learnings, w?.wrong, w?.better].filter(Boolean).join("\n\n");
 
 /* Contribution, on the person's own Performance page: what they suggested,
@@ -8401,6 +8418,106 @@ function DevKpiBlock({ devs, date, setDate, tasks, last7 }) {
   );
 }
 
+/* ─── A SMALL RICH-TEXT PAD — Google Docs with the features that matter ─────
+   Bold/italic/underline/strikethrough, sizes, alignment, bullets and
+   numbers, a task checklist, a table, and links (button or straight paste).
+   contentEditable underneath: no editor dependency, and the HTML it emits is
+   scrubbed of scripts and handlers before it is stored or rendered. */
+const sanitizeHtml = (h) => String(h || "")
+  .replace(/<script[\s\S]*?<\/script>/gi, "")
+  .replace(/<(iframe|object|embed)[\s\S]*?>/gi, "")
+  .replace(/\son\w+\s*=\s*"[^"]*"/gi, "").replace(/\son\w+\s*=\s*'[^']*'/gi, "")
+  .replace(/javascript:/gi, "");
+const escHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const plainToHtml = (s) => escHtml(s).split("\n").map((l) => (l ? `<div>${l}</div>` : "<div><br></div>")).join("");
+function RichPad({ initial, onChange, placeholder, minHeight = 360 }) {
+  const ref = useRef(null);
+  const savedSel = useRef(null);
+  const [empty, setEmpty] = useState(!String(initial || "").replace(/<[^>]*>/g, "").trim());
+  const [linkOn, setLinkOn] = useState(false);
+  const [linkVal, setLinkVal] = useState("");
+  useEffect(() => { if (ref.current) { ref.current.innerHTML = sanitizeHtml(initial || ""); } }, []);  // parent remounts by key
+  const emit = () => {
+    const el = ref.current; if (!el) return;
+    setEmpty(!(el.innerText || "").trim());
+    onChange({ html: sanitizeHtml(el.innerHTML), text: el.innerText || "" });
+  };
+  const cmd = (c, v) => { ref.current?.focus(); try { document.execCommand(c, false, v); } catch { /* very old browser */ } emit(); };
+  const keepSel = () => { const s = window.getSelection(); savedSel.current = s && s.rangeCount ? s.getRangeAt(0).cloneRange() : null; };
+  const addLink = () => {
+    const url = linkVal.trim();
+    if (!/^https?:\/\//i.test(url)) return;
+    ref.current?.focus();
+    if (savedSel.current) { const s = window.getSelection(); s.removeAllRanges(); s.addRange(savedSel.current); }
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) document.execCommand("createLink", false, url);
+    else document.execCommand("insertHTML", false, `<a href="${escHtml(url)}" target="_blank" rel="noreferrer">${escHtml(url)}</a>&nbsp;`);
+    setLinkVal(""); setLinkOn(false); emit();
+  };
+  const T = ({ Ic, title, on }) => (
+    <button type="button" title={title} onMouseDown={(e) => e.preventDefault()} onClick={on}
+      style={{ border: "1px solid var(--bdr)", background: "var(--s2)", color: "var(--txt)", borderRadius: 6, width: 27, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+      <Ic size={13} />
+    </button>
+  );
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid var(--bdr2)" }}>
+        <T Ic={Bold} title="Bold (Ctrl+B)" on={() => cmd("bold")} />
+        <T Ic={Italic} title="Italic (Ctrl+I)" on={() => cmd("italic")} />
+        <T Ic={Underline} title="Underline (Ctrl+U)" on={() => cmd("underline")} />
+        <T Ic={Strikethrough} title="Strikethrough" on={() => cmd("strikeThrough")} />
+        <select className="inp" title="Text size" defaultValue="" style={{ width: 92, height: 26, padding: "2px 6px", fontSize: 11.5 }}
+          onChange={(e) => { const v = e.target.value; e.target.value = ""; if (v) cmd("fontSize", v); }}>
+          <option value="" disabled>Size…</option>
+          <option value="2">Small</option><option value="3">Normal</option>
+          <option value="5">Large</option><option value="6">Heading</option>
+        </select>
+        <span style={{ width: 6 }} />
+        <T Ic={AlignLeft} title="Align left" on={() => cmd("justifyLeft")} />
+        <T Ic={AlignCenter} title="Centre" on={() => cmd("justifyCenter")} />
+        <T Ic={AlignRight} title="Align right" on={() => cmd("justifyRight")} />
+        <span style={{ width: 6 }} />
+        <T Ic={List} title="Bullet list" on={() => cmd("insertUnorderedList")} />
+        <T Ic={ListOrdered} title="Numbered list" on={() => cmd("insertOrderedList")} />
+        <T Ic={ListTodo} title="Checklist — a tickable task line" on={() => cmd("insertHTML", '<div class="wu-check"><input type="checkbox"><span>&nbsp;</span></div>')} />
+        <T Ic={Table2} title="Insert a 3×3 table (add text straight into the cells)" on={() => cmd("insertHTML",
+          `<table class="wu-table"><tbody>${Array.from({ length: 3 }).map(() => `<tr>${Array.from({ length: 3 }).map(() => "<td>&nbsp;</td>").join("")}</tr>`).join("")}</tbody></table><div><br></div>`)} />
+        <span style={{ width: 6 }} />
+        <T Ic={Link2} title="Insert a link — or just paste a URL straight into the page" on={() => { keepSel(); setLinkOn(!linkOn); }} />
+        {linkOn && (
+          <span style={{ display: "inline-flex", gap: 5 }}>
+            <input className="inp" autoFocus style={{ width: 240, height: 26, padding: "2px 8px", fontSize: 12, fontFamily: MONO }} placeholder="https://…"
+              value={linkVal} onChange={(e) => setLinkVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLink()} />
+            <Btn small kind="ghost" onClick={addLink}>Add link</Btn>
+          </span>
+        )}
+      </div>
+      <div style={{ position: "relative" }}>
+        {empty && <div style={{ position: "absolute", inset: 0, pointerEvents: "none", color: "var(--txt3)", whiteSpace: "pre-wrap", fontSize: 15, lineHeight: 1.85 }}>{placeholder}</div>}
+        <div ref={ref} className="wu-doc" contentEditable suppressContentEditableWarning
+          onInput={emit}
+          onClick={(e) => {
+            /* a ticked checkbox must SERIALISE as ticked, or the tick dies on save */
+            if (e.target?.type === "checkbox") {
+              if (e.target.checked) e.target.setAttribute("checked", ""); else e.target.removeAttribute("checked");
+              emit();
+            }
+          }}
+          onPaste={(e) => {
+            const txt = (e.clipboardData?.getData("text/plain") || "").trim();
+            if (/^https?:\/\/\S+$/.test(txt)) {
+              e.preventDefault();
+              document.execCommand("insertHTML", false, `<a href="${escHtml(txt)}" target="_blank" rel="noreferrer">${escHtml(txt)}</a>&nbsp;`);
+              emit();
+            }
+          }}
+          style={{ minHeight, outline: "none", fontSize: 15, lineHeight: 1.85, color: "var(--txt)" }} />
+      </div>
+    </div>
+  );
+}
+
 /* ── Work update sheet — Eb Sales OS discipline strip + Google-Docs page ── */
 function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
   const { users, me, workUpdates, setWorkUpdates, memory, toast } = useCtx();
@@ -8411,10 +8528,16 @@ function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
   const entry = entryFor(viewUserId, date);
   const isSelf = viewUserId === me;
   const editable = isSelf && date === today;
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState("");         // plain text — word count + the KPI scorer
+  const [noteHtml, setNoteHtml] = useState(""); // what the pad actually holds
   const [wuBusy, setWuBusy] = useState(false);
-  const taRef = useRef(null);
-  useEffect(() => { const e = entryFor(viewUserId, date); setNote(e ? noteOf(e) : ""); requestAnimationFrame(() => { if (taRef.current) { taRef.current.style.height = "auto"; taRef.current.style.height = Math.max(360, taRef.current.scrollHeight) + "px"; } }); }, [viewUserId, date]); // eslint-disable-line
+  useEffect(() => {
+    const e = entryFor(viewUserId, date);
+    setNote(e ? noteOf(e) : "");
+    setNoteHtml(e ? (e.html || plainToHtml(noteOf(e))) : "");
+    // entry?.id matters: after a reload the stored entry arrives a beat after
+    // this tab mounts — the pad must pick it up, not sit blank over it
+  }, [viewUserId, date, entry?.id]); // eslint-disable-line
   const cellState = (userId, d) => { if (d.dow === 0) return "off"; if (entryFor(userId, d.date)) return "ok"; if (d.date === today) return "due"; if (d.date > today) return "future"; return "miss"; };
   const CELL_BG = { ok: "color-mix(in srgb, var(--green) 14%, transparent)", miss: "color-mix(in srgb, var(--red) 12%, transparent)", due: "color-mix(in srgb, var(--amber) 14%, transparent)", off: "var(--s2)", future: "var(--s2)" };
   const CellIcon = ({ s }) => s === "ok" ? <CheckCircle2 size={13} style={{ color: "var(--green)" }} /> : s === "miss" ? <X size={13} style={{ color: "var(--red)" }} /> : s === "due" ? <Clock size={13} style={{ color: "var(--amber)" }} /> : <span style={{ fontSize: 10, color: "var(--txt3)" }}>·</span>;
@@ -8423,15 +8546,25 @@ function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
   const submitWU = async () => {
     if (!note.trim()) return;
     setWuBusy(true);
+    /* SAVE FIRST, SCORE AFTER. The old order waited for the AI before writing
+       anything — an AI call that hung, or a tab closed during "Scoring…",
+       lost the whole entry (that is exactly how a day's update vanished).
+       Now the text is in the workspace within a heartbeat of the click; the
+       score lands on it when the AI answers, or never, and either way the
+       words are safe. */
+    const ex = workUpdates.find((w) => w.userId === me && w.date === date);
+    const entryId = ex ? ex.id : uid();
+    setWorkUpdates((x) => {
+      const cur = x.find((w) => w.id === entryId);
+      const e = { ...(cur || {}), id: entryId, userId: me, date, note, html: noteHtml, at: new Date().toISOString() };
+      return cur ? x.map((w) => (w.id === entryId ? e : w)) : [e, ...x];
+    });
+    toast("Saved — the entry is on the record. Scoring it against the KPI…", "acc");
     let scored = { score: null, feedback: "AI unreachable — stored without a score; resubmit later to score it.", kpiHits: [] };
     try { scored = await claude(alignPrompt({ note }, memory, kpiDefsFor(users.find((u) => u.id === me)))); } catch (e) { }
-    setWorkUpdates((x) => {
-      const ex = x.find((w) => w.userId === me && w.date === date);
-      const e = { id: ex ? ex.id : uid(), userId: me, date, note, ...scored, at: new Date().toISOString() };
-      return ex ? x.map((w) => (w.id === ex.id ? e : w)) : [e, ...x];
-    });
+    setWorkUpdates((x) => x.map((w) => (w.id === entryId ? { ...w, ...scored, at: new Date().toISOString() } : w)));
     setWuBusy(false);
-    toast(scored.score !== null ? `Aligned ${scored.score}/100 with the KPI` : "Saved — unscored for now", scored.score !== null ? "green" : "amber");
+    toast(scored.score !== null ? `Aligned ${scored.score}/100 with the KPI` : "Saved — unscored for now; resubmit later to score it", scored.score !== null ? "green" : "amber");
   };
 
   const team = isMgr ? users.filter(isRealPerson) : [];
@@ -8463,11 +8596,13 @@ function WorklogTab({ date, setDate, viewUserId, setViewUserId, isMgr }) {
           </div>
           <div style={{ padding: "34px 48px 26px" }}>
             {editable ? (
-              <textarea ref={taRef} value={note} onChange={(e) => { setNote(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.max(360, e.target.scrollHeight) + "px"; }}
-                placeholder={"Open-ended — write the day like a doc.\n\nWhat I learned about planning today…\nWhich decisions went wrong, and why…\nWhat could have been better…\n\nThis is the mistake & learning vault — the more honest it is, the more it teaches."}
-                style={{ width: "100%", minHeight: 360, border: "none", outline: "none", background: "transparent", resize: "none", fontSize: 15, lineHeight: 1.85, color: "var(--txt)", fontFamily: "inherit" }} />
+              <RichPad key={`${viewUserId}|${date}|${entry?.id || "new"}`} initial={entry ? (entry.html || plainToHtml(noteOf(entry))) : ""}
+                onChange={({ html, text }) => { setNoteHtml(html); setNote(text); }}
+                placeholder={"Open-ended — write the day like a doc.\n\nWhat I learned about planning today…\nWhich decisions went wrong, and why…\nWhat could have been better…\n\nThis is the mistake & learning vault — the more honest it is, the more it teaches."} />
             ) : entry ? (
-              <div style={{ whiteSpace: "pre-wrap", fontSize: 15, lineHeight: 1.85, minHeight: 220 }}>{noteOf(entry)}</div>
+              entry.html
+                ? <div className="wu-doc" style={{ fontSize: 15, lineHeight: 1.85, minHeight: 220 }} dangerouslySetInnerHTML={{ __html: sanitizeHtml(entry.html) }} />
+                : <div style={{ whiteSpace: "pre-wrap", fontSize: 15, lineHeight: 1.85, minHeight: 220 }}>{noteOf(entry)}</div>
             ) : (
               <div style={{ minHeight: 220, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 9, color: "var(--txt2)" }}>
                 {date > today ? <><Calendar size={22} style={{ opacity: 0.5 }} /><div style={{ fontSize: 13 }}>This day hasn't happened yet.</div></>
