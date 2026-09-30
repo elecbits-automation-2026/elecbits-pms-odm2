@@ -139,6 +139,11 @@ const ORG_SIZES = [
   { label: "Government Organisation", code: "GO" },
 ];
 const TEAM_SLOTS = ["PM (Project Manager)", "Senior PM (Technical Manager)", "Mfg PM (Manufacturing)", "Sr. Hardware Engineer", "Jr. Hardware Engineer", "Sr. Firmware Engineer", "Jr. Firmware Engineer", "Industrial Designer", "Tester / QA", "Supply Chain", "Solution Architect"];
+/* Slots a project can carry MORE than one of: pressing "+ another" adds a
+   numbered copy ("Jr. Hardware Engineer #2"). The numbered name still matches
+   every slot rule (rolesForSlot is regex-based, PM checks use startsWith). */
+const DOUBLABLE_SLOTS = ["Jr. Hardware Engineer", "Jr. Firmware Engineer"];
+const nextSlotCopy = (base, existing) => { let n = 2; while (existing.includes(`${base} #${n}`)) n++; return `${base} #${n}`; };
 
 /* ─── THE ID GRAMMAR (EbODM spec 04-09-26) ────────────────────────────────
    Design + manufacturing project IDs: Eb-21-EL-287-01-1809 — Elecbits, year,
@@ -2191,6 +2196,16 @@ function ProjectWizard({ onClose }) {
             </div>
           ))}
         </div>
+        <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+          {DOUBLABLE_SLOTS.map((base) => (
+            <Btn key={base} small kind="ghost" icon={UserPlus} title={`One more ${base} seat on this project`}
+              onClick={() => setRows((rs) => {
+                const slot = nextSlotCopy(base, rs.map((r) => r.slot));
+                const at = rs.reduce((k, r, i) => (r.slot === base || r.slot.startsWith(`${base} #`) ? i + 1 : k), rs.length);
+                return [...rs.slice(0, at), { slot, userId: "" }, ...rs.slice(at)];
+              })}>+ another {base}</Btn>
+          ))}
+        </div>
         {!pmOk && <div style={{ color: "var(--amber)", fontSize: 11.5, marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}><AlertTriangle size={13} /> A PM must be assigned before continuing.</div>}
         <div style={{ marginTop: 11 }}><Btn small disabled={!pmOk} onClick={() => { d.team = rows.filter((r) => r.userId); freeze(m.id, d.team.map((t) => users.find((u) => u.id === t.userId)?.name).join(", ")); go("lldc"); }}>Confirm team</Btn></div>
       </div>
@@ -2741,6 +2756,16 @@ function AddExistingProject({ onClose }) {
                   <SlotOptions slot={r.slot} users={users} />
                 </select>
               </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+            {DOUBLABLE_SLOTS.map((base) => (
+              <Btn key={base} small kind="ghost" icon={UserPlus} title={`One more ${base} seat on this project`}
+                onClick={() => setRows((rs) => {
+                  const slot = nextSlotCopy(base, rs.map((x) => x.slot));
+                  const at = rs.reduce((k, x, j) => (x.slot === base || x.slot.startsWith(`${base} #`) ? j + 1 : k), rs.length);
+                  return [...rs.slice(0, at), { slot, userId: "" }, ...rs.slice(at)];
+                })}>+ another {base}</Btn>
             ))}
           </div>
         </Field>
@@ -3493,6 +3518,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
   const [showLLD, setShowLLD] = useState(false);
   const [editTeam, setEditTeam] = useState(false);
   const [teamDraft, setTeamDraft] = useState(p.team || []);
+  const [extraSlots, setExtraSlots] = useState([]);   // numbered second seats ("Jr. Hardware Engineer #2")
   const [editClients, setEditClients] = useState(false);
   const [clientDraft, setClientDraft] = useState(p.clientTeam || []);
   const [askClient, setAskClient] = useState(null);
@@ -4374,7 +4400,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
           </Section>
 
           <Section>
-            <CardLabel right={isPM && <button onClick={() => { setTeamDraft(p.team || []); setEditTeam(!editTeam); }} style={{ background: "none", border: "none", color: editTeam ? "var(--txt2)" : "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editTeam ? "Cancel" : "Edit team"}</button>}>Team roster</CardLabel>
+            <CardLabel right={isPM && <button onClick={() => { setTeamDraft(p.team || []); setExtraSlots((p.team || []).map((t) => t.slot).filter((s) => / #\d+$/.test(s))); setEditTeam(!editTeam); }} style={{ background: "none", border: "none", color: editTeam ? "var(--txt2)" : "var(--acc)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{editTeam ? "Cancel" : "Edit team"}</button>}>Team roster</CardLabel>
             {editTeam ? (
               <div>
                 {/* the WhatsApp path: paste "Slot<tab>Person" lines (or
@@ -4388,7 +4414,7 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                   </Btn>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                  {TEAM_SLOTS.map((slot) => (
+                  {TEAM_SLOTS.flatMap((s) => [s, ...extraSlots.filter((x) => x.startsWith(`${s} #`)).sort()]).map((slot) => (
                     <div key={slot} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontSize: 11, width: 118, color: "var(--txt2)", fontWeight: 600 }}>{slot}{slot.startsWith("PM") && <span style={{ color: "var(--red)" }}> *</span>}</span>
                       <select className="inp" style={{ flex: 1, padding: "6px 8px" }} value={slotUser(slot)} onChange={(e) => setSlot(slot, e.target.value)}>
@@ -4396,6 +4422,12 @@ function ProjectDetail({ project: p, onBack, setStatus, isAdmin }) {
                         {users.filter(isRealPerson).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                       </select>
                     </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 7, marginTop: 8, flexWrap: "wrap" }}>
+                  {DOUBLABLE_SLOTS.map((base) => (
+                    <Btn key={base} small kind="ghost" icon={UserPlus} title={`One more ${base} seat on this project`}
+                      onClick={() => setExtraSlots((xs) => [...xs, nextSlotCopy(base, [...TEAM_SLOTS, ...xs])])}>+ another {base}</Btn>
                   ))}
                 </div>
                 {!teamDraft.some((t) => t.slot.startsWith("PM") && t.userId) && <div style={{ color: "var(--amber)", fontSize: 11, marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}><AlertTriangle size={12} /> A PM must be assigned.</div>}
